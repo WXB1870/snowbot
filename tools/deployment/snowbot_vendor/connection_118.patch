@@ -1,0 +1,800 @@
+--- a/ctl_msgs/msg/PositionSessionMeta.msg
++++ b/ctl_msgs/msg/PositionSessionMeta.msg
+@@ -6,3 +6,7 @@
+ int64 source_stamp_ns
+ int64 expires_at_ns
+ uint8 operation
++
++# Filled by upper after observing the current middle baseline.
++uint64 middle_instance_id
++uint64 feedback_baseline_epoch
+--- a/ctl_msgs/msg/PositionSessionState.msg
++++ b/ctl_msgs/msg/PositionSessionState.msg
+@@ -10,3 +10,10 @@
+ string stop_policy
+ # Software state never acknowledges physical stopping or brake/load support.
+ bool physical_stop_confirmed
++
++# Software connection generation and measured readiness.
++uint64 instance_id
++uint64 feedback_baseline_epoch
++bool feedback_valid
++uint64 pdo_sample
++float64 measurement_stamp
+--- a/dual_arm_control/include/dual_arm_control/msgPublish.h
++++ b/dual_arm_control/include/dual_arm_control/msgPublish.h
+@@ -1,3 +1,4 @@
++#include "bindu_connection_ros.h"
+ #include "position_session_contract.h"
+ #include "snowbot_ctl_msgs/msg/position_observation.hpp"
+ #include "snowbot_ctl_msgs/msg/position_session_state.hpp"
+@@ -333,6 +334,15 @@
+         void run();
+ 
+     private:
++
++        std::unique_ptr<snowbot_connection::Reporter> connection_state_;
++        rclcpp::Subscription<snowbot_ctl_msgs::msg::PositionSessionState>::SharedPtr connection_peer_sub_;
++        uint64_t connection_boot_=0, connection_peer_instance_=0, connection_peer_epoch_=0;
++        double connection_peer_received_=0;
++        std::string connection_peer_reason_="peer_state_not_received";
++        void connection_observe(const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg);
++        void connection_peer(const snowbot_ctl_msgs::msg::PositionSessionState::SharedPtr msg);
++        void connection_refresh(bool publish=true);
+         position_session::Gate position_gate_;
+         position_session::Tracker position_feedback_;
+         snowbot_ctl_msgs::msg::PositionSessionMeta position_meta_;
+@@ -396,6 +406,7 @@
+ 
+         //第一轮的检查
+         bool checkTemp = true;
++        bool native_feedback_seen_=false, legacy_active_=false;
+ 
+         //迭代过程标志量
+         bool ifFirstTemp = true;        //判断是否为第一轮控制
+@@ -409,10 +420,10 @@
+ 
+         //------------------------------
+         //求解器操作界面
+-        ArmCtlOptInterface solverInterface;
++        std::unique_ptr<ArmCtlOptInterface> solverInterface;
+ 
+         //末端位值画图的曲线函数
+-        EndPos_plot* endPosTrajPlot;
++        std::unique_ptr<EndPos_plot> endPosTrajPlot;
+ 
+         //------------------------------
+         //回调函数
+--- a/dual_arm_control/src/controller/ik_solver_wrapper.cpp
++++ b/dual_arm_control/src/controller/ik_solver_wrapper.cpp
+@@ -3,6 +3,7 @@
+ #include <sstream>
+ #include <filesystem>
+ #include <cstdlib>
++#include <stdexcept>
+ #include <ament_index_cpp/get_package_share_directory.hpp>
+ 
+ std::string get_packages_path(const std::string packages, const std::string folder) {
+@@ -14,6 +15,7 @@
+     } catch (...) {
+         // ignore and fallback
+     }
++    throw std::runtime_error("model_package_directory_missing: "+packages+"/"+folder);
+ }
+ 
+ IKSolverWrapper::IKSolverWrapper() 
+--- a/dual_arm_control/src/dual_arm_control/msgPublish.cpp
++++ b/dual_arm_control/src/dual_arm_control/msgPublish.cpp
+@@ -142,98 +142,7 @@
+     has_received_command_(false),
+     has_received_upperMonitor_command_(false)
+ {
+-    //加载urdf文件
+-    try {
+-        std::string urdf_dir = get_packages_path("dual_arm", "urdf");
+-        std::filesystem::path p(urdf_dir);
+-        path_options[0] = (p / "left_arm.urdf").string();
+-        path_options[1] = (p / "right_arm.urdf").string();
+-        path_options[2] = (p / "snowbot.urdf").string();
+-        RCLCPP_INFO(this->get_logger(), "URDF directory found: %s", urdf_dir.c_str());
+-    } catch (const std::exception& e) {
+-        RCLCPP_ERROR(this->get_logger(), "Error finding URDF directory: %s", e.what());
+-        return;
+-    }
+-
+-    std::string urdf_path = path_options[URDFCHOOSE];
+-    std::ifstream urdf_file(urdf_path);
+-
+-
+-    //读取urdf文件内容
+-    if (!urdf_file.is_open()) {
+-        RCLCPP_ERROR(this->get_logger(), "Failed to open URDF file: %s", urdf_path.c_str());
+-        //rclcpp::shutdown();
+-        return;
+-    }
+-
+-    robot_description_ = std::string((std::istreambuf_iterator<char>(urdf_file)), std::istreambuf_iterator<char>());
+-    if (robot_description_.empty()) {
+-        RCLCPP_ERROR(this->get_logger(), "URDF file is empty!");
+-        //rclcpp::shutdown();
+-        return;
+-    }
+-
+-    //加载机器人模型
+-    robot_model_ = std::make_shared<urdf::Model>();
+-    if (!robot_model_->initString(robot_description_)) {
+-        RCLCPP_ERROR(this->get_logger(), "Failed to parse URDF model");
+-        //rclcpp::shutdown();
+-        return;
+-    }
+-
+-    //初始化KDL树
+-    if (!kdl_parser::treeFromString(robot_description_, kdl_tree_)) {
+-        RCLCPP_ERROR(this->get_logger(), "Failed to construct KDL tree");
+-        return;
+-    }
+-
+-    //提取KDL链 (到link_7，不含夹爪joint_8)
+-    if (!kdl_tree_.getChain(base_link[0], "arm_l_link_7", kdl_lArm_chain_)) {
+-        RCLCPP_ERROR(this->get_logger(), "Failed to extract Left Arm KDL chain");
+-        return;
+-    }
+-    if(!kdl_tree_.getChain(base_link[1], "arm_r_link_7", kdl_rArm_chain_)) {
+-        RCLCPP_ERROR(this->get_logger(), "Failed to extract Right Arm KDL chain");
+-        return;
+-    }
+-
+-    // 订阅 /joint_states 缓存 body/head/gripper 角度 (由各自控制节点发布)
+-    js_cache_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+-        "/joint_states", 10,
+-        std::bind(&ArmCtlNode::js_cache_callback, this, std::placeholders::_1));
+-
+-    // 初始化 RobotStatePublisher
+-    rclcpp::NodeOptions options;
+-    options.parameter_overrides({
+-        {"robot_description", robot_description_},
+-        {"publish_frequency", 1000.0}  // 与循环频率匹配
+-    });
+-    robot_state_publisher_ = std::make_shared<robot_state_publisher::RobotStatePublisher>(options);
+-
+-
+-    // 初始化TF广播器
+-    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+-
+-    // 加载发布者与服务：joint state publisher
+-    joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
+-    // 服务：允许外部修改关节角度
+-    set_joint_service_ = this->create_service<std_srvs::srv::SetBool>(
+-        "set_joint_angles",
+-        std::bind(&ArmCtlNode::set_joint_angles, this, std::placeholders::_1, std::placeholders::_2));
+-
+-    //初始化发布与接受的消息类型
+-
+-    position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1,std::bind(&ArmCtlNode::position_callback,this,std::placeholders::_1));
+-    position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1);
+-    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS(),[this](const auto msg){position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());});
+-    position_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1);
+-    position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+-        const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="middle";m.control_source="position";
+-        m.startup_complete=!ifInitTemp && !checkTemp;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+-        m.state=!m.selected?"idle":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
+-        m.reason=position_rejection_;m.stop_policy="servo_owned";m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+-    });
++    connection_state_=std::make_unique<snowbot_connection::Reporter>(*this,"middle","/servo_node",false);
+     mCtlData_pub = this->create_publisher<snowbot_ctl_msgs::msg::CtlInformation>(
+         "ctl_data_pub",
+         10
+@@ -259,22 +168,16 @@
+         10
+     );
+ 
+-    //初始化画图代码
+-    endPosTrajPlot = new EndPos_plot(this);
+-
+-    //初始化机器人配置代码
+-    yaml_path_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/zeropos.yaml";
+-    yaml_path_desc_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/desc_zeropos.yaml";
+-    yaml_path_initialPD = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/initialPD.yaml";
+-    std::cout << " ===== 初始化关节层零位配置 ===== " << std::endl;
+-    loadZeroPosFromYaml(yaml_path_zeroPos);
+-    std::cout << " ===== 初始化笛卡尔空间零位配置 ===== " << std::endl;
+-    loadDescZeroPosFromYaml(yaml_path_desc_zeroPos);
+-    std::cout << " ===== 初始化PD参数配置 ===== " << std::endl;
+-    loadInitialPDFromYaml(yaml_path_initialPD);
+-
+-}
+-
++    position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1,std::bind(&ArmCtlNode::position_callback,this,std::placeholders::_1));
++    position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1);
++    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS(),std::bind(&ArmCtlNode::connection_observe,this,std::placeholders::_1));
++    position_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1);
++    connection_peer_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1,std::bind(&ArmCtlNode::connection_peer,this,std::placeholders::_1));
++    position_state_timer_=create_wall_timer(std::chrono::milliseconds(20),[this]{
++        connection_refresh();
++        if(connection_state_->connection.initialized() && native_feedback_seen_) midMonitor_msg_publish();
++    });
++}
+ 
+ //------------------------------
+ //控制参量发送模块
+@@ -339,6 +242,7 @@
+         tempCtlData_pub.int_reserve[i] = 0;
+     }
+     if(position_gate_.selected()){
++        if(!connection_state_->connection.executing(this->now().seconds(),snowbot_connection::steady_now())) return;
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+         if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
+             snowbot_ctl_msgs::msg::PositionSessionServo packet;packet.meta=position_meta_;packet.command=tempCtlData_pub;packet.frame_sequence=++position_frame_;
+@@ -454,6 +358,7 @@
+ // 发送关节角度到RViz
+ // 使用KDL计算正向运动学并发布TF
+ void ArmCtlNode::js_cache_callback(const sensor_msgs::msg::JointState::SharedPtr msg) {
++    if(!connection_state_->connection.initialized()) return;
+     std::lock_guard<std::mutex> lock(js_cache_mutex_);
+     for (size_t i = 0; i < msg->name.size() && i < msg->position.size(); i++) {
+         if (msg->name[i] == "body_joint_1")   cached_body_j1_ = msg->position[i];
+@@ -642,7 +547,7 @@
+     rArm_stPos = vec_to_JntArray(rArm_stPos_get);
+ 
+     //求解器初始化
+-    solverInterface.init(
++    solverInterface->init(
+         lArm_stPos, rArm_stPos,
+         lArm_LimMsg_get, rArm_LimMsg_get,
+         modCtlMsg_get,
+@@ -671,7 +576,7 @@
+     rArm_velRet_Jnt = vec_to_JntArray(rArm_spd_fdback);
+ 
+     //进行一轮计算
+-    solverInterface.Traj_cal(
++    solverInterface->Traj_cal(
+         ifUpdateLim_get,
+         allArm_LimMsg_get,
+ 
+@@ -753,7 +658,7 @@
+     rArm_velRet_Jnt = vec_to_JntArray(rArm_spd_fdback);
+ 
+     // 进行一轮计算
+-    solverInterface.Traj_cal(
++    solverInterface->Traj_cal(
+         false,
+         allArm_LimMsg_get,
+ 
+@@ -836,7 +741,7 @@
+     rArm_velRet = vec_to_JntArray(rArm_spd_fdback);
+ 
+     std::vector<outpWrap> mRes;
+-    mRes = solverInterface.Traj_temp_outp(
++    mRes = solverInterface->Traj_temp_outp(
+         lArm_posRet, rArm_posRet,
+         lArm_velRet, rArm_velRet,
+         lArm_iq_fdback, rArm_iq_fdback
+@@ -978,17 +883,111 @@
+     //用户交互
+     std::cout << "开始执行中层节点封装程序" << std::endl;
+ 
+-    //初始化全局变量
+-    rosloop_var_init();
+-
+-    //初始化python解释器：
+-    PyGILState_STATE gstate = PyGILState_Ensure();
+-
++    snowbot_connection::initialize(*this, *connection_state_, [this]() {
++        rosloop_var_init();
++    //加载urdf文件
++    try {
++        std::string urdf_dir = get_packages_path("dual_arm", "urdf");
++        std::filesystem::path p(urdf_dir);
++        path_options[0] = (p / "left_arm.urdf").string();
++        path_options[1] = (p / "right_arm.urdf").string();
++        path_options[2] = (p / "snowbot.urdf").string();
++        RCLCPP_INFO(this->get_logger(), "URDF directory found: %s", urdf_dir.c_str());
++    } catch (const std::exception& e) {
++        RCLCPP_ERROR(this->get_logger(), "Error finding URDF directory: %s", e.what());
++        throw std::runtime_error(std::string("model_package_missing: ")+e.what());
++    }
++
++    std::string urdf_path = declare_parameter<std::string>("model_path", path_options[URDFCHOOSE]);
++    std::ifstream urdf_file(urdf_path);
++
++
++    //读取urdf文件内容
++    if (!urdf_file.is_open()) {
++        RCLCPP_ERROR(this->get_logger(), "Failed to open URDF file: %s", urdf_path.c_str());
++        //rclcpp::shutdown();
++        throw std::runtime_error("model_initialization_failed: "+urdf_path);
++    }
++
++    robot_description_ = std::string((std::istreambuf_iterator<char>(urdf_file)), std::istreambuf_iterator<char>());
++    if (robot_description_.empty()) {
++        RCLCPP_ERROR(this->get_logger(), "URDF file is empty!");
++        //rclcpp::shutdown();
++        throw std::runtime_error("model_initialization_failed: "+urdf_path);
++    }
++
++    //加载机器人模型
++    robot_model_ = std::make_shared<urdf::Model>();
++    if (!robot_model_->initString(robot_description_)) {
++        RCLCPP_ERROR(this->get_logger(), "Failed to parse URDF model");
++        //rclcpp::shutdown();
++        throw std::runtime_error("model_initialization_failed: "+urdf_path);
++    }
++
++    //初始化KDL树
++    if (!kdl_parser::treeFromString(robot_description_, kdl_tree_)) {
++        RCLCPP_ERROR(this->get_logger(), "Failed to construct KDL tree");
++        throw std::runtime_error("model_initialization_failed: "+urdf_path);
++    }
++
++    //提取KDL链 (到link_7，不含夹爪joint_8)
++    if (!kdl_tree_.getChain(base_link[0], "arm_l_link_7", kdl_lArm_chain_)) {
++        RCLCPP_ERROR(this->get_logger(), "Failed to extract Left Arm KDL chain");
++        throw std::runtime_error("model_initialization_failed: "+urdf_path);
++    }
++    if(!kdl_tree_.getChain(base_link[1], "arm_r_link_7", kdl_rArm_chain_)) {
++        RCLCPP_ERROR(this->get_logger(), "Failed to extract Right Arm KDL chain");
++        throw std::runtime_error("model_initialization_failed: "+urdf_path);
++    }
++
++    // 订阅 /joint_states 缓存 body/head/gripper 角度 (由各自控制节点发布)
++    js_cache_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
++        "/joint_states", 10,
++        std::bind(&ArmCtlNode::js_cache_callback, this, std::placeholders::_1));
++
++    // 初始化 RobotStatePublisher
++    rclcpp::NodeOptions options;
++    options.parameter_overrides({
++        {"robot_description", robot_description_},
++        {"publish_frequency", 1000.0}  // 与循环频率匹配
++    });
++    robot_state_publisher_ = std::make_shared<robot_state_publisher::RobotStatePublisher>(options);
++
++
++    // 初始化TF广播器
++    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
++
++    // 加载发布者与服务：joint state publisher
++    joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
++    // 服务：允许外部修改关节角度
++    set_joint_service_ = this->create_service<std_srvs::srv::SetBool>(
++        "set_joint_angles",
++        std::bind(&ArmCtlNode::set_joint_angles, this, std::placeholders::_1, std::placeholders::_2));
++
++    //初始化发布与接受的消息类型
++
++    //初始化画图代码
++    endPosTrajPlot = std::make_unique<EndPos_plot>(this);
++
++    //初始化机器人配置代码
++    yaml_path_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/zeropos.yaml";
++    yaml_path_desc_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/desc_zeropos.yaml";
++    yaml_path_initialPD = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/initialPD.yaml";
++    std::cout << " ===== 初始化关节层零位配置 ===== " << std::endl;
++    if (!loadZeroPosFromYaml(yaml_path_zeroPos)) throw std::runtime_error("zero_position_configuration_failed: "+yaml_path_zeroPos);
++    std::cout << " ===== 初始化笛卡尔空间零位配置 ===== " << std::endl;
++    if (!loadDescZeroPosFromYaml(yaml_path_desc_zeroPos)) throw std::runtime_error("cartesian_configuration_failed: "+yaml_path_desc_zeroPos);
++    std::cout << " ===== 初始化PD参数配置 ===== " << std::endl;
++    if (!loadInitialPDFromYaml(yaml_path_initialPD)) throw std::runtime_error("PD_configuration_failed: "+yaml_path_initialPD);
++
++        solverInterface = std::make_unique<ArmCtlOptInterface>();
++    });
++    ifInitTemp=false;checkTemp=false;
+     //初始化执行频率
+     float loopRate_unRound = 1 / TEMPTIME;
+     int loopRate = std::round(loopRate_unRound);
+     std::cout << "轨迹执行频率为：" << loopRate <<" Hz。" << std::endl;
+-    rclcpp::Rate loop_rate(loopRate); // 50Hz
++    rclcpp::WallRate loop_rate(loopRate); // 50Hz
+ 
+     //开始ros2循环
+     int i = 0;
+@@ -1001,26 +1000,15 @@
+         //获取一次反馈值
+         fdback_get();
+ 
+-        if(checkTemp){
+-            //检查轮 -- 注意中层节点第一轮是不能接收到上层节点的反馈值的
+-            if(has_received_upperMonitor_command_){
+-                std::cout << "警告：第一轮控制中中层节点需要在上层节点之前打开，退出程序以保证安全" << std::endl;
+-                break;
+-            }
+-            checkTemp = false;
++        if(!connection_state_->connection.initialized() || (!legacy_active_ && !position_gate_.selected())) {
++            loop_rate.sleep();continue;
+         }
+-
+-        //第一轮执行时，自动检测位置
+-        if(ifInitTemp){
+-            for(int i = 0; i < 10; i++){
+-                fdback_get();
+-            }
+-            for(int i = 0; i < SINGLEARMDOF; i++){
+-                std::cout << "lr pos in " << i << " = " << lArm_pos_fdback[i] << " || " << rArm_pos_fdback[i] << std::endl;
+-            }
+-            ifInitTemp = false;
++        if(position_gate_.selected() && !connection_state_->connection.executing(now().seconds(),snowbot_connection::steady_now())) {
++            has_received_upperMonitor_command_=false;position_pending_=false;
++            ifFirstTemp=true;ifIKsolverInited=false;
++            topic_point_target_l.clear();topic_point_target_r.clear();
++            loop_rate.sleep();continue;
+         }
+-
+         // 电机使能: 收到上位机命令→使能, 空闲超时→抱闸
+         if(has_received_upperMonitor_command_){
+             motor_enable_ = 1;
+@@ -1080,7 +1068,7 @@
+             controlOutp();
+ 
+             //向着上位机输出反馈值
+-            midMonitor_msg_publish();
++
+             has_received_upperMonitor_command_ = false;
+             
+ 
+@@ -1110,7 +1098,7 @@
+             rArm_joint_tor_feedforward = rArm_torFeedForward_assist;
+ 
+             //向着上位机输出反馈值
+-            midMonitor_msg_publish();
++
+         }
+ 
+         if(ifIKsolverInited){
+@@ -1129,7 +1117,7 @@
+                 lArm_JntPosFdback_kdl(i) = lArm_pos_fdback[i];
+                 rArm_JntPosFdback_kdl(i) = rArm_pos_fdback[i];
+             }
+-            Arm_descPosFdback_kdl = solverInterface.FKsolver(
++            Arm_descPosFdback_kdl = solverInterface->FKsolver(
+                 lArm_JntPosFdback_kdl, rArm_JntPosFdback_kdl
+             );
+ 
+@@ -1166,7 +1154,7 @@
+         loop_rate.sleep();
+     }
+ 
+-    PyGILState_Release(gstate);
++
+     RCLCPP_INFO(this->get_logger(), "程序已安全退出");
+ }
+ 
+@@ -1187,6 +1175,8 @@
+ }
+ 
+ void ArmCtlNode::message_callback(const snowbot_ctl_msgs::msg::RetInformation::SharedPtr msg) {
++    if(!connection_state_->connection.initialized()) return;
++    native_feedback_seen_=true;
+ 
+     // 检查时间戳是否合理
+     auto now = this->now();
+@@ -1213,6 +1203,12 @@
+ //从上位机获取的控制数据
+ void ArmCtlNode::upperMonitor_msg_callback(const snowbot_ctl_msgs::msg::MidNodeCtlMsgSend::SharedPtr msg)
+ {
++    if(!connection_state_->connection.initialized()) return;
++    if(!position_dispatch_){
++        if(!native_feedback_seen_){position_rejection_="native_feedback_unavailable";return;}
++        if(!position_gate_.selected()) legacy_active_=true;
++    }
++
+     if(position_gate_.selected() && !position_dispatch_){position_rejection_="legacy_source_conflict";return;}
+     //----------综合模式控制信息解包----------
+ 
+@@ -1454,10 +1450,62 @@
+ 
+ void ArmCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr packet){
+  const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();const auto m=position_session::meta(packet->meta);
+- if(ifInitTemp||checkTemp||!position_feedback_.fresh(now,steady)){position_rejection_="startup_feedback_or_drive_invalid";return;}
++ if(!connection_state_->connection.initialized()||!position_feedback_.fresh(now,steady)){position_rejection_="startup_feedback_or_drive_invalid";return;}
+  if(!packet->command.if_streaming_joint_position || packet->command.ctl_trans_mod!=3){position_rejection_="position_mode_required";return;}
+  if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
++ position_rejection_=connection_state_->connection.accept(m.session,m.sequence,m.stamp/1e9,now/1e9,steady/1e9,
++     packet->meta.middle_instance_id==connection_state_->instance && packet->meta.feedback_baseline_epoch==connection_state_->connection.epoch(),(m.expires-m.stamp)/1e9);
++ if(!position_rejection_.empty()) return;
+  auto native=std::make_shared<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(packet->command);
+  position_dispatch_=true;upperMonitor_msg_callback(native);position_dispatch_=false;
+  position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_rejection_.clear();
+ }
++
++void ArmCtlNode::connection_peer(const snowbot_ctl_msgs::msg::PositionSessionState::SharedPtr msg){
++    const auto endpoint=connection_state_->inspect(connection_peer_sub_,"snowbot_ctl_msgs/msg/PositionSessionState","/servo_node");
++    const double stamp=rclcpp::Time(msg->header.stamp).seconds();
++    connection_peer_reason_=endpoint.reason;
++    if(connection_peer_reason_.empty() && (msg->layer!="servo" || !std::isfinite(stamp) || now().seconds()<stamp || now().seconds()-stamp>=.2)) connection_peer_reason_="peer_state_invalid_or_stale";
++    if(connection_peer_reason_.empty() && !msg->startup_complete) connection_peer_reason_="peer_initialization_incomplete";
++    if(connection_peer_reason_.empty() && msg->control_source!="position") connection_peer_reason_="servo_control_source_conflict";
++    if(connection_peer_reason_.empty() && msg->stop_policy!="disable_no_load" && msg->stop_policy!="measured_hold") connection_peer_reason_="servo_stop_policy_unconfirmed";
++    if(connection_peer_reason_.empty()){
++        connection_peer_received_=snowbot_connection::steady_now();
++        connection_peer_instance_=msg->instance_id;connection_peer_epoch_=msg->feedback_baseline_epoch;
++    }
++    connection_refresh(false);
++}
++void ArmCtlNode::connection_observe(const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){
++    if(!connection_state_->connection.initialized()) return;
++    const auto stamp=rclcpp::Time(msg->header.stamp).seconds()-msg->pdo_age;
++    const double steady=snowbot_connection::steady_now();
++    position_feedback_.observe(*msg,now().nanoseconds(),int64_t(steady*1e9));
++    if(connection_boot_!=msg->boot_id){connection_boot_=msg->boot_id;connection_refresh(false);}
++    const bool valid=position_feedback_.fresh(now().nanoseconds(),int64_t(steady*1e9)) && connection_peer_reason_.empty() &&
++        steady>=connection_peer_received_ && steady-connection_peer_received_<.2;
++    const std::string reason=!connection_peer_reason_.empty()?connection_peer_reason_:
++        (msg->wkc!=msg->expected_wkc ? "pdo_wkc_mismatch" :
++        ((position_feedback_.faults&0x7f7fu) ? "drive_fault" : "invalid_pdo_mask_age_or_not_advancing"));
++    connection_state_->connection.observe(msg->pdo_sample,stamp,now().seconds(),steady,valid,reason);
++}
++void ArmCtlNode::connection_refresh(bool publish){
++    const double steady=snowbot_connection::steady_now();
++    const auto observation=connection_state_->inspect(position_feedback_sub_,"snowbot_ctl_msgs/msg/PositionObservation");
++    const auto peer=connection_state_->inspect(connection_peer_sub_,"snowbot_ctl_msgs/msg/PositionSessionState","/servo_node");
++    const auto error=!observation.reason.empty()?observation.reason:(!peer.reason.empty()?"peer_"+peer.reason:connection_peer_reason_);
++    connection_state_->connection.endpoint(error,observation.peer+":"+std::to_string(connection_boot_)+":"+peer.peer+":"+std::to_string(connection_peer_instance_)+":"+std::to_string(connection_peer_epoch_));
++    if(connection_state_->connection.initialized() && connection_state_->connection.sample() &&
++        (!position_feedback_.fresh(now().nanoseconds(),int64_t(steady*1e9)) || steady<connection_peer_received_ || steady-connection_peer_received_>=.2))
++        connection_state_->connection.observe(connection_state_->connection.sample(),connection_state_->connection.sample_stamp(),now().seconds(),steady,false,"pdo_or_peer_state_not_advancing");
++    if(!publish) return;
++    const auto state=connection_state_->connection.status(now().seconds(),steady);
++    snowbot_ctl_msgs::msg::PositionSessionState msg;msg.header.stamp=now();msg.layer="middle";
++    msg.control_source="position";msg.startup_complete=connection_state_->connection.initialized() && connection_peer_reason_.empty();
++    msg.selected=state.state==snowbot_connection::State::Executing;msg.session=connection_state_->connection.session();
++    msg.sequence=msg.selected?position_gate_.last().sequence:0;msg.state=snowbot_connection::name(state.state);
++    msg.reason=state.reason+(position_rejection_.empty()?"":"; target_rejected: "+position_rejection_);msg.stop_policy="servo_owned";msg.physical_stop_confirmed=false;
++    msg.instance_id=connection_state_->instance;msg.feedback_baseline_epoch=connection_state_->connection.epoch();
++    msg.feedback_valid=state.feedback_valid;msg.pdo_sample=connection_state_->connection.sample();msg.measurement_stamp=connection_state_->connection.sample_stamp();
++    position_state_pub_->publish(msg);
++    connection_state_->rejection=position_rejection_;
++}
+--- a/robot_control/include/robot_control/msgPublisher.h
++++ b/robot_control/include/robot_control/msgPublisher.h
+@@ -1,3 +1,4 @@
++#include "bindu_connection_ros.h"
+ #include "position_session_contract.h"
+ #include "snowbot_ctl_msgs/msg/position_observation.hpp"
+ #include "snowbot_ctl_msgs/msg/position_session_state.hpp"
+@@ -171,6 +172,15 @@
+         void run();
+ 
+     private:
++
++        std::unique_ptr<snowbot_connection::Reporter> connection_state_;
++        rclcpp::Subscription<snowbot_ctl_msgs::msg::PositionSessionState>::SharedPtr connection_peer_sub_;
++        uint64_t connection_boot_=0, connection_peer_instance_=0, connection_peer_epoch_=0;
++        double connection_peer_received_=0;
++        std::string connection_peer_reason_="peer_state_not_received";
++        void connection_observe(const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg);
++        void connection_peer(const snowbot_ctl_msgs::msg::PositionSessionState::SharedPtr msg);
++        void connection_refresh(bool publish=true);
+         position_session::Gate position_gate_;
+         position_session::Tracker position_feedback_;
+         snowbot_ctl_msgs::msg::PositionSessionMeta position_meta_;
+@@ -180,6 +190,8 @@
+         rclcpp::TimerBase::SharedPtr position_state_timer_;
+         bool position_dispatch_=false,position_pending_=false;
+         std::string position_rejection_;
++        void position_run();
++        void legacy_run();
+         void position_callback(const snowbot_ctl_msgs::msg::PositionSessionCommand::SharedPtr msg);
+         rclcpp::Publisher<snowbot_ctl_msgs::msg::PositionSessionUpper>::SharedPtr position_pub_;
+ 
+--- a/robot_control/src/robot_control/msgPublisher.cpp
++++ b/robot_control/src/robot_control/msgPublisher.cpp
+@@ -47,6 +47,7 @@
+     control_source_(ControlSource::Demo),
+     has_received_ret_(false)
+ {
++    connection_state_=std::make_unique<snowbot_connection::Reporter>(*this,"upper","/servo_node",false);
+     const auto control_source = this->declare_parameter<std::string>("control_source", "demo");
+     if (control_source == "vr") {
+         control_source_ = ControlSource::Vr;
+@@ -55,7 +56,7 @@
+     } else if (control_source == "topic") {
+         control_source_ = ControlSource::Topic;
+     } else {
+-        throw std::invalid_argument(
++        connection_state_->connection.fail(
+             "control_source must be \"vr\", \"demo\", or \"topic\" (got: " + control_source + ")");
+     }
+ 
+@@ -85,25 +86,11 @@
+ 
+     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionCommand>("/bindu/position/command",1,std::bind(&RobotCtlNode::position_callback,this,std::placeholders::_1));
+     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/upper_state",1);
+-    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS(),[this](const auto msg){position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());});
++    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS(),std::bind(&RobotCtlNode::connection_observe,this,std::placeholders::_1));
+     position_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1);
+-    position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+-        const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="upper";m.control_source=control_source_==ControlSource::Topic?"topic":"other";
+-        m.startup_complete=!ifInitTemp && !ifForceToRetZero;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+-        m.state=!m.selected?"idle":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
+-        m.reason=position_rejection_;m.stop_policy="servo_owned";m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+-    });
+-    //从.yaml读取零位及PD配置
+-    yaml_path_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/zeropos.yaml";
+-    yaml_path_desc_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/desc_zeropos.yaml";
+-    yaml_path_initialPD = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/initialPD.yaml";
+-    std::cout << " ===== 初始化关节层零位配置 ===== " << std::endl;
+-    loadZeroPosFromYaml(yaml_path_zeroPos);
+-    std::cout << " ===== 初始化笛卡尔空间零位配置 ===== " << std::endl;
+-    loadDescZeroPosFromYaml(yaml_path_desc_zeroPos);
+-    std::cout << " ===== 初始化PD参数配置 ===== " << std::endl;
+-    loadInitialPDFromYaml(yaml_path_initialPD);
++    connection_peer_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1,std::bind(&RobotCtlNode::connection_peer,this,std::placeholders::_1));
++    position_state_timer_=create_wall_timer(std::chrono::milliseconds(20),[this]{connection_refresh();});
++
+ }
+ 
+ //初始化输出量的函数，默认处于强制归零模式
+@@ -441,6 +428,7 @@
+     }
+ 
+     if(position_gate_.selected()){
++        if(!connection_state_->connection.executing(now().seconds(),snowbot_connection::steady_now())) return;
+         if(position_pending_ && position_gate_.live(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){
+             snowbot_ctl_msgs::msg::PositionSessionUpper packet;packet.meta=position_meta_;packet.command=temp_upperMonitorData_pub;position_pub_->publish(packet);
+         }
+@@ -498,7 +486,7 @@
+ //-----------------
+ 
+ //ros2循环函数
+-void RobotCtlNode::run()
++void RobotCtlNode::legacy_run()
+ {
+     //用户交互
+     std::cout << "开始执行上位机程序" << std::endl;
+@@ -510,20 +498,7 @@
+     float loopRate_ubRound = 1/TempTime;
+     int loopRate = std::round(loopRate_ubRound);
+     std::cout << "轨迹执行频率为：" << loopRate << " Hz。" << std::endl;
+-    rclcpp::Rate loop_rate(loopRate);
+-
+-    OutpInit();
+-
+-    /*  信息发送代码初始化
+-    -----------------------
+-    */
+-    if (control_source_ == ControlSource::Demo) {
+-        demoTrajInit();
+-    } else if (control_source_ == ControlSource::Vr) {
+-        xr_teleComu_init();
+-    } else {
+-        jointPositionInit();
+-    }
++    rclcpp::WallRate loop_rate(loopRate);
+ 
+     int temp_i = 0;
+ 
+@@ -605,7 +580,7 @@
+ 
+             //防呆设计 -- 只有先打开中层节点，才能打开这个上层节点
+             if(!this->has_received_ret_){
+-                std::cout << "警告 -- 必须先打开机器人中层节点，才能打开这个上层节点" << std::endl;
++                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "等待中层实测；通信保持运行");
+                 loop_rate.sleep();
+                 continue;
+             }
+@@ -816,6 +791,8 @@
+ void RobotCtlNode::joint_position_cmd_callback(
+     const snowbot_ctl_msgs::msg::JointPositionCommand::SharedPtr msg)
+ {
++    if(!connection_state_->connection.initialized()) return;
++
+     if(position_gate_.selected() && !position_dispatch_){position_rejection_="legacy_source_conflict";return;}
+     if (control_source_ != ControlSource::Topic) {
+         RCLCPP_WARN(this->get_logger(),
+@@ -859,6 +836,8 @@
+ 
+ void RobotCtlNode::message_callback(const snowbot_ctl_msgs::msg::MidNodeCtlMsgRet::SharedPtr msg)
+ {
++    if(!connection_state_->connection.initialized()) return;
++
+ 
+     //关节信息反馈值装入
+     for(int i = 0; i < SingleArmDof; i++){
+@@ -900,12 +879,103 @@
+ void RobotCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionCommand::SharedPtr packet){
+  const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  const auto m=position_session::meta(packet->meta);
+- if(control_source_!=ControlSource::Topic || ifInitTemp || ifForceToRetZero){position_rejection_="startup_or_source_not_ready";return;}
++ if(control_source_!=ControlSource::Topic || !connection_state_->connection.initialized()){position_rejection_="startup_or_source_not_ready";return;}
+  if(!position_feedback_.fresh(now,steady)){position_rejection_="feedback_or_drive_invalid";return;}
+  for(unsigned i=0;i<7;++i)if(!std::isfinite(packet->command.l_arm_position[i])||!std::isfinite(packet->command.r_arm_position[i])){position_rejection_="nonfinite_target";return;}
+  if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
+  auto native=std::make_shared<snowbot_ctl_msgs::msg::JointPositionCommand>(packet->command);
+  if(m.operation==2)for(unsigned i=0;i<7;++i){native->l_arm_position[i]=position_feedback_.q[i];native->r_arm_position[i]=position_feedback_.q[i+7];}
+- position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_pending_=true;
++ position_rejection_=connection_state_->connection.accept(m.session,m.sequence,m.stamp/1e9,
++     now/1e9,steady/1e9,connection_peer_instance_ && connection_peer_epoch_,(m.expires-m.stamp)/1e9);
++ if(!position_rejection_.empty()) return;
++ position_gate_.commit(m,now,steady);position_meta_=packet->meta;
++ position_meta_.middle_instance_id=connection_peer_instance_;position_meta_.feedback_baseline_epoch=connection_peer_epoch_;
++ position_pending_=true;
+  position_dispatch_=true;joint_position_cmd_callback(native);position_dispatch_=false;position_rejection_.clear();
+ }
++
++void RobotCtlNode::run() {
++    snowbot_connection::initialize(*this, *connection_state_, [this]() {
++    //从.yaml读取零位及PD配置
++    yaml_path_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/zeropos.yaml";
++    yaml_path_desc_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/desc_zeropos.yaml";
++    yaml_path_initialPD = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/initialPD.yaml";
++    std::cout << " ===== 初始化关节层零位配置 ===== " << std::endl;
++    if (!loadZeroPosFromYaml(yaml_path_zeroPos)) throw std::runtime_error("zero_position_configuration_failed: "+yaml_path_zeroPos);
++    std::cout << " ===== 初始化笛卡尔空间零位配置 ===== " << std::endl;
++    if (!loadDescZeroPosFromYaml(yaml_path_desc_zeroPos)) throw std::runtime_error("cartesian_configuration_failed: "+yaml_path_desc_zeroPos);
++    std::cout << " ===== 初始化PD参数配置 ===== " << std::endl;
++    if (!loadInitialPDFromYaml(yaml_path_initialPD)) throw std::runtime_error("PD_configuration_failed: "+yaml_path_initialPD);
++        OutpInit();
++        if (control_source_ == ControlSource::Demo) demoTrajInit();
++        else if (control_source_ == ControlSource::Vr) xr_teleComu_init();
++        else jointPositionInit();
++    });
++    if (control_source_ == ControlSource::Topic) ifInitTemp=false;
++    if (control_source_ == ControlSource::Topic || !connection_state_->connection.initialized()) position_run();
++    else legacy_run();
++}
++void RobotCtlNode::position_run() {
++    rclcpp::WallRate rate(std::round(1 / TempTime));
++    while (rclcpp::ok()) {
++        fdback_get();
++        auto& link = connection_state_->connection;
++        if (!link.executing(now().seconds(), snowbot_connection::steady_now())) {
++            joint_position_cmd_pending_ = false; position_pending_=false;
++            ifFirstOutput = true;
++        } else if (joint_position_cmd_pending_) {
++            try { jointPositionOutp(); msg_publish(); }
++            catch (const std::exception& e) { link.fail(std::string("position_output_failed: ")+e.what()); }
++            joint_position_cmd_pending_ = false;
++        }
++        rate.sleep();
++    }
++}
++
++void RobotCtlNode::connection_peer(const snowbot_ctl_msgs::msg::PositionSessionState::SharedPtr msg){
++    const auto endpoint=connection_state_->inspect(connection_peer_sub_,"snowbot_ctl_msgs/msg/PositionSessionState","/dual_arm_control_node");
++    const double stamp=rclcpp::Time(msg->header.stamp).seconds();
++    connection_peer_reason_=endpoint.reason;
++    if(connection_peer_reason_.empty() && (msg->layer!="middle" || !std::isfinite(stamp) || now().seconds()<stamp || now().seconds()-stamp>=.2)) connection_peer_reason_="peer_state_invalid_or_stale";
++    if(connection_peer_reason_.empty() && !msg->startup_complete) connection_peer_reason_="peer_initialization_incomplete";
++    if(connection_peer_reason_.empty() && (!msg->instance_id || !msg->feedback_baseline_epoch || !msg->feedback_valid || (msg->state!="ready_idle" && msg->state!="executing"))) connection_peer_reason_="middle_feedback_not_ready: "+msg->reason;
++    if(connection_peer_reason_.empty()){
++        connection_peer_received_=snowbot_connection::steady_now();
++        connection_peer_instance_=msg->instance_id;connection_peer_epoch_=msg->feedback_baseline_epoch;
++    }
++    connection_refresh(false);
++}
++void RobotCtlNode::connection_observe(const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){
++    if(!connection_state_->connection.initialized()) return;
++    const auto stamp=rclcpp::Time(msg->header.stamp).seconds()-msg->pdo_age;
++    const double steady=snowbot_connection::steady_now();
++    position_feedback_.observe(*msg,now().nanoseconds(),int64_t(steady*1e9));
++    if(connection_boot_!=msg->boot_id){connection_boot_=msg->boot_id;connection_refresh(false);}
++    const bool valid=position_feedback_.fresh(now().nanoseconds(),int64_t(steady*1e9)) && connection_peer_reason_.empty() &&
++        steady>=connection_peer_received_ && steady-connection_peer_received_<.2;
++    const std::string reason=!connection_peer_reason_.empty()?connection_peer_reason_:
++        (msg->wkc!=msg->expected_wkc ? "pdo_wkc_mismatch" :
++        ((position_feedback_.faults&0x7f7fu) ? "drive_fault" : "invalid_pdo_mask_age_or_not_advancing"));
++    connection_state_->connection.observe(msg->pdo_sample,stamp,now().seconds(),steady,valid,reason);
++}
++void RobotCtlNode::connection_refresh(bool publish){
++    const double steady=snowbot_connection::steady_now();
++    const auto observation=connection_state_->inspect(position_feedback_sub_,"snowbot_ctl_msgs/msg/PositionObservation");
++    const auto peer=connection_state_->inspect(connection_peer_sub_,"snowbot_ctl_msgs/msg/PositionSessionState","/dual_arm_control_node");
++    const auto error=!observation.reason.empty()?observation.reason:(!peer.reason.empty()?"peer_"+peer.reason:connection_peer_reason_);
++    connection_state_->connection.endpoint(error,observation.peer+":"+std::to_string(connection_boot_)+":"+peer.peer+":"+std::to_string(connection_peer_instance_)+":"+std::to_string(connection_peer_epoch_));
++    if(connection_state_->connection.initialized() && connection_state_->connection.sample() &&
++        (!position_feedback_.fresh(now().nanoseconds(),int64_t(steady*1e9)) || steady<connection_peer_received_ || steady-connection_peer_received_>=.2))
++        connection_state_->connection.observe(connection_state_->connection.sample(),connection_state_->connection.sample_stamp(),now().seconds(),steady,false,"pdo_or_peer_state_not_advancing");
++    if(!publish) return;
++    const auto state=connection_state_->connection.status(now().seconds(),steady);
++    snowbot_ctl_msgs::msg::PositionSessionState msg;msg.header.stamp=now();msg.layer="upper";
++    msg.control_source=control_source_==ControlSource::Topic?"topic":"other";msg.startup_complete=connection_state_->connection.initialized() && connection_peer_reason_.empty();
++    msg.selected=state.state==snowbot_connection::State::Executing;msg.session=connection_state_->connection.session();
++    msg.sequence=msg.selected?position_gate_.last().sequence:0;msg.state=snowbot_connection::name(state.state);
++    msg.reason=state.reason+(position_rejection_.empty()?"":"; target_rejected: "+position_rejection_);msg.stop_policy="servo_owned";msg.physical_stop_confirmed=false;
++    msg.instance_id=connection_state_->instance;msg.feedback_baseline_epoch=connection_state_->connection.epoch();
++    msg.feedback_valid=state.feedback_valid;msg.pdo_sample=connection_state_->connection.sample();msg.measurement_stamp=connection_state_->connection.sample_stamp();
++    position_state_pub_->publish(msg);
++    connection_state_->rejection=position_rejection_;
++}
