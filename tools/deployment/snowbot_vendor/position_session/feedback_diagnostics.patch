@@ -1,0 +1,46 @@
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -2382,7 +2382,19 @@
+  if(!position_endpoint())return false;
+  const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if(!position_feedback_.sample){position_wait_reason_=position_feedback_.received_messages?"pdo_not_started":"publisher_found_no_message";return false;}
+- if(!position_feedback_.fresh(now,steady)){position_wait_reason_=(position_feedback_.faults&position_session::controlled_mask)?"drive_fault":"pdo_stale_or_not_advancing";return false;}
++ if(!position_feedback_.fresh(now,steady)){
++  position_wait_reason_=(position_feedback_.faults&position_session::controlled_mask)?"drive_fault":"pdo_stale_or_not_advancing";
++  // Observe the original decision using its exact clocks; never renew or relax it.
++  const auto& f=position_feedback_;
++  RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
++   "Position feedback check: ros_ns=%lld steady_ns=%lld source_ns=%lld progress_ns=%lld received_ns=%lld pdo_age_s=%.12f advances=%u wkc=%d expected=%d valid=0x%08x faults=0x%08x boot=%llu sample=%llu received_messages=%llu",
++   static_cast<long long>(now), static_cast<long long>(steady), static_cast<long long>(f.source),
++   static_cast<long long>(f.progress), static_cast<long long>(f.received), f.age, f.advances,
++   f.wkc, f.expected, static_cast<unsigned>(f.valid), static_cast<unsigned>(f.faults),
++   static_cast<unsigned long long>(f.boot), static_cast<unsigned long long>(f.sample),
++   static_cast<unsigned long long>(f.received_messages));
++  return false;
++ }
+  position_wait_reason_.clear();return true;
+ }
+ 
+--- a/dual_arm_control/src/dual_arm_control/msgPublish.cpp
++++ b/dual_arm_control/src/dual_arm_control/msgPublish.cpp
+@@ -1518,7 +1518,19 @@
+  if(!position_endpoint())return false;
+  const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if(!position_feedback_.sample){position_wait_reason_=position_feedback_.received_messages?"pdo_not_started":"publisher_found_no_message";return false;}
+- if(!position_feedback_.fresh(now,steady)){position_wait_reason_=(position_feedback_.faults&position_session::controlled_mask)?"drive_fault":"pdo_stale_or_not_advancing";return false;}
++ if(!position_feedback_.fresh(now,steady)){
++  position_wait_reason_=(position_feedback_.faults&position_session::controlled_mask)?"drive_fault":"pdo_stale_or_not_advancing";
++  // Observe the original decision using its exact clocks; never renew or relax it.
++  const auto& f=position_feedback_;
++  RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
++   "Position feedback check: ros_ns=%lld steady_ns=%lld source_ns=%lld progress_ns=%lld received_ns=%lld pdo_age_s=%.12f advances=%u wkc=%d expected=%d valid=0x%08x faults=0x%08x boot=%llu sample=%llu received_messages=%llu",
++   static_cast<long long>(now), static_cast<long long>(steady), static_cast<long long>(f.source),
++   static_cast<long long>(f.progress), static_cast<long long>(f.received), f.age, f.advances,
++   f.wkc, f.expected, static_cast<unsigned>(f.valid), static_cast<unsigned>(f.faults),
++   static_cast<unsigned long long>(f.boot), static_cast<unsigned long long>(f.sample),
++   static_cast<unsigned long long>(f.received_messages));
++  return false;
++ }
+  if(!native_feedback_seen_){position_wait_reason_="native_feedback_missing";return false;}
+  position_wait_reason_.clear();return true;
+ }
