@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 
@@ -12,6 +13,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--vendor-root',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--bindu-root',type=Path,help='Optional Bindu checkout with the installed session preflight')
     args=parser.parse_args()
     if int(os.environ.get('ROS_DOMAIN_ID','0'))<100 or os.environ.get('ROS_LOCALHOST_ONLY')!='1':
         raise RuntimeError('Require an isolated ROS domain >=100 and localhost-only transport')
@@ -26,9 +28,10 @@ def main():
     feedback=rclpy.create_node('servo_node') # Test fixture only, not the servo executable.
     obs_pub=feedback.create_publisher(PositionObservation,'/bindu/position/observation',qos_profile_sensor_data)
     ret_pub=feedback.create_publisher(RetInformation,'/dualArmCtl_fdback',10)
+    servo_state_pub=feedback.create_publisher(PositionSessionState,'/bindu/position/servo_state',1)
     cmd_pub=observer.create_publisher(PositionSessionCommand,'/bindu/position/command',1)
     states={};frames=[];children=[];logs=[];sample=0;frozen=False;freeze_started=0.
-    q=[.1]*20;q[9]=-.1;q[7]=q[15]=0.;q[16:]=[0.]*4
+    q=[.1]*20;q[9]=-.1;q[7]=q[15]=0.;q[16:]=[0.,0.,.03,-.04]
     for layer in ('upper','middle'):
         observer.create_subscription(PositionSessionState,'/bindu/position/'+layer+'_state',lambda m,l=layer:states.update({l:m}),10)
     observer.create_subscription(PositionSessionServo,'/bindu/position/servo',lambda m:frames.append(m),10)
@@ -60,6 +63,11 @@ def main():
                 msg.receive_attempt=sample;msg.wkc=msg.expected_wkc=67;msg.valid_mask=0xfffff
                 msg.position=q;msg.speed=[0.]*20;msg.current=[0.]*20;msg.status=[0x27]*20
                 obs_pub.publish(msg)
+                state=PositionSessionState();state.header.stamp=msg.header.stamp
+                state.layer='servo';state.control_source='position';state.startup_complete=True
+                state.feedback_ready=True;state.instance_id=333;state.feedback_boot_id=333
+                state.feedback_sample=sample;state.stop_policy='disable_no_load';state.state='ready_idle'
+                servo_state_pub.publish(state)
                 old=RetInformation();old.header.stamp=msg.header.stamp
                 old.l_position=q[:8];old.r_position=q[8:16]
                 old.l_speed=old.r_speed=[0.]*8;old.l_iq=old.r_iq=[0.]*8
@@ -76,6 +84,8 @@ def main():
         msg.meta.feedback_boot_id=333;msg.meta.feedback_sample=sample
         msg.command.l_arm_position=q[:7];msg.command.r_arm_position=q[8:15]
         msg.command.l_arm_position[0]+=.01
+        msg.waist_position=q[18:20]
+        msg.waist_position[0]+=.005
         cmd_pub.publish(msg);return msg
     try:
         pump(.5)
@@ -94,10 +104,12 @@ def main():
         assert len(matching)>=2
         assert all(f.meta==msg.meta for f in matching)
         assert all(f.command.l_position[0]==msg.command.l_arm_position[0] for f in matching)
+        assert all(list(f.waist_position)==list(msg.waist_position) for f in matching)
         assert matching[1].frame_sequence>matching[0].frame_sequence
         checks['target_meta_atomic_and_derived_frames_do_not_renew']=True
+        checks['waist_arm_target_metadata_remain_one_envelope']=True
         # Serialization of all envelopes and old interfaces uses the real generated types.
-        for value in (msg,PositionSessionUpper(),matching[0],PositionObservation(),RetInformation()):
+        for value in (msg,PositionSessionUpper(),matching[0],PositionObservation(hold_valid=True,hold_sample=1,hold_position=[.2]*16),RetInformation()):
             clone=deserialize_message(serialize_message(value),type(value));assert clone==value
         checks['generated_message_roundtrips']=True
         old_count=len(frames);cmd_pub.publish(msg);pump(.04)
@@ -138,6 +150,22 @@ def main():
         states.clear();middle=launch('middle');pump(.5);upper=launch('upper')
         assert pump(10,lambda:all(l in states and states[l].startup_complete and states[l].feedback_ready for l in ('upper','middle')))
         checks['middle_first_and_idle_connection']=True
+        if args.bindu_root:
+            observer.destroy_publisher(cmd_pub)
+            assert pump(3,lambda:not observer.get_publishers_info_by_topic('/bindu/position/command'))
+            probe_log=args.output.parent/'preflight.log'
+            with probe_log.open('w') as handle:
+                probe=subprocess.Popen([sys.executable,'-c',
+                    "import json;from tools.deployment.runtime_check import check_robot_interface;"
+                    "print(json.dumps(check_robot_interface(dict(position_protocol='session_v1',"
+                    "vendor_namespace='/',namespace='bindu_snowbot'),2.)))"],
+                    cwd=args.bindu_root,stdout=handle,stderr=subprocess.STDOUT,env=os.environ.copy())
+                children.append(probe)
+                assert pump(8,lambda:probe.poll() is not None),'read-only preflight did not finish'
+            assert probe.returncode==0,probe_log.read_text()
+            preflight=json.loads(probe_log.read_text().splitlines()[-1])
+            assert preflight['robot_interface']=='available',preflight
+            checks['read_only_preflight_with_real_type_hashes_and_qos']=True
         result=dict(passed=True,checks=checks,synthetic_input=True,real_controller_input=False,
                     servo_executable_started=False,hardware_commands_sent=False,frames=len(frames),
                     domain=os.environ['ROS_DOMAIN_ID'])
