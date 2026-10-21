@@ -55,6 +55,9 @@ def main():
         from bindu_contracts.profile import Profile
         from bindu_hardware.snowbot_session import CONTROL_NAMES
         profile=Profile.load(args.bindu_root/'src/integration/bindu_runtime/config/robots/snowbot/snowbot_vendor_position.json')
+        from bindu_runtime.snowbot_position_session import SessionTrajectory
+        from tools.teleop.snowbot_pdo import observation_payload
+        profile=SessionTrajectory(profile).profile
         # Load the native core before starting freshness-sensitive synthetic feeds.
         from bindu_execution.interpolation import PreparedSegment
     rclpy.init()
@@ -170,6 +173,8 @@ def main():
         checks['waist_arm_target_metadata_remain_one_envelope']=True
         if trajectory:
             assert len(msg.trajectory.duration)>=2 and len(msg.trajectory.controls)>0
+            path_end=max(start+duration for start,duration in zip(msg.trajectory.piece_start,msg.trajectory.duration))
+            assert msg.trajectory.effective_at_ns+round(path_end*1e9)<=msg.meta.expires_at_ns
             assert all(frame.trajectory==msg.trajectory and frame.meta==msg.meta for frame in matching)
             relayed=[frame for frame in upper_frames if frame.meta.session==101]
             assert relayed and all(frame.trajectory==msg.trajectory and frame.meta==msg.meta for frame in relayed)
@@ -184,6 +189,19 @@ def main():
             assert deserialize_message(serialize_message(observed),type(observed))==observed
             assert deserialize_message(serialize_message(msg.trajectory),PositionTrajectory)==msg.trajectory
             checks['synthetic_observation_new_fields_and_mode_roundtrip_without_ack']=True
+            payload=observation_payload(observed)
+            for name in ('execution_mode','trajectory_phase','reference_valid','hold_basis','sample_time_ns'):
+                assert payload[name]==getattr(observed,name)
+            for name in ('reference_position','reference_speed','reference_acceleration','output_position',
+                         'output_speed','output_torque','output_kp','output_kd','hold_position'):
+                assert len(payload[name])==16 and payload[name]==list(getattr(observed,name))
+            assert payload['reference_valid'] is False and payload['output_valid'] is False
+            # Older observations omit optional fields; they must remain missing, not false/zero.
+            from types import SimpleNamespace
+            base=('header','boot_id','pdo_sample','pdo_age','wkc','expected_wkc','valid_mask','position','speed','status')
+            legacy=observation_payload(SimpleNamespace(**{name:getattr(observed,name) for name in base}))
+            assert not any(name in legacy for name in ('execution_mode','trajectory_phase','reference_valid','hold_basis','sample_time_ns','output_valid'))
+            checks['existing_log_payload_preserves_typed_fields_false_and_missing']=True
         # Serialization of all envelopes and old interfaces uses the real generated types.
         for value in (msg,PositionSessionUpper(),matching[0],PositionObservation(hold_valid=True,hold_sample=1,hold_position=[.2]*16),RetInformation()):
             clone=deserialize_message(serialize_message(value),type(value));assert clone==value
