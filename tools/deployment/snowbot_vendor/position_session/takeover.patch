@@ -1,0 +1,35 @@
+--- a/servo_control/include/servo_control/position_follower.h
++++ b/servo_control/include/servo_control/position_follower.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include <array>
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++namespace position_session {
++struct Follower {
++ std::array<double,14> q{},v{},target{};
++ bool seeded=false,first=false;
++ double vmax=.25,amax=.5,omega=4.;
++ void seed(const std::array<double,14>& measured){q=target=measured;v.fill(0);seeded=first=true;}
++ bool set(const std::array<double,14>& next){
++  for(double x:next)if(!std::isfinite(x))return false;
++  target=next;return seeded;
++ }
++ bool step(double dt){
++  if(!seeded || !std::isfinite(dt) || dt<=0 || dt>.01)return false;
++  if(first){first=false;return true;}
++  for(unsigned i=0;i<14;++i){
++   const double a=std::clamp(omega*omega*(target[i]-q[i])-2*omega*v[i],-amax,amax);
++   const double next_v=std::clamp(v[i]+a*dt,-vmax,vmax);
++   q[i]+=(v[i]+next_v)*.5*dt;v[i]=next_v;
++  }
++  return true;
++ }
++};
++constexpr std::array<double,14> lower{-3.14,0.0,-2.61,-1.57,-3.14,-1.309,-1.274,-3.14,-3.14,-0.58,-1.57,-3.14,-1.309,-1.274};
++constexpr std::array<double,14> upper{3.14,3.14,0.58,1.57,3.14,1.274,1.449,3.14,0.0,2.61,1.57,3.14,1.274,1.449};
++inline bool in_limits(const std::array<double,14>& q){
++ for(unsigned i=0;i<14;++i)if(!std::isfinite(q[i]) || q[i]<lower[i] || q[i]>upper[i])return false;return true;
++}
++} // namespace position_session

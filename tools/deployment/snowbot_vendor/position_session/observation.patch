@@ -1,0 +1,213 @@
+--- a/ctl_msgs/CMakeLists.txt
++++ b/ctl_msgs/CMakeLists.txt
+@@ -37,6 +37,7 @@
+   "msg/JntCtlResVisu.msg"
+   "msg/JointPositionCommand.msg"
+   "msg/CartesianImpedance.msg"
++  "msg/PositionObservation.msg"
+   DEPENDENCIES std_msgs geometry_msgs
+ )
+ 
+--- a/ctl_msgs/msg/PositionObservation.msg
++++ b/ctl_msgs/msg/PositionObservation.msg
+@@ -0,0 +1,25 @@
++# Independent observation. Legacy RetInformation and its meaning are unchanged.
++std_msgs/Header header
++uint64 boot_id
++# Successful complete receives; unchanged under failed WKC or frozen RT.
++uint64 pdo_sample
++float64 pdo_age
++uint64 receive_attempt
++float64 attempt_age
++int32 wkc
++int32 expected_wkc
++uint32 valid_mask
++# Slots: L1..L8, R1..R8, head1..2, waist1..2. rad and rad/s.
++# PT current is A; CSP has raw 0x6077 torque, with no Nm calibration claimed.
++# These arrays and status come from one receive attempt; valid_mask=0 on bad WKC.
++float64[20] position
++float64[20] speed
++float64[20] current
++uint32 current_valid_mask
++int16[20] torque_raw
++uint32 torque_raw_valid_mask
++uint16[20] status
++uint64 bad_wkc_count
++uint64 receive_overruns
++uint64 period_overruns
++# No runtime slave-state or drive-error-code bus reads are added.
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -1,3 +1,4 @@
++#include "snowbot_ctl_msgs/msg/position_observation.hpp"
+ #ifndef __rosLoop__H__
+ #define __rosLoop__H__
+ 
+@@ -150,6 +151,10 @@
+         void run();
+ 
+     private:
++        rclcpp::Publisher<snowbot_ctl_msgs::msg::PositionObservation>::SharedPtr position_observation_pub_;
++        rclcpp::TimerBase::SharedPtr position_observation_timer_;
++        uint64_t position_boot_id_=uint64_t(position_session::steady_ns());
++
+ 
+         //====================消息发送变量====================
+ 
+--- a/servo_control/include/servo_control/ethercat_driver.h
++++ b/servo_control/include/servo_control/ethercat_driver.h
+@@ -5,6 +5,7 @@
+  */
+ #ifndef ETHERCAT_DRIVER_H
+ #define ETHERCAT_DRIVER_H
++#include "servo_control/position_observation.h"
+ 
+ #include <inttypes.h>
+ #include <vector>
+@@ -105,6 +106,7 @@
+     EtherCATDriver();
+     ~EtherCATDriver();
+ 
++    position_session::Observation observation() { return observation_cache_.read(); }
+     bool init(const std::string& ifname);
+     void cycle();             // 单次 PDO 收发 (由 ROS loop 调用)
+     void stop();
+@@ -178,6 +180,8 @@
+     std::atomic<float> motor_cmd_kd_[TOTAL_SLAVES]{};
+     std::atomic<float> gravity_ff_[TOTAL_SLAVES]{};  // 方案 E: 使能时刻重力补偿前馈
+ 
++    position_session::ObservationCache observation_cache_;
++    position_session::Observation observation_rt_; // RT writer only
+     int cycle_count_;
+     std::atomic<bool> motor_enable_{true};  // 电机使能: true=使能, false=抱闸
+     std::atomic<bool> motor_enable_mask_[TOTAL_SLAVES]{};  // 单电机使能 mask
+--- a/servo_control/include/servo_control/position_observation.h
++++ b/servo_control/include/servo_control/position_observation.h
+@@ -0,0 +1,49 @@
++#pragma once
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cmath>
++#include <chrono>
++
++namespace position_session {
++constexpr uint32_t arms_mask=0x7f7f;
++inline int64_t steady_ns() {
++ return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++struct Observation {
++ std::array<float,20> position{},speed{},current{};
++ std::array<uint16_t,20> status{};
++ std::array<int16_t,20> torque_raw{};uint32_t current_valid_mask=0,torque_raw_valid_mask=0;
++ uint64_t sample=0,attempt=0,bad_wkc=0,receive_overruns=0,period_overruns=0;
++ int64_t sampled_ns=0,attempted_ns=0;
++ uint32_t valid_mask=0;
++ int wkc=0,expected_wkc=0;
++};
++// Single RT producer / single ROS consumer triple buffer. Each slot has one
++// owner; acquire/release exchanges transfer ownership, so plain copies have no
++// data races. Constant storage, no retry, allocation, mutex or bus operation.
++class ObservationCache {
++ std::array<Observation,3> slots_{};
++ std::atomic<unsigned> middle_{1};
++ unsigned back_=2,front_=0;
++public:
++ static_assert(std::atomic<unsigned>::is_always_lock_free,"lock-free mailbox required");
++ void publish(const Observation& value) {
++  slots_[back_]=value;
++  back_=middle_.exchange(back_|4u,std::memory_order_acq_rel)&3u;
++ }
++ Observation read() {
++  if(middle_.load(std::memory_order_acquire)&4u)
++   front_=middle_.exchange(front_,std::memory_order_acq_rel)&3u;
++  return slots_[front_];
++ }
++};
++inline uint32_t fault_mask(const Observation& s) {
++ uint32_t mask=0;for(unsigned i=0;i<20;++i)if(s.status[i]&8)mask|=1u<<i;return mask;
++}
++inline bool measured(const Observation& s,int64_t now,uint32_t mask=arms_mask) {
++ return s.sample>0 && s.expected_wkc>0 && s.wkc==s.expected_wkc &&
++  s.sampled_ns>0 && now>=s.sampled_ns && now-s.sampled_ns<=20000000 &&
++  (s.valid_mask&mask)==mask;
++}
++} // namespace position_session
+--- a/servo_control/include/servo_control/transmit.h
++++ b/servo_control/include/servo_control/transmit.h
+@@ -1,3 +1,5 @@
++#include "servo_control/position_observation.h"
++position_session::Observation EtherCAT_positionObservation();
+ #ifndef TRANSMIT_H
+ #define TRANSMIT_H
+ 
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -84,6 +84,21 @@
+         200
+     );
+ 
++    // Independent non-RT observation publication, 100 Hz. Legacy publishing is untouched.
++    position_observation_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS());
++    position_observation_timer_=create_wall_timer(std::chrono::milliseconds(10),[this]{
++        const auto s=EtherCAT_positionObservation();const auto now=position_session::steady_ns();
++        snowbot_ctl_msgs::msg::PositionObservation m;
++        m.header.stamp=this->now();m.boot_id=position_boot_id_;m.pdo_sample=s.sample;
++        m.pdo_age=s.sampled_ns>0 && now>=s.sampled_ns ? (now-s.sampled_ns)*1e-9 : -1.;
++        m.attempt_age=s.attempted_ns>0 && now>=s.attempted_ns ? (now-s.attempted_ns)*1e-9 : -1.;
++        m.receive_attempt=s.attempt;m.wkc=s.wkc;m.expected_wkc=s.expected_wkc;
++        m.valid_mask=m.pdo_age>=0 && m.pdo_age<=.02 ? s.valid_mask : 0;
++        for(int i=0;i<20;++i){m.position[i]=s.position[i];m.speed[i]=s.speed[i];m.current[i]=s.current[i];m.status[i]=s.status[i];}
++        m.current_valid_mask=m.valid_mask&s.current_valid_mask;m.torque_raw_valid_mask=m.valid_mask&s.torque_raw_valid_mask;m.torque_raw=s.torque_raw;
++        m.bad_wkc_count=s.bad_wkc;m.receive_overruns=s.receive_overruns;m.period_overruns=s.period_overruns;
++        position_observation_pub_->publish(m);
++    });
+     //上位机接收器初始化
+     CtlData = this->create_subscription<snowbot_ctl_msgs::msg::CtlInformation>(
+         "ctl_data_pub",
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -834,6 +834,30 @@
+             sensor_fb_[a][5].store(s_tx_[a]->Mz);
+         }
+     }
++    auto& obs=observation_rt_;
++    obs.wkc=wkc_.load();obs.expected_wkc=expectedWKC_;
++    obs.attempted_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(io_end.time_since_epoch()).count();
++    ++obs.attempt;obs.valid_mask=0;obs.current_valid_mask=0;obs.torque_raw_valid_mask=0;
++    const bool complete=obs.expected_wkc>0 && obs.wkc==obs.expected_wkc;
++    if(complete){++obs.sample;obs.sampled_ns=obs.attempted_ns;}else{++obs.bad_wkc;}
++    if(io_end-io_start>std::chrono::microseconds(EC_CYCLETIME_US))++obs.receive_overruns;
++    obs.period_overruns=timing_over_1ms_;
++    for(int m=0;m<20;++m){
++        if(is_csp_motor_[m] && csp_tx_[m]){
++            obs.position[m]=float(csp_tx_[m]->position*(2.0*M_PI/65536.0));
++            obs.speed[m]=float(csp_tx_[m]->velocity*(2.0*M_PI/65536.0));
++            obs.current[m]=0;obs.torque_raw[m]=csp_tx_[m]->torque;
++            if(complete)obs.torque_raw_valid_mask|=1u<<m;
++            obs.status[m]=csp_tx_[m]->statusword;
++        }else if(!is_csp_motor_[m] && m_tx_[m]){
++            obs.position[m]=m_tx_[m]->actual_position;obs.speed[m]=m_tx_[m]->actual_speed;
++            obs.current[m]=m_tx_[m]->actual_current;obs.status[m]=m_tx_[m]->statusword;
++            if(complete && std::isfinite(obs.current[m]))obs.current_valid_mask|=1u<<m;
++        }else{continue;}
++        if(complete && std::isfinite(obs.position[m]) && std::isfinite(obs.speed[m]) && std::isfinite(obs.current[m]))
++            obs.valid_mask|=1u<<m;
++    }
++    observation_cache_.publish(obs);
+     ++completed_pdo_cycles_;
+ 
+     const auto io_us = static_cast<uint64_t>(
+--- a/servo_control/src/servo_control/transmit.cpp
++++ b/servo_control/src/servo_control/transmit.cpp
+@@ -33,6 +33,10 @@
+         delete g_ecat_driver;
+         g_ecat_driver = nullptr;
+     }
++}
++
++position_session::Observation EtherCAT_positionObservation() {
++    return g_ecat_driver ? g_ecat_driver->observation() : position_session::Observation{};
+ }
+ 
+ bool EtherCAT_isOperational() {

@@ -1,0 +1,64 @@
+#pragma once
+#include <array>
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
+#include <chrono>
+namespace position_session {
+constexpr int64_t maximum_ttl=200000000;
+struct Meta {
+ uint64_t session=0,sequence=0;int64_t stamp=0,expires=0;uint8_t operation=0;
+ bool operator==(const Meta& b)const{return session==b.session && sequence==b.sequence && stamp==b.stamp && expires==b.expires && operation==b.operation;}
+};
+template<class M> Meta meta(const M& m){return {m.session,m.sequence,m.source_stamp_ns,m.expires_at_ns,m.operation};}
+inline bool fresh(const Meta& m,int64_t now){return m.session && m.sequence && m.stamp>0 && m.expires>m.stamp && m.expires-m.stamp<=maximum_ttl && now>=m.stamp && now<m.expires && m.operation<=2;}
+class Gate {
+ bool interrupted_=false;Meta last_{};int64_t deadline_=0;std::array<uint64_t,32> retired_{};unsigned count_=0;
+public:
+ const char* rejection="";
+ void interrupt(){if(selected()){interrupted_=true;deadline_=0;}}
+ const Meta& last()const{return last_;}
+ bool selected()const{return last_.session!=0;}
+ bool live(int64_t now)const{return selected() && now>0 && now<deadline_;}
+ bool following(int64_t now)const{return live(now) && last_.operation!=2;}
+ int64_t deadline()const{return deadline_;}
+ bool accepts(const Meta& m,int64_t ros,int64_t steady) {
+  rejection="";
+  if(interrupted_ && m.session==last_.session){rejection="new_session_required";return false;}
+  if(!fresh(m,ros) || steady<=0){rejection="expired_or_invalid";return false;}
+  if(m.session!=last_.session){
+   if(m.operation!=1 || (following(steady)) || count_==retired_.size() || std::find(retired_.begin(),retired_.end(),m.session)!=retired_.end()){
+    rejection="session_conflict_or_retired";return false;}
+  }else if(m.sequence<=last_.sequence || m.stamp<last_.stamp){rejection="duplicate_or_out_of_order";return false;}
+  else if(m.operation==0 && (!live(steady) || last_.operation==2)){rejection="takeover_required";return false;}
+  return true;
+ }
+ void commit(const Meta& m,int64_t ros,int64_t steady){
+  if(last_.session && m.session!=last_.session)retired_[count_++]=last_.session;
+  interrupted_=false;last_=m;deadline_=steady+(m.expires-ros);
+ }
+};
+struct Tracker {
+ uint64_t received_messages=0;unsigned advances=0;uint64_t ready_sample=0;int64_t ready_ros=0;uint64_t boot=0,sample=0;int64_t progress=0,received=0,source=0;double age=-1;
+ uint32_t valid=0,faults=0;int wkc=0,expected=0;std::array<double,14> q{},v{};
+ template<class M> void observe(const M& m,int64_t ros,int64_t steady){
+  ++received_messages;
+  const auto stamp=int64_t(m.header.stamp.sec)*1000000000+m.header.stamp.nanosec;
+  valid=0;faults=0;wkc=m.wkc;expected=m.expected_wkc;age=m.pdo_age;
+  if(!m.boot_id || !m.pdo_sample || !std::isfinite(age) || age<0 || age>.02 || stamp<=0 || ros<stamp || ros-stamp>20000000){advances=0;ready_sample=0;ready_ros=0;return;}
+  if(boot!=m.boot_id){boot=m.boot_id;sample=0;progress=0;advances=0;ready_sample=0;ready_ros=0;}
+  if(m.pdo_sample<sample){advances=0;ready_sample=0;ready_ros=0;return;}
+  if(m.pdo_sample>sample){advances=progress>0 && steady>=progress && steady-progress<=20000000 ? std::min(2u,advances+1):1;sample=m.pdo_sample;progress=steady;}
+  received=steady;source=stamp;valid=m.valid_mask;
+  for(unsigned i=0;i<20;++i)if(m.status[i]&8)faults|=1u<<i;
+  for(unsigned i=0;i<14;++i){const auto slot=i<7?i:i+1;q[i]=m.position[slot];v[i]=m.speed[slot];if(!std::isfinite(q[i]) || !std::isfinite(v[i]))valid&=~(1u<<slot);}
+  if(wkc!=expected || (valid&0x7f7f)!=0x7f7f || (faults&0x7f7f)){advances=0;ready_sample=0;ready_ros=0;}
+  if(advances<2){ready_sample=0;ready_ros=0;}
+  else if(!ready_sample){ready_sample=sample;ready_ros=ros;}
+ }
+ bool fresh(int64_t ros,int64_t steady)const{
+  return advances>=2 && expected>0 && wkc==expected && (valid&0x7f7f)==0x7f7f && !(faults&0x7f7f) &&
+   progress>0 && steady>=progress && steady-progress<=20000000 && ros>=source && ros-source+int64_t(age*1e9)<=20000000;
+ }
+};
+} // namespace position_session
