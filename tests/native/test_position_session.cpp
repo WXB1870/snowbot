@@ -32,6 +32,33 @@ int main(){
  o.sampled_ns=1300000000;w.evaluate(p,o,1300000000);assert(w.reason==EXPIRED);
  p.policy=1;w.evaluate(p,o,1300000000);assert(w.disabled);
  p.selected=false;w.evaluate(p,o,1300000000);assert(!w.disabled&&w.reason==OK);
+ // Motion continued during transport: servo PAUSE captures .41, while the
+ // sender had measured .40. The acknowledged point is the fixed RT request.
+ p.selected=true;p.policy=2;p.operation=1;p.session=4;p.sequence=1;p.deadline=1600000000;
+ o.sampled_ns=1400000000;o.sample=20;w.evaluate(p,o,1400000000);
+ p.operation=2;++p.sequence;p.q.fill(.41f);o.position.fill(.42f);
+ w.evaluate(p,o,1401000000);assert(w.reason==PAUSED&&!w.disabled&&w.captured);
+ assert(w.hold[0]==.41f&&w.hold_sample==20&&w.output.q[0]==.41f);
+ o.attempted_ns=1401000000;w.report_hold(o,arms_mask);assert(o.hold_valid&&o.hold_position[0]==.41f);
+ w.report_hold(o,arms_mask&~1u);assert(!o.hold_valid);
+ o.status[0]=0x23;w.report_hold(o,arms_mask);assert(!o.hold_valid);
+ o.status[0]=0x27;w.report_hold(o,arms_mask);assert(o.hold_valid);
+ p.q.fill(.43f);o.position.fill(.44f);o.sample=21;o.sampled_ns=1600000000;
+ w.evaluate(p,o,1600000000);assert(w.reason==EXPIRED&&!w.disabled&&w.output.q[0]==.41f&&w.hold_sample==20);
+ // Declared measured_hold does not turn invalid feedback/Fault/conflict or
+ // cycle errors into a healthy hold. Keep the configured policy unchanged.
+ for(auto failure:{CONTROL_SOURCE_CONFLICT,CYCLE_OR_TRACKING_ERROR}){
+  p.operation=1;++p.sequence;p.deadline=1800000000;p.failure_reason=failure;
+  o.sampled_ns=1601000000;w.evaluate(p,o,1601000000);
+  assert(w.disabled&&w.reason==failure&&p.policy==2);
+  w.report_hold(o,arms_mask);assert(!o.hold_valid);
+ }
+ p.failure_reason=0;p.operation=1;++p.sequence;w.evaluate(p,o,1601000000);
+ assert(w.reason==OK&&!w.disabled&&!w.captured);
+ p.operation=2;++p.sequence;p.policy=1;p.deadline=1602000000;
+ w.evaluate(p,o,1601000000);assert(w.reason==PAUSED&&!w.disabled);
+ o.sampled_ns=1602000000;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
+ p.policy=0;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==UNCONFIRMED_POLICY);
  std::atomic<bool> done{false};std::thread writer([&]{Observation s;for(uint64_t i=1;i<=200000;++i){s.sample=i;s.sampled_ns=i;s.position.fill(float(i));s.speed.fill(-float(i));cache.publish(s);}done=true;});
  unsigned coherent=0;while(!done.load()||coherent==0){auto s=cache.read();if(s.sample<=1)continue;++coherent;assert(s.sampled_ns==int64_t(s.sample));for(int j=0;j<20;++j){assert(s.position[j]==float(s.sample));assert(s.speed[j]==-float(s.sample));}}writer.join();
  std::vector<long long> times;times.reserve(20000);for(int i=0;i<20000;++i){auto t=steady_ns();cache.publish(o);times.push_back(steady_ns()-t);}std::sort(times.begin(),times.end());

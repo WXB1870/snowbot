@@ -14,7 +14,7 @@
  
 --- a/ctl_msgs/msg/PositionObservation.msg
 +++ b/ctl_msgs/msg/PositionObservation.msg
-@@ -22,4 +22,8 @@
+@@ -22,4 +22,14 @@
  uint64 bad_wkc_count
  uint64 receive_overruns
  uint64 period_overruns
@@ -22,6 +22,12 @@
 +uint64 command_sequence
 +uint8 session_reason
 +bool session_selected
++# RT hold request actually written to all arm PDO slots. This does NOT confirm
++# physical rest. Bind to boot_id/session/command_sequence and a newer PDO sample.
++bool hold_valid
++uint64 hold_sample
++# L1..L7, R1..R7, rad; fixed for one pause or timeout, never rolling measured q.
++float64[14] hold_position
  # No runtime slave-state or drive-error-code bus reads are added.
 --- a/ctl_msgs/msg/PositionSessionCommand.msg
 +++ b/ctl_msgs/msg/PositionSessionCommand.msg
@@ -940,23 +946,25 @@
      int cycle_count_;
 --- a/servo_control/include/servo_control/position_observation.h
 +++ b/servo_control/include/servo_control/position_observation.h
-@@ -16,6 +16,7 @@
+@@ -16,6 +16,9 @@
   std::array<int16_t,20> torque_raw{};uint32_t current_valid_mask=0,torque_raw_valid_mask=0;
   uint64_t sample=0,attempt=0,bad_wkc=0,receive_overruns=0,period_overruns=0;
   int64_t sampled_ns=0,attempted_ns=0;
 + uint64_t session=0,sequence=0;uint8_t session_reason=0;bool session_selected=false;
++ // Effective, fixed RT hold request, never a physical-stop acknowledgement.
++ std::array<float,14> hold_position{};uint64_t hold_sample=0;bool hold_valid=false;
   uint32_t valid_mask=0;
   int wkc=0,expected_wkc=0;
  };
 --- a/servo_control/include/servo_control/position_watchdog.h
 +++ b/servo_control/include/servo_control/position_watchdog.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,52 @@
 +#pragma once
 +#include "servo_control/position_observation.h"
 +namespace position_session {
 +struct Output {
 + std::array<float,14> q{},v{},kp{},kd{},torque{};
-+ uint64_t session=0,sequence=0;int64_t deadline=0;uint8_t operation=0,policy=0;
++ uint64_t session=0,sequence=0;int64_t deadline=0;uint8_t operation=0,policy=0,failure_reason=0;
 + bool selected=false;
 +};
 +// Same SPSC ownership protocol as observation, reversed direction (ROS -> RT).
@@ -966,25 +974,38 @@
 + void publish(const Output& value){slots_[back_]=value;back_=middle_.exchange(back_|4u,std::memory_order_acq_rel)&3u;}
 + Output read(){if(middle_.load(std::memory_order_acquire)&4u)front_=middle_.exchange(front_,std::memory_order_acq_rel)&3u;return slots_[front_];}
 +};
-+enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5};
++enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5,CONTROL_SOURCE_CONFLICT=6,CYCLE_OR_TRACKING_ERROR=7};
 +struct Watchdog {
 + Output output{};uint8_t reason=OK;bool disabled=false,captured=false;
-+ uint64_t session=0,sequence=0;
++ uint64_t session=0,sequence=0,hold_sample=0;
 + std::array<float,14> hold{};
++ void report_hold(Observation& obs,uint32_t written)const{
++  obs.hold_position=hold;obs.hold_sample=hold_sample;
++  obs.hold_valid=output.selected && !disabled && captured && (reason==PAUSED || reason==EXPIRED) &&
++   written==arms_mask && measured(obs,obs.attempted_ns) && !(fault_mask(obs)&arms_mask);
++  for(unsigned i=0;i<20;++i)if((arms_mask&(1u<<i)) && (obs.status[i]&0x6f)!=0x27)obs.hold_valid=false;
++  for(float q:hold)if(!std::isfinite(q))obs.hold_valid=false;
++ }
 + void evaluate(const Output& input,const Observation& obs,int64_t now){
 +  output=input;if(!input.selected){reason=OK;disabled=false;captured=false;return;}
 +  const bool takeover=input.operation==1 && (input.session!=session || input.sequence>sequence);
++  const bool new_pause=input.operation==2 && (input.session!=session || input.sequence>sequence);
 +  if(takeover && measured(obs,now) && !(fault_mask(obs)&arms_mask)){reason=OK;captured=false;}
++  if(new_pause)captured=false;
 +  if(session!=input.session)sequence=0;session=input.session;sequence=std::max(sequence,input.sequence);
 +  // Each rejection keeps the original deadline and never arms old targets.
 +  if(input.policy==0)reason=UNCONFIRMED_POLICY;
++  else if(input.failure_reason>=CONTROL_SOURCE_CONFLICT)reason=input.failure_reason;
 +  else if(!measured(obs,now))reason=FEEDBACK_INVALID;
 +  else if(fault_mask(obs)&arms_mask)reason=DRIVE_FAULT;
 +  else if(now>=input.deadline && reason!=DRIVE_FAULT && reason!=FEEDBACK_INVALID)reason=EXPIRED;
 +  else if(reason==OK || reason==PAUSED)reason=input.operation==2?PAUSED:OK;
 +  disabled=reason>=FEEDBACK_INVALID || (reason==EXPIRED && input.policy==1);
-+  if(reason==EXPIRED && !disabled){
-+   if(!captured){for(unsigned i=0;i<14;++i)hold[i]=obs.position[i<7?i:i+1];captured=true;}
++  if((reason==PAUSED || reason==EXPIRED) && !disabled){
++   // PAUSE already captured a fresh servo seed. Preserve that exact point
++   // when its source deadline expires; neither feedback nor re-publication
++   // may move the expected hold. A motion timeout captures once in RT.
++   if(!captured){for(unsigned i=0;i<14;++i)hold[i]=reason==PAUSED?input.q[i]:obs.position[i<7?i:i+1];hold_sample=obs.sample;captured=true;}
 +   output.q=hold;output.v.fill(0);
 +  }
 + }
@@ -1013,11 +1034,13 @@
    <depend>boost</depend>
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -97,7 +97,32 @@
+@@ -97,7 +97,34 @@
          for(int i=0;i<20;++i){m.position[i]=s.position[i];m.speed[i]=s.speed[i];m.current[i]=s.current[i];m.status[i]=s.status[i];}
          m.current_valid_mask=m.valid_mask&s.current_valid_mask;m.torque_raw_valid_mask=m.valid_mask&s.torque_raw_valid_mask;m.torque_raw=s.torque_raw;
          m.bad_wkc_count=s.bad_wkc;m.receive_overruns=s.receive_overruns;m.period_overruns=s.period_overruns;
 +        m.session=s.session;m.command_sequence=s.sequence;m.session_reason=s.session_reason;m.session_selected=s.session_selected;
++        m.hold_valid=s.hold_valid;m.hold_sample=s.hold_sample;
++        for(unsigned i=0;i<14;++i)m.hold_position[i]=s.hold_position[i];
          position_observation_pub_->publish(m);
 +    });
 +    position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
@@ -1046,7 +1069,7 @@
      });
      //上位机接收器初始化
      CtlData = this->create_subscription<snowbot_ctl_msgs::msg::CtlInformation>(
-@@ -1243,6 +1268,8 @@
+@@ -1243,6 +1270,8 @@
      std::chrono::steady_clock::time_point shutdown_start_time;
      std::chrono::steady_clock::time_point shutdown_settle_start_time;
  
@@ -1055,7 +1078,7 @@
      //开启ros2循环
      while (rclcpp::ok()){
          //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
-@@ -1637,7 +1664,9 @@
+@@ -1637,7 +1666,9 @@
  
          //----------------------
          //进行一轮EtherCAT发送
@@ -1065,7 +1088,7 @@
          if (arm_shutdown_handoff_pending && shutdown_mode_) {
              EtherCAT_EndArmShutdownHandoff();
              arm_shutdown_handoff_pending = false;
-@@ -1706,6 +1735,7 @@
+@@ -1706,6 +1737,7 @@
  //传输信息回调函数 -- 接收消息并执行插补任务
  void ServoNode::message_callback(const snowbot_ctl_msgs::msg::CtlInformation::SharedPtr msg){
  
@@ -1073,7 +1096,7 @@
      // 关机回零独占目标、插补和使能控制，不能被排队的上位机消息重新覆盖。
      if (shutdown_mode_) {
          return;
-@@ -1737,8 +1767,7 @@
+@@ -1737,8 +1769,7 @@
      } else if (!shutdown_mode_) {   // 关机回零期间忽略上位机使能指令
          for (int i = 0; i < LARMDOF; i++) EtherCAT_setSingleMotorEnable(i, msg->l_motor_enable[i] != 0);
          for (int i = 0; i < RARMDOF; i++) EtherCAT_setSingleMotorEnable(8 + i, msg->r_motor_enable[i] != 0);
@@ -1083,7 +1106,7 @@
          EtherCAT_setMotorEnable(true);
      }
  
-@@ -2211,3 +2240,77 @@
+@@ -2211,3 +2242,78 @@
      }
      if (h_step >= h_winlen) h_ifRunin = false;
  }
@@ -1121,6 +1144,7 @@
 + position_output_.session=m.session;position_output_.sequence=m.sequence;
 + position_output_.deadline=position_gate_.deadline();position_output_.operation=m.operation;
 + position_output_.policy=position_stop_policy_=="disable_no_load"?1:2;
++ position_output_.failure_reason=0;
 + for(unsigned i=0;i<7;++i){
 +  position_output_.kp[i]=packet->command.l_kp[i];position_output_.kd[i]=packet->command.l_kd[i];position_output_.torque[i]=packet->command.l_torque_grav_comp[i];
 +  position_output_.kp[i+7]=packet->command.r_kp[i];position_output_.kd[i+7]=packet->command.r_kd[i];position_output_.torque[i+7]=packet->command.r_torque_grav_comp[i];
@@ -1135,12 +1159,12 @@
 +void ServoNode::position_step(){
 + if(!position_gate_.selected())return;
 + const auto now=position_session::steady_ns();const auto dt=position_interval_.tick(now);
-+ if(impedance_enable_){position_output_.deadline=now;position_output_.policy=1;position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}
++ if(impedance_enable_){position_gate_.interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CONTROL_SOURCE_CONFLICT;position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}
 + // Never let a local ROS loop stall extend the source's monotonic deadline.
 + if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
 +  bool valid=position_follower_.step(dt) && position_session::in_limits(position_follower_.q);
 +  for(unsigned i=0;i<14;++i)if(std::abs(position_follower_.q[i]-position_feedback_.q[i])>.25)valid=false;
-+  if(!valid){position_output_.deadline=now;position_output_.policy=1;position_rejection_="cycle_limit_or_tracking_error";}
++  if(!valid){position_gate_.interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;position_rejection_="cycle_limit_or_tracking_error";}
 +  for(unsigned i=0;i<14;++i){position_output_.q[i]=position_follower_.q[i];position_output_.v[i]=position_follower_.v[i];}
 + }
 + EtherCAT_positionOutput(position_output_);
@@ -1186,27 +1210,30 @@
              if (m < 16 && arm_shutdown_handoff_.load()) {
                  m_rx_[m]->controlword = 0x0006;
                  m_rx_[m]->KP = 0.0f;
-@@ -772,6 +781,14 @@
+@@ -772,6 +781,16 @@
          }
      }
  
++    uint32_t position_written=0;
 +    if(session_packet.selected && !session_watchdog_.disabled){
 +        const auto& cmd=session_watchdog_.output;
 +        for(unsigned i=0;i<14;++i){const unsigned m=i<7?i:i+1;
 +            if(!m_rx_[m] || enable_step[m]<EN_STEP*6)continue;
 +            m_rx_[m]->target_position=cmd.q[i];m_rx_[m]->target_speed=cmd.v[i];
 +            m_rx_[m]->KP=cmd.kp[i];m_rx_[m]->KD=cmd.kd[i];m_rx_[m]->target_torque=cmd.torque[i];
++            position_written|=1u<<m;
 +        }
 +    }
      // --- PDO 收发 ---
      const auto io_start = std::chrono::steady_clock::now();
      if (pdo_timing_initialized_) {
-@@ -857,6 +874,8 @@
+@@ -857,6 +876,9 @@
          if(complete && std::isfinite(obs.position[m]) && std::isfinite(obs.speed[m]) && std::isfinite(obs.current[m]))
              obs.valid_mask|=1u<<m;
      }
 +    obs.session=session_watchdog_.session;obs.sequence=session_watchdog_.sequence;
 +    obs.session_reason=session_watchdog_.reason;obs.session_selected=session_packet.selected;
++    session_watchdog_.report_hold(obs,position_written);
      observation_cache_.publish(obs);
      ++completed_pdo_cycles_;
  
