@@ -1,0 +1,356 @@
+--- a/ctl_msgs/msg/PositionObservation.msg
++++ b/ctl_msgs/msg/PositionObservation.msg
+@@ -1,5 +1,8 @@
+ # Independent observation. Legacy RetInformation and its meaning are unchanged.
+ std_msgs/Header header
++# Same successful PDO sample and pdo_age as joint feedback, sensor axes Fx,Fy,Fz,Mx,My,Mz.
++float32[12] wrench
++uint8 sensor_valid_mask
+ uint64 boot_id
+ # Successful complete receives; unchanged under failed WKC or frozen RT.
+ uint64 pdo_sample
+--- a/servo_control/include/impedance/cartesian_impedance_controller.h
++++ b/servo_control/include/impedance/cartesian_impedance_controller.h
+@@ -101,6 +101,7 @@
+ }
+ 
+ struct ImpedanceConfig {
++  bool session_reference_only{false};
+   std::string urdf_path;             // URDF 文件绝对路径
+   std::string ee_link;               // 末端 link 名 (arm_x_link_7)
+   std::vector<std::string> controlled_joint_names;  // 该臂控制的关节名 (7 个)
+@@ -350,6 +351,8 @@
+ 
+   /// 外部主动设置参考 (同步, 用于 hold 模式或紧急停止)
+   void setReference(const ReferenceType& ref);
++  // One named joint reference, FK and full-body twist in this controller's model/TCP.
++  bool setNominalReference(const VectorXd& q, const VectorXd& dq);
+   /// 便捷重载: 直接用 Affine3d 设置末端位姿参考.
+   ///   twist: 若传入非空则作为期望速度; 否则置零.
+   ///   accel: 始终置零 (协调层只关心位姿和速度).
+@@ -359,6 +362,7 @@
+   void clearReference();
+ 
+  private:
++  std::unique_ptr<pinocchio::Data> nominal_data_;
+   /// 增量式数值 IK (阻尼伪逆迭代).
+   ///   给定末端目标位姿 T_desired, 在 q_seed 附近迭代收敛到关节解.
+   ///   每帧目标连续时只需 2-3 次迭代即可收敛, 适合 1kHz RT 线程.
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -1,3 +1,4 @@
++#include "rcl_interfaces/msg/parameter_descriptor.hpp"
+ #include "position_connection_diagnostics.h"
+ #include "position_session_contract.h"
+ #include "snowbot_ctl_msgs/msg/position_observation.hpp"
+@@ -181,6 +182,12 @@
+         uint64_t position_frame_=0;
+         bool position_startup_complete_=false;
+         std::string position_stop_policy_;
++        std::string session_execution_mode_="position";
++        bool session_calibration_confirmed_=false,session_impedance_active_=false;
++        uint64_t session_impedance_session_=0;
++        bool session_impedance_step();
++        bool session_impedance_ready() const;
++        std::array<int,20> session_q_index_{},session_v_index_{};
+         void position_step();
+ 
+         rclcpp::Publisher<snowbot_ctl_msgs::msg::PositionObservation>::SharedPtr position_observation_pub_;
+--- a/servo_control/include/servo_control/position_observation.h
++++ b/servo_control/include/servo_control/position_observation.h
+@@ -13,6 +13,7 @@
+ }
+ struct Observation {
+  std::array<float,20> position{},speed{},current{};
++ std::array<float,12> wrench{};uint8_t sensor_valid_mask=0;
+  std::array<uint16_t,20> status{};
+  std::array<int16_t,20> torque_raw{};uint32_t current_valid_mask=0,torque_raw_valid_mask=0;
+  uint64_t sample=0,attempt=0,bad_wkc=0,receive_overruns=0,period_overruns=0;
+@@ -50,4 +51,9 @@
+   s.sampled_ns>0 && now>=s.sampled_ns && now-s.sampled_ns<=20000000 &&
+   (s.valid_mask&mask)==mask;
+ }
++inline bool sensor_measured(const Observation& s,int64_t now){
++ if(!measured(s,now,0xfffff) || s.sensor_valid_mask!=3)return false;
++ for(float value:s.wrench)if(!std::isfinite(value))return false;
++ return true;
++}
+ } // namespace position_session
+--- a/servo_control/include/servo_control/position_watchdog.h
++++ b/servo_control/include/servo_control/position_watchdog.h
+@@ -4,7 +4,8 @@
+ struct Output {
+  std::array<float,joint_count> q{},v{},kp{},kd{},torque{};
+  uint64_t session=0,sequence=0;int64_t deadline=0;uint8_t operation=0,policy=0,failure_reason=0;
+- bool selected=false;
++ bool selected=false,impedance=false;
++ std::array<float,joint_count> hold_kp{},hold_kd{},hold_torque{};
+ };
+ // Same SPSC ownership protocol as observation, reversed direction (ROS -> RT).
+ class OutputCache {
+@@ -13,7 +14,7 @@
+  void publish(const Output& value){slots_[back_]=value;back_=middle_.exchange(back_|4u,std::memory_order_acq_rel)&3u;}
+  Output read(){if(middle_.load(std::memory_order_acquire)&4u)front_=middle_.exchange(front_,std::memory_order_acq_rel)&3u;return slots_[front_];}
+ };
+-enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5,CONTROL_SOURCE_CONFLICT=6,CYCLE_OR_TRACKING_ERROR=7};
++enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5,CONTROL_SOURCE_CONFLICT=6,CYCLE_OR_TRACKING_ERROR=7,IMPEDANCE_INVALID=8};
+ struct Watchdog {
+  Output output{};uint8_t reason=OK;bool disabled=false,captured=false;
+  uint64_t session=0,sequence=0,hold_sample=0;
+@@ -40,6 +41,7 @@
+   // Each rejection keeps the original deadline and never arms old targets.
+   if(input.policy==0)reason=UNCONFIRMED_POLICY;
+   else if(input.failure_reason>=CONTROL_SOURCE_CONFLICT)reason=input.failure_reason;
++  else if(input.impedance && !sensor_measured(obs,now))reason=IMPEDANCE_INVALID;
+   else if(!measured(obs,now))reason=FEEDBACK_INVALID;
+   else if(fault_mask(obs)&controlled_mask)reason=DRIVE_FAULT;
+   else if(now>=input.deadline && reason!=DRIVE_FAULT && reason!=FEEDBACK_INVALID)reason=EXPIRED;
+@@ -51,6 +53,7 @@
+    // may move the expected hold. A motion timeout captures once in RT.
+    if(!captured){for(unsigned i=0;i<joint_count;++i)hold[i]=reason==PAUSED?input.q[i]:obs.position[position_slot(i)];hold_sample=obs.sample;captured=true;}
+    output.q=hold;output.v.fill(0);
++   if(input.impedance){output.kp=input.hold_kp;output.kd=input.hold_kd;output.torque=input.hold_torque;output.impedance=false;}
+   }
+  }
+ };
+--- a/servo_control/src/impedance/cartesian_impedance_controller.cpp
++++ b/servo_control/src/impedance/cartesian_impedance_controller.cpp
+@@ -614,7 +614,8 @@
+   // 维度校验: 48 + 7*n_dof_ ≤ 48 + 7*7 = 97 ≤ 100 (要求 n_dof_ ≤ 7)
+   status_msg_.data.resize(48 + 7 * n_dof_, 0.0);
+ 
+-  reference_sub_ = node_->create_subscription<ReferenceType>(
++  nominal_data_ = std::make_unique<pinocchio::Data>(robot_model_);
++  if(!config_.session_reference_only)reference_sub_ = node_->create_subscription<ReferenceType>(
+       ns + "/reference", qos_lowlatency,
+       [this](const ReferenceType::SharedPtr msg) {
+         {
+@@ -827,7 +828,9 @@
+   //   注: jacobian_dt_ 同样变换 (近似, 忽略 dT/dt 项, 慢运动下误差可忽略)
+   applyTcpOffsetToJacobian(jacobian_);
+ 
+-  actual_twist_.noalias() = jacobian_ * robot_dq_;
++  // Measured TCP velocity includes waist and other ancestor joints.
++  applyTcpOffsetToJacobian(jacobian_full_);
++  actual_twist_.noalias() = jacobian_full_ * dq_full_cache_;
+ 
+   // 末端加速度: 数值差分 + 低通滤波
+   actual_accel_ = acc_lpf_alpha_ / delta_t_ * (actual_twist_ - actual_twist_last_) +
+@@ -1522,6 +1525,25 @@
+   RCLCPP_INFO(node_->get_logger(), "Impedance disabled: bias cleared");
+ }
+ 
++bool CartesianImpedanceController::setNominalReference(const VectorXd& q, const VectorXd& dq) {
++  if(!initialized_ || n_dof_!=7 || !nominal_data_ || q.size()!=robot_model_.nq || dq.size()!=robot_model_.nv || !q.allFinite() || !dq.allFinite())return false;
++  pinocchio::forwardKinematics(robot_model_,*nominal_data_,q,dq);
++  pinocchio::updateFramePlacements(robot_model_,*nominal_data_);
++  const auto& frame=nominal_data_->oMf[ee_frame_];
++  const Eigen::Vector3d offset=frame.rotation()*t_ee_in_tcp_;
++  const Eigen::Vector3d p=frame.translation()+offset;
++  Eigen::Quaterniond orientation(frame.rotation()*R_ee_to_tcp_);orientation.normalize();
++  const auto velocity=pinocchio::getFrameVelocity(robot_model_,*nominal_data_,ee_frame_,pinocchio::LOCAL_WORLD_ALIGNED);
++  const Eigen::Vector3d linear=velocity.linear()+velocity.angular().cross(offset);
++  ReferenceType ref{};
++  ref.pose.position.x=p.x();ref.pose.position.y=p.y();ref.pose.position.z=p.z();
++  ref.pose.orientation.x=orientation.x();ref.pose.orientation.y=orientation.y();ref.pose.orientation.z=orientation.z();ref.pose.orientation.w=orientation.w();
++  ref.pose_twist.linear.x=linear.x();ref.pose_twist.linear.y=linear.y();ref.pose_twist.linear.z=linear.z();
++  ref.pose_twist.angular.x=velocity.angular().x();ref.pose_twist.angular.y=velocity.angular().y();ref.pose_twist.angular.z=velocity.angular().z();
++  for(size_t i=0;i<n_dof_;++i)ref.q_d_nullspace[i]=q(controlled_q_idx_[i]);
++  setReference(ref);return true;
++}
++
+ void CartesianImpedanceController::setReference(const ReferenceType& ref) {
+   {
+     std::lock_guard<std::mutex> lock(rt_reference_mutex_);
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -95,6 +95,7 @@
+         m.receive_attempt=s.attempt;m.wkc=s.wkc;m.expected_wkc=s.expected_wkc;
+         m.valid_mask=m.pdo_age>=0 && m.pdo_age<=.02 ? s.valid_mask : 0;
+         for(int i=0;i<20;++i){m.position[i]=s.position[i];m.speed[i]=s.speed[i];m.current[i]=s.current[i];m.status[i]=s.status[i];}
++        m.wrench=s.wrench;m.sensor_valid_mask=s.sensor_valid_mask;
+         m.current_valid_mask=m.valid_mask&s.current_valid_mask;m.torque_raw_valid_mask=m.valid_mask&s.torque_raw_valid_mask;m.torque_raw=s.torque_raw;
+         m.bad_wkc_count=s.bad_wkc;m.receive_overruns=s.receive_overruns;m.period_overruns=s.period_overruns;
+         m.session=s.session;m.command_sequence=s.sequence;m.session_reason=s.session_reason;m.session_selected=s.session_selected;
+@@ -105,6 +106,10 @@
+     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
+     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
+     position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
++    rcl_interfaces::msg::ParameterDescriptor session_descriptor;session_descriptor.read_only=true;
++    session_execution_mode_=declare_parameter<std::string>("execution_mode","position",session_descriptor);
++    if(session_execution_mode_!="position" && session_execution_mode_!="impedance")throw std::invalid_argument("execution_mode");
++    session_calibration_confirmed_=declare_parameter<bool>("impedance_calibration_confirmed",false,session_descriptor);
+     position_stop_policy_=declare_parameter<std::string>("position_stop_policy","unconfirmed");
+     if(position_stop_policy_!="unconfirmed" && position_stop_policy_!="disable_no_load" && position_stop_policy_!="measured_hold")throw std::invalid_argument("position_stop_policy");
+     position_follower_.vmax=declare_parameter<double>("position_max_velocity",.25);
+@@ -112,7 +117,7 @@
+     if(!std::isfinite(position_follower_.vmax)||!std::isfinite(position_follower_.amax)||position_follower_.vmax<=0||position_follower_.amax<=0)throw std::invalid_argument("position dynamic limits");
+     position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.control_source=impedance_enable_?"impedance":"position";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.control_source=impedance_enable_?"legacy_impedance":session_execution_mode_;
+         m.startup_complete=position_startup_complete_ && !shutdown_mode_;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+         m.state=!m.selected?"idle":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
+         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+@@ -260,8 +265,14 @@
+                 "Loading impedance config: %s", yaml_path_impedance.c_str());
+ 
+     auto make_config = [&](const std::string& side) {
+-        return snowbot_impedance::ImpedanceConfig::fromYaml(
+-            yaml_path_impedance, side, urdf_path);
++        auto cfg=snowbot_impedance::ImpedanceConfig::fromYaml(yaml_path_impedance, side, urdf_path);
++        if(session_execution_mode_=="impedance"){
++            cfg.session_reference_only=true;
++            // The joint follower already provides one smooth 16-axis reference.
++            cfg.filter_params_pose=1.;cfg.filter_params_nullspace=1.;
++            cfg.integral_gain_joint.assign(7,0.);cfg.force_feedback_gain.assign(6,0.);
++        }
++        return cfg;
+     };
+ 
+     impedance_left_  = std::make_shared<snowbot_impedance::CartesianImpedanceController>();
+@@ -281,6 +292,19 @@
+         RCLCPP_ERROR(this->get_logger(),
+                      "Impedance controller init failed (left=%d right=%d)",
+                      ok_l, ok_r);
++    }
++
++    session_q_index_.fill(-1);session_v_index_.fill(-1);
++    if(impedance_inited_ && session_execution_mode_=="impedance"){
++        if(impedance_left_->getNqFull()!=20 || impedance_right_->getNqFull()!=20 || impedance_left_->getDof()!=7 || impedance_right_->getDof()!=7)throw std::invalid_argument("session impedance model layout");
++        for(unsigned i=0;i<20;++i){
++            const std::string name=i<8?"arm_l_joint_"+std::to_string(i+1):i<16?"arm_r_joint_"+std::to_string(i-7):i<18?"head_joint_"+std::to_string(i-15):"body_joint_"+std::to_string(i-17);
++            session_q_index_[i]=impedance_left_->getJointQIdx(name);session_v_index_[i]=impedance_left_->getJointVIdx(name);
++            if(session_q_index_[i]<0 || session_q_index_[i]>=20 || session_v_index_[i]<0 || session_v_index_[i]>=20 || session_q_index_[i]!=impedance_right_->getJointQIdx(name) || session_v_index_[i]!=impedance_right_->getJointVIdx(name))throw std::invalid_argument("session impedance joint mapping: "+name);
++        }
++        for(unsigned i=0;i<7;++i){
++            if(impedance_left_->getControlledQIdx()[i]!=session_q_index_[i] || impedance_right_->getControlledQIdx()[i]!=session_q_index_[i+8])throw std::invalid_argument("session impedance arm order");
++        }
+     }
+ 
+     // 双臂协调层初始化 (可选, 默认 OFF).
+@@ -425,6 +449,7 @@
+     dual_arm_mode_sub_ = create_subscription<std_msgs::msg::String>(
+         "~/dual_arm/mode", 10,
+         [this](const std_msgs::msg::String::SharedPtr msg) {
++            if(session_execution_mode_=="impedance" || position_gate_.selected())return;
+             auto prev = dual_arm_coordinator_.mode();
+             auto m = snowbot_impedance::stringToDualArmMode(msg->data);
+             dual_arm_coordinator_.setMode(m);
+@@ -469,6 +494,7 @@
+     impedance_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+         "~/impedance_enable", 10,
+         [this](const std_msgs::msg::Bool::SharedPtr msg) {
++            if(session_execution_mode_=="impedance" || position_gate_.selected())return;
+             if (!impedance_inited_ && msg->data) {
+                 RCLCPP_WARN(this->get_logger(),
+                             "Impedance not initialized, ignore enable");
+@@ -570,6 +596,7 @@
+ }
+ 
+ void ServoNode::applyImpedanceControl() {
++    if(session_execution_mode_=="impedance" && position_gate_.selected())return;
+     // 0. 提前获取六维力传感器数据并滤波
+     //    无论阻抗是否使能都持续更新, 使能时无阶跃
+     float fx, fy, fz, mx, my, mz;
+@@ -2283,6 +2310,7 @@
+   position_output_.kp[i]=packet->command.l_kp[i];position_output_.kd[i]=packet->command.l_kd[i];position_output_.torque[i]=packet->command.l_torque_grav_comp[i];
+   position_output_.kp[i+7]=packet->command.r_kp[i];position_output_.kd[i+7]=packet->command.r_kd[i];position_output_.torque[i+7]=packet->command.r_torque_grav_comp[i];
+  }
++ position_output_.hold_kp=position_output_.kp;position_output_.hold_kd=position_output_.kd;position_output_.hold_torque=position_output_.torque;
+  position_output_.selected=true;
+  if(m.operation==1 && !derived){
+   for(unsigned i=0;i<position_session::joint_count;++i)EtherCAT_setSingleMotorEnable(position_session::position_slot(i),true);
+@@ -2301,11 +2329,17 @@
+   if(!valid){position_gate_.interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;position_rejection_="cycle_limit_or_tracking_error";}
+   for(unsigned i=0;i<position_session::joint_count;++i){position_output_.q[i]=position_follower_.q[i];position_output_.v[i]=position_follower_.v[i];}
+  }
++ if(session_execution_mode_=="impedance" && position_gate_.live(now) && position_output_.failure_reason==0){
++  if(!session_impedance_step()){
++   position_gate_.interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::IMPEDANCE_INVALID;position_rejection_="impedance_sensor_or_output_invalid";
++  }
++ }
+  EtherCAT_positionOutput(position_output_);
+ }
+ 
+ bool ServoNode::position_ready(){
+  if(!position_initialized_){position_wait_reason_=position_init_error_;return false;}
++ if(session_execution_mode_=="impedance" && !session_impedance_ready()){position_wait_reason_="impedance_calibration_or_sensor_unavailable";return false;}
+  if(!position_endpoint())return false;
+  const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if(!position_feedback_.sample){position_wait_reason_=position_feedback_.received_messages?"pdo_not_started":"publisher_found_no_message";return false;}
+@@ -2319,3 +2353,57 @@
+  if(position_feedback_gid_!=endpoint.publisher_gid){position_feedback_=position_session::Tracker{};position_gate_.interrupt();position_feedback_gid_=endpoint.publisher_gid;}
+  return true;
+ }
++
++
++bool ServoNode::session_impedance_ready() const {
++ const auto obs=EtherCAT_positionObservation();
++ if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
++ for(float value:obs.wrench)if(!std::isfinite(value))return false;
++ return true;
++}
++
++bool ServoNode::session_impedance_step(){
++ const auto obs=EtherCAT_positionObservation();
++ if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
++ snowbot_impedance::VectorXd q=snowbot_impedance::VectorXd::Zero(impedance_left_->getNqFull());
++ snowbot_impedance::VectorXd dq=q,efforts=q;
++ for(unsigned i=0;i<20;++i){
++  if(session_q_index_[i]<0 || session_v_index_[i]<0 || !(obs.valid_mask&(1u<<i)))return false;
++  q[session_q_index_[i]]=obs.position[i];dq[session_v_index_[i]]=obs.speed[i];
++ }
++ const auto& gl=impedance_left_->computeGravityLive(q,dq);
++ const auto& gr=impedance_right_->computeGravityLive(q,dq);
++ for(unsigned i=0;i<7;++i){
++  EtherCAT_setGravityFF(i,float(gl[i]));EtherCAT_setGravityFF(i+8,float(gr[i]));
++  position_output_.hold_torque[i]=float(gl[i]);position_output_.hold_torque[i+7]=float(gr[i]);
++ }
++ if(position_gate_.last().operation==2){
++  // Explicit PAUSE hands off once to the fixed measured-position hold contract.
++  session_impedance_active_=false;
++  position_output_.impedance=false;position_output_.kp=position_output_.hold_kp;position_output_.kd=position_output_.hold_kd;position_output_.torque=position_output_.hold_torque;
++  return true;
++ }
++ snowbot_impedance::Vector6d wl,wr;
++ for(unsigned i=0;i<6;++i){wl[i]=obs.wrench[i]-impedance_left_->getSensorOffset()[i];wr[i]=obs.wrench[6+i]-impedance_right_->getSensorOffset()[i];}
++ if(!session_impedance_active_ || session_impedance_session_!=position_output_.session){
++  impedance_left_->enable(q,dq,wl);impedance_right_->enable(q,dq,wr);
++  session_impedance_session_=position_output_.session;session_impedance_active_=true;
++ }
++ auto nominal=q;auto velocity=dq;velocity.setZero();
++ for(unsigned i=0;i<position_session::joint_count;++i){const unsigned slot=position_session::position_slot(i);
++  nominal[session_q_index_[slot]]=position_follower_.q[i];velocity[session_v_index_[slot]]=position_follower_.v[i];
++ }
++ if(!impedance_left_->setNominalReference(nominal,velocity) || !impedance_right_->setNominalReference(nominal,velocity))return false;
++ const double dt=TEMPTIME;
++ impedance_left_->update(q,dq,efforts,wl,dt);impedance_right_->update(q,dq,efforts,wr,dt);
++ const auto& tl=impedance_left_->getEffortCommands();const auto& tr=impedance_right_->getEffortCommands();
++ const auto& ql=impedance_left_->getQDNullspaceFiltered();const auto& qr=impedance_right_->getQDNullspaceFiltered();
++ if(!tl.allFinite() || !tr.allFinite() || !ql.allFinite() || !qr.allFinite())return false;
++ for(unsigned i=0;i<7;++i){
++  position_output_.q[i]=float(ql[i]);position_output_.q[i+7]=float(qr[i]);
++  position_output_.v[i]=position_output_.v[i+7]=0.;
++  position_output_.kp[i]=position_output_.kp[i+7]=1.;position_output_.kd[i]=position_output_.kd[i+7]=.2;
++  position_output_.torque[i]=float(tl[i]);position_output_.torque[i+7]=float(tr[i]);
++ }
++ position_output_.impedance=true;return true;
++}
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -889,6 +889,14 @@
+         if(complete && std::isfinite(obs.position[m]) && std::isfinite(obs.speed[m]) && std::isfinite(obs.current[m]))
+             obs.valid_mask|=1u<<m;
+     }
++    obs.sensor_valid_mask=0;
++    for(unsigned a=0;a<2;++a){
++        if(!complete || !s_tx_[a])continue;
++        const float values[]={s_tx_[a]->Fx,s_tx_[a]->Fy,s_tx_[a]->Fz,s_tx_[a]->Mx,s_tx_[a]->My,s_tx_[a]->Mz};
++        bool valid=true;
++        for(unsigned j=0;j<6;++j){obs.wrench[6*a+j]=values[j];valid=valid && std::isfinite(values[j]);}
++        if(valid)obs.sensor_valid_mask|=1u<<a;
++    }
+     obs.session=session_watchdog_.session;obs.sequence=session_watchdog_.sequence;
+     obs.session_reason=session_watchdog_.reason;obs.session_selected=session_packet.selected;
+     session_watchdog_.report_hold(obs,position_written);

@@ -29,6 +29,24 @@ class PositionReleaseTests(unittest.TestCase):
             for package in ('robot_control','dual_arm_control','servo_control'):
                 if name=='position_session_ros.h' and package=='servo_control':continue
                 self.assertEqual((vendor.ASSETS/name).read_bytes(),(self.release/'src'/package/'include'/name).read_bytes())
+    def test_optional_impedance_is_explicit_and_stays_disabled(self):
+        output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
+        manifest=json.loads((output/'position_release.json').read_text())
+        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'impedance'})
+        self.assertEqual(manifest['execution_mode'],'position')
+        self.assertTrue(manifest['impedance_available'])
+        self.assertFalse(manifest['impedance_calibration_confirmed'])
+        self.assertEqual(manifest['stop_policy'],'unconfirmed')
+        default=json.loads((self.release/'position_release.json').read_text())
+        self.assertFalse(default['impedance_available'])
+        self.assertEqual((self.release/'src/servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes(),
+                         (self.baseline/'servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes())
+        for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
+            rel='ctl_msgs/msg/'+name+'.msg'
+            self.assertEqual((self.baseline/rel).read_bytes(),(output/'src'/rel).read_bytes())
+        with self.assertRaisesRegex(ValueError,'IMPEDANCE_REQUIRES_FULL_SESSION'):
+            vendor.prepare(self.baseline,self.work/'invalid-impedance',with_impedance=True,observation_only=True)
+
     def test_output_overlap_existing_and_missing_rejected(self):
         for source,output,error in ((self.baseline,self.baseline/'bad','OVERLAP'),(self.baseline,self.release,'EXISTS'),(self.work/'absent',self.work/'bad','MISSING')):
             with self.assertRaisesRegex(ValueError,error):vendor.prepare(source,output)
