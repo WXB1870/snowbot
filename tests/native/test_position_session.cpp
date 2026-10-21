@@ -11,6 +11,36 @@ using namespace position_session;
 #ifdef POSITION_PDO_OUTPUT_TEST
 void check_position_pdo_output();
 #endif
+// One continuous watchdog crosses TTL; healthy frames, PAUSE and deselection
+// cannot release a prior fault. Only a newly admitted explicit takeover can.
+void check_latched_failures(){
+ Observation obs;obs.sample=1;obs.valid_mask=0xfffff;obs.wkc=obs.expected_wkc=67;obs.status.fill(0x27);obs.position.fill(.2);
+ for(auto cause:{FEEDBACK_INVALID,DRIVE_FAULT,UNCONFIRMED_POLICY,CONTROL_SOURCE_CONFLICT,CYCLE_OR_TRACKING_ERROR}){
+  Watchdog guard;Output cmd;cmd.selected=true;cmd.policy=2;cmd.operation=1;cmd.admission_generation=10;
+  cmd.session=20;cmd.sequence=1;cmd.deadline=1200000000;cmd.trajectory=true;cmd.rt_deadline=1020000000;
+  obs.sampled_ns=1000000000;obs.wkc=67;obs.status.fill(0x27);guard.evaluate(cmd,obs,1000000000);assert(!guard.disabled);
+  if(cause==FEEDBACK_INVALID)obs.wkc=61;
+  else if(cause==DRIVE_FAULT)obs.status[0]|=8;
+  else if(cause==UNCONFIRMED_POLICY)cmd.policy=0;
+  else if(cause==CONTROL_SOURCE_CONFLICT)cmd.failure_reason=cause;
+  // No fresh sample: genuine RT sampler fault occurs before the source TTL.
+  const auto fault_time=cause==CYCLE_OR_TRACKING_ERROR?1020000000:1001000000;
+  obs.sampled_ns=fault_time;guard.evaluate(cmd,obs,fault_time);assert(guard.disabled&&guard.reason==cause);
+  obs.wkc=67;obs.status.fill(0x27);cmd.policy=2;cmd.failure_reason=0;
+  for(int64_t t=fault_time+1000000;t<=1260000000;t+=1000000){
+   obs.sampled_ns=obs.attempted_ns=t;cmd.rt_deadline=t+20000000;
+   cmd.operation=(t%3000000==0)?2:1;cmd.trajectory_phase=cmd.operation==2?4:2;
+   guard.evaluate(cmd,obs,t);guard.report_hold(obs,controlled_mask);
+   assert(guard.disabled&&guard.reason==cause&&!obs.hold_valid&&!guard.motor_enabled(true,true,0));
+  }
+  cmd.selected=false;guard.evaluate(cmd,obs,1260000000);assert(guard.disabled&&guard.output.selected);
+  cmd.selected=true;cmd.operation=1;cmd.deadline=1460000000;cmd.rt_deadline=1280000000;
+  guard.evaluate(cmd,obs,1260000000);assert(guard.disabled); // Replay old takeover token.
+  ++cmd.sequence;++cmd.admission_generation;
+  guard.evaluate(cmd,obs,1260000000);assert(!guard.disabled&&guard.reason==OK&&!guard.captured);
+ }
+ std::cout<<"PASS continuous latched sampler/feedback/drive/policy/conflict failures across TTL, replay/deselection rejection and new takeover recovery\n";
+}
 int main(){
 #ifdef POSITION_PDO_OUTPUT_TEST
  check_position_pdo_output();
@@ -45,19 +75,19 @@ int main(){
  assert(position_slot(14)==18&&position_slot(15)==19&&controlled_mask==0xc7f7f);
  assert(std::abs(csp_radians(csp_counts(.1234))-.1234)<=.5/csp_counts_per_rad);
  assert(!f.step(.1));Interval clock;clock.reset(1000000000);assert(std::abs(clock.tick(1001000000)-.001)<1e-12);assert(clock.tick(1001000000)<0);
- Output p;p.selected=true;p.policy=2;p.operation=1;p.session=1;p.sequence=1;p.deadline=1100000000;p.q.fill(.3);Watchdog w;w.evaluate(p,o,1000000000);assert(!w.disabled&&w.reason==OK);
+ Output p;p.selected=true;p.policy=2;p.operation=1;p.session=1;p.sequence=1;p.admission_generation=1;p.deadline=1100000000;p.q.fill(.3);Watchdog w;w.evaluate(p,o,1000000000);assert(!w.disabled&&w.reason==OK);
  o.sampled_ns=1100000000;w.evaluate(p,o,1100000000);assert(w.reason==EXPIRED&&!w.disabled&&w.output.q[0]==.2f);
  o.position[0]=.6f;o.sampled_ns=1101000000;w.evaluate(p,o,1101000000);assert(w.output.q[0]==.2f); // Capture once, not drifting feedback.
  o.wkc=61;w.evaluate(p,o,1102000000);assert(w.disabled&&w.reason==FEEDBACK_INVALID);
- o.wkc=67;o.status[0]|=8;w.evaluate(p,o,1103000000);assert(w.disabled&&w.reason==DRIVE_FAULT);
- o.status[0]=0x27;o.sampled_ns=1104000000;++p.sequence;p.deadline=1300000000;w.evaluate(p,o,1104000000);assert(w.reason==OK&&!w.disabled);
+ o.wkc=67;o.status[0]|=8;w.evaluate(p,o,1103000000);assert(w.disabled&&w.reason==FEEDBACK_INVALID); // First failure stays latched.
+ o.status[0]=0x27;o.sampled_ns=1104000000;++p.sequence;++p.admission_generation;p.deadline=1300000000;w.evaluate(p,o,1104000000);assert(w.reason==OK&&!w.disabled);
  // Fresh ROS output copies cannot extend the original RT deadline.
  o.sampled_ns=1300000000;w.evaluate(p,o,1300000000);assert(w.reason==EXPIRED);
  p.policy=1;w.evaluate(p,o,1300000000);assert(w.disabled);
- p.selected=false;w.evaluate(p,o,1300000000);assert(!w.disabled&&w.reason==OK);
+ p.selected=false;w.evaluate(p,o,1300000000);assert(w.disabled&&w.reason==EXPIRED);
  // Motion continued during transport: servo PAUSE captures .41, while the
  // sender had measured .40. The acknowledged point is the fixed RT request.
- p.selected=true;p.policy=2;p.operation=1;p.session=4;p.sequence=1;p.deadline=1600000000;
+ p.selected=true;p.policy=2;p.operation=1;p.session=4;p.sequence=1;++p.admission_generation;p.deadline=1600000000;
  o.sampled_ns=1400000000;o.sample=20;w.evaluate(p,o,1400000000);
  p.operation=2;++p.sequence;p.q.fill(.41f);o.position.fill(.42f);
  w.evaluate(p,o,1401000000);assert(w.reason==PAUSED&&!w.disabled&&w.captured);
@@ -71,17 +101,20 @@ int main(){
  // Declared measured_hold does not turn invalid feedback/Fault/conflict or
  // cycle errors into a healthy hold. Keep the configured policy unchanged.
  for(auto failure:{CONTROL_SOURCE_CONFLICT,CYCLE_OR_TRACKING_ERROR}){
-  p.operation=1;++p.sequence;p.deadline=1800000000;p.failure_reason=failure;
+  p.operation=1;++p.sequence;++p.admission_generation;p.deadline=1800000000;p.failure_reason=0;
+  o.sampled_ns=1601000000;w.evaluate(p,o,1601000000);assert(!w.disabled);
+  p.failure_reason=failure;
   o.sampled_ns=1601000000;w.evaluate(p,o,1601000000);
   assert(w.disabled&&w.reason==failure&&p.policy==2);
   w.report_hold(o,controlled_mask);assert(!o.hold_valid);
  }
- p.failure_reason=0;p.operation=1;++p.sequence;w.evaluate(p,o,1601000000);
+ p.failure_reason=0;p.operation=1;++p.sequence;++p.admission_generation;w.evaluate(p,o,1601000000);
  assert(w.reason==OK&&!w.disabled&&!w.captured);
  p.operation=2;++p.sequence;p.policy=1;p.deadline=1602000000;
  w.evaluate(p,o,1601000000);assert(w.reason==PAUSED&&!w.disabled);
  o.sampled_ns=1602000000;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
- p.policy=0;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==UNCONFIRMED_POLICY);
+ p.policy=0;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
+ check_latched_failures();
  std::atomic<bool> done{false};std::thread writer([&]{Observation s;for(uint64_t i=1;i<=200000;++i){s.sample=i;s.sampled_ns=i;s.position.fill(float(i));s.speed.fill(-float(i));cache.publish(s);}done=true;});
  unsigned coherent=0;while(!done.load()||coherent==0){auto s=cache.read();if(s.sample<=1)continue;++coherent;assert(s.sampled_ns==int64_t(s.sample));for(int j=0;j<20;++j){assert(s.position[j]==float(s.sample));assert(s.speed[j]==-float(s.sample));}}writer.join();
  std::vector<long long> times;times.reserve(20000);for(int i=0;i<20000;++i){auto t=steady_ns();cache.publish(o);times.push_back(steady_ns()-t);}std::sort(times.begin(),times.end());

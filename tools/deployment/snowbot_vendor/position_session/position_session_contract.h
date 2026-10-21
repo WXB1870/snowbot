@@ -20,10 +20,11 @@ struct Meta {
 template<class M> Meta meta(const M& m){return {m.session,m.sequence,m.source_stamp_ns,m.expires_at_ns,m.operation};}
 inline bool fresh(const Meta& m,int64_t now){return m.session && m.sequence && m.stamp>0 && m.expires>m.stamp && m.expires-m.stamp<=maximum_ttl && now>=m.stamp && now<m.expires && m.operation<=2;}
 class Gate {
- bool interrupted_=false;Meta last_{};int64_t deadline_=0;std::array<uint64_t,32> retired_{};unsigned count_=0;
+ bool interrupted_=false;uint64_t generation_=0;Meta last_{};int64_t deadline_=0;std::array<uint64_t,32> retired_{};unsigned count_=0;
 public:
  const char* rejection="";
- void interrupt(){if(selected()){interrupted_=true;deadline_=0;}}
+ void interrupt(){if(selected()){if(!interrupted_)++generation_;interrupted_=true;deadline_=0;}}
+ uint64_t generation()const{return generation_;}
  const Meta& last()const{return last_;}
  bool selected()const{return last_.session!=0;}
  bool live(int64_t now)const{return selected() && now>0 && now<deadline_;}
@@ -42,7 +43,7 @@ public:
  }
  void commit(const Meta& m,int64_t ros,int64_t steady){
   if(last_.session && m.session!=last_.session)retired_[count_++]=last_.session;
-  interrupted_=false;last_=m;deadline_=steady+(m.expires-ros);
+  interrupted_=false;last_=m;deadline_=steady+(m.expires-ros);++generation_;
  }
 };
 struct Tracker {

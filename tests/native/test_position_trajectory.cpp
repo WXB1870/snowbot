@@ -131,7 +131,7 @@ int main(){
   if(now==1198000000){auto frozen=watchdog;obs.sampled_ns=now+20000000;frozen.evaluate(output,obs,now+20000000);assert(frozen.disabled&&frozen.reason==CYCLE_OR_TRACKING_ERROR);}
  }
  assert(brake&&held);
- Output expired=watchdog.output;expired.rt_deadline=1230000000;obs.sampled_ns=1240000000;
+ Output expired=watchdog.output;expired.rt_deadline=1250000000;obs.sampled_ns=1240000000;
  watchdog.evaluate(expired,obs,1240000000);assert(watchdog.reason==EXPIRED&&!watchdog.disabled);
  // Source deadline remains 1.24 s even after hundreds of derived samples.
  assert(queue.sample(1239000000)&&queue.deadline()==1240000000);

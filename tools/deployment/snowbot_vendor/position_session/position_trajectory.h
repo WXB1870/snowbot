@@ -6,21 +6,75 @@
 #include <atomic>
 #include <string>
 #include <thread>
+#include <cstring>
+#include <functional>
+#include "servo_control/position_watchdog.h"
+#include "servo_control/position_clock.h"
 namespace position_session {
-// Keep a failed source visible across repeated relay frames and slower state publication.
+// Source strings are bounded once on the non-periodic worker. The periodic
+// receipt/identity path copies only fixed storage and never owns a ROS string.
+struct FixedText {
+ std::array<char,129> bytes{};uint16_t size=0;
+ bool assign(const std::string& text)noexcept{
+  if(text.size()>128)return false;
+  size=static_cast<uint16_t>(text.size());std::copy(text.begin(),text.end(),bytes.begin());bytes[size]=0;return true;
+ }
+ void reason(const char* text)noexcept{size=0;while(text[size] && size<128){bytes[size]=text[size];++size;}bytes[size]=0;}
+ const char* c_str()const noexcept{return bytes.data();}
+ bool operator==(const FixedText& b)const noexcept{return size==b.size&&std::equal(bytes.begin(),bytes.begin()+size,b.bytes.begin());}
+ bool operator==(const char* text)const noexcept{return std::strcmp(bytes.data(),text)==0;}
+};
+struct SourceIdentity {
+ FixedText command,lease,profile;uint64_t epoch=0;
+ bool authority(const SourceIdentity& b)const noexcept{return lease==b.lease&&profile==b.profile&&epoch==b.epoch;}
+};
+struct AdmissionContext {
+ uint64_t generation=0,instance=0,frame=0;Meta last{};SourceIdentity identity{};
+ std::array<double,joint_count> target{};FixedText publisher;
+};
+struct ServoCommand {
+ Meta source{};SourceIdentity identity{};uint64_t frame=0,feedback_boot=0,feedback_sample=0,middle_instance=0;
+ std::array<double,joint_count> target{};
+ std::array<float,joint_count> kp{},kd{},torque{};
+ bool derived=false;
+};
 struct RejectedTrajectory {
- Meta source{};std::string reason;bool active=false;
- void reject(const Meta& m,const std::string& why){source=m;reason=why;active=true;}
+ Meta source{};FixedText reason;bool active=false;
+ void reject(const Meta& m,const char* why)noexcept{source=m;reason.reason(why);active=true;}
  bool matches(const Meta& m)const noexcept{return active&&source==m;}
  bool blocks(const Meta& m)const noexcept{return active&&source.session==m.session&&m.sequence<=source.sequence;}
  void clear()noexcept{active=false;}
 };
+template<class Packet> const char* inspect_servo_command(const Packet& packet,const Packet* origin,
+ const AdmissionContext& context,ServoCommand& result)noexcept{
+ result.source=meta(packet.meta);result.frame=packet.frame_sequence;
+ result.feedback_boot=packet.meta.feedback_boot_id;result.feedback_sample=packet.meta.feedback_sample;
+ result.middle_instance=packet.meta.middle_instance_id;result.identity.epoch=packet.meta.epoch;
+ if(packet.meta.reference_mode!=1||packet.trajectory.version!=1||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
+ if(!result.identity.command.assign(packet.meta.source_command_id)||!result.identity.lease.assign(packet.meta.lease_id)||
+    !result.identity.profile.assign(packet.meta.profile_hash)||!result.identity.command.size||!result.identity.lease.size||!result.identity.profile.size)return "source_identity_layout";
+ for(unsigned i=0;i<7;++i){
+  result.target[i]=packet.command.l_position[i];result.target[i+7]=packet.command.r_position[i];
+  const double values[]={packet.command.l_kp[i],packet.command.l_kd[i],packet.command.r_kp[i],packet.command.r_kd[i],packet.command.l_torque_grav_comp[i],packet.command.r_torque_grav_comp[i]};
+  for(double value:values)if(!std::isfinite(value)||!std::isfinite(float(value)))return "nonfinite_gains";
+  if(values[0]<0||values[1]<0||values[2]<0||values[3]<0)return "negative_gains";
+  result.kp[i]=float(values[0]);result.kd[i]=float(values[1]);result.kp[i+7]=float(values[2]);result.kd[i+7]=float(values[3]);
+  result.torque[i]=float(values[4]);result.torque[i+7]=float(values[5]);
+ }
+ for(unsigned i=0;i<2;++i)result.target[i+14]=packet.waist_position[i];
+ if(!in_limits(result.target))return "joint_limit";
+ result.derived=result.source==context.last;
+ if(result.source.operation!=1 && !result.identity.authority(context.identity))return "source_authority_changed";
+ if(result.derived && (!origin || result.target!=context.target || packet.meta!=origin->meta || packet.trajectory!=origin->trajectory))return "source_target_changed";
+ return nullptr;
+}
+
 // The original servo thread owns the bounded timeline and samples it. A separate
 // admission worker imports/certifies immutable segments and reclaims old ones.
 // Sampling/commit do not plan, allocate, free trajectories, log or renew TTL.
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
- struct Entry {std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0;int64_t effective=0,start=0,deadline=0;};
+ struct Entry {std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;};
  std::array<Entry,8> entries_{};unsigned count_=0;const Entry* selected_=nullptr;int64_t clock_offset_=0;
  static_assert(std::atomic<const Segment*>::is_always_lock_free,"lock-free retirement required");
  std::array<std::atomic<const Segment*>,8> retired_{};
@@ -32,7 +86,7 @@ class TrajectoryQueue {
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
 public:
  struct Prepared {
-  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0;int64_t effective=0;
+  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
  std::array<double,joint_count> q{},v{},a{},j{};
@@ -99,14 +153,14 @@ public:
    if(slot.compare_exchange_strong(empty,entries_[i].segment.get(),std::memory_order_release,std::memory_order_relaxed)){entries_[i].segment.release();break;}}
   for(unsigned i=0;i<kept;++i)if(remove)entries_[i]=std::move(entries_[i+remove]);
   count_=kept;auto& entry=entries_[count_++];entry.segment=std::move(input.segment);entry.source=source;
-  entry.id=input.id;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
+  entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
   velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;return nullptr;
  }
  // Non-periodic convenience for native fixtures and offline callers.
  template<class Wire> void accept(const Wire& wire,const Meta& source,int64_t ros,int64_t steady,
    const std::array<double,joint_count>& measured_q,const std::array<double,joint_count>& measured_v,
    double max_v=.25,double max_a=.5,double max_j=162.){
-  auto prepared=prepare(wire,source,max_v,max_a,max_j);const auto error=commit(*prepared,ros,steady,measured_q,measured_v);
+  auto prepared=prepare(wire,source,max_v,max_a,max_j);prepared->admission=source.sequence;const auto error=commit(*prepared,ros,steady,measured_q,measured_v);
   reclaim();if(error)throw std::invalid_argument(error);
  }
  bool sample(int64_t now)noexcept {
@@ -114,6 +168,7 @@ public:
  }
  const Meta& source()const noexcept{return selected_->source;}
  uint64_t id()const noexcept{return selected_->id;}
+ uint64_t admission()const noexcept{return selected_->admission;}
  int64_t deadline()const noexcept{return selected_->deadline;}
  uint8_t phase(int64_t now)const noexcept{
   if(now<selected_->start)return 1;
@@ -121,13 +176,50 @@ public:
   return (now-selected_->start)*1e-9>=selected_->segment->end()?4:3;
  }
 };
+// This is the production periodic admission entry: fixed identity/freshness
+// rechecks and queue ownership transfer only. Parsing/graph checks stay worker-side.
+struct ServoAdmissionState {
+ SourceIdentity identity{};std::array<double,joint_count> target{};uint64_t frame=0;
+ RejectedTrajectory rejected{};
+ AdmissionContext context(const Gate& gate,uint64_t instance,const std::string& publisher)const noexcept{
+  AdmissionContext result;result.generation=gate.generation();result.instance=instance;result.frame=frame;
+  result.last=gate.last();result.identity=identity;result.target=target;result.publisher.assign(publisher);return result;
+ }
+ const char* commit(const ServoCommand& command,TrajectoryQueue::Prepared* prepared,const AdmissionContext& validated,
+   uint64_t instance,bool startup,bool mode_free,uint8_t policy,const Tracker& feedback,int64_t ros,int64_t steady,
+   Gate& gate,TrajectoryQueue& trajectory,Output& output,Interval& interval)noexcept{
+  const auto& source=command.source;
+  if(validated.instance!=instance || validated.generation!=gate.generation())return "admission_generation_changed";
+  if(!startup || !mode_free)return "startup_shutdown_or_mode_conflict";
+  if(!policy)return "stop_policy_unconfirmed";
+  if(!feedback.fresh(ros,steady))return "feedback_or_drive_invalid";
+  if(command.feedback_boot!=feedback.boot || command.feedback_sample<feedback.ready_sample || command.feedback_sample>feedback.sample || source.stamp<feedback.ready_ros)return "feedback_baseline_mismatch";
+  if(rejected.blocks(source))return rejected.reason.c_str();
+  const bool derived=source==gate.last();
+  if(derived!=command.derived)return "admission_source_changed";
+  if(derived){
+   if(!gate.live(steady)||!fresh(source,ros)||command.frame<=frame)return "duplicate_or_expired_frame";
+  }else{
+   if(source.operation!=1 && !command.identity.authority(identity))return "source_authority_changed";
+   if(!gate.accepts(source,ros,steady))return gate.rejection;
+   if(!prepared || !(prepared->source==source))return "prepared_source_mismatch";
+   prepared->admission=gate.generation()+1;
+   if(const auto error=trajectory.commit(*prepared,ros,steady,feedback.q,feedback.v))return error;
+   gate.commit(source,ros,steady);interval.admit(steady,source.operation==1);
+   identity=command.identity;target=command.target;rejected.clear();
+  }
+  frame=command.frame;output.kp=command.kp;output.kd=command.kd;output.torque=command.torque;
+  output.policy=policy;output.failure_reason=0;output.selected=true;return nullptr;
+ }
+};
+
 // One optional non-RT importer, one in-flight packet, fixed SPSC handoff.
 // The original servo thread never locks or waits for import/reclamation.
 template<class Packet> class TrajectoryAdmission {
 public:
- struct Result {typename Packet::SharedPtr packet,retired_packet;std::unique_ptr<TrajectoryQueue::Prepared> prepared;std::string error;};
+ struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;std::string error;};
 private:
- TrajectoryQueue& queue_;typename Packet::SharedPtr input_;std::array<double,3> limits_{};
+ TrajectoryQueue& queue_;typename Packet::SharedPtr input_,origin_;AdmissionContext context_{};std::array<double,3> limits_{};std::function<void(Result&)> inspect_;
  std::atomic<bool> stopping_{false},ready_{false},busy_{false};
  static_assert(std::atomic<Result*>::is_always_lock_free,"lock-free admission handoff required");
  std::atomic<Result*> completed_{nullptr},returned_{nullptr};std::thread worker_;
@@ -139,19 +231,19 @@ private:
    if(!ready_.exchange(false,std::memory_order_acq_rel)){
     std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;
    }
-   auto result=new Result;result->packet=std::move(input_);
-   try{result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}
+   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;
+   try{if(inspect_)inspect_(*result);if(!result->command.derived)result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}
    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
    completed_.store(result,std::memory_order_release);
   }
   delete completed_.exchange(nullptr);delete returned_.exchange(nullptr);queue_.reclaim();
  }
 public:
- explicit TrajectoryAdmission(TrajectoryQueue& queue):queue_(queue),worker_([this]{run();}){}
+ explicit TrajectoryAdmission(TrajectoryQueue& queue,std::function<void(Result&)> inspect={}):queue_(queue),inspect_(std::move(inspect)),worker_([this]{run();}){}
  ~TrajectoryAdmission(){stopping_.store(true,std::memory_order_release);worker_.join();}
- bool submit(typename Packet::SharedPtr packet,double velocity,double acceleration,double jerk)noexcept{
+ bool submit(typename Packet::SharedPtr packet,double velocity,double acceleration,double jerk,const AdmissionContext& context={},typename Packet::SharedPtr origin={})noexcept{
   if(busy_.exchange(true,std::memory_order_acq_rel))return false;
-  input_=std::move(packet);limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
+  input_=std::move(packet);origin_=std::move(origin);context_=context;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
  }
  bool busy()const noexcept{return busy_.load(std::memory_order_acquire);}
  Result* poll()noexcept{return completed_.exchange(nullptr,std::memory_order_acq_rel);}

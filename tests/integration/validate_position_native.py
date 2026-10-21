@@ -91,6 +91,9 @@ def main():
     if not compiler:raise SystemExit('C++ compiler unavailable')
     sources=[args.source/'robot_control/include'/name for name in (
         'position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')]
+    sources += [args.source/'servo_control/include/servo_control'/name for name in
+                ('position_watchdog.h','position_observation.h','position_follower.h')]
+    sources.append(args.source/'servo_control/src/servo_control/ethercat_driver.cpp')
     names=['test_snowbot_reconnect_tracker','test_snowbot_connection_contract','test_position_connection_diagnostics','test_position_initialization','test_position_session']
     native_include=args.source/'servo_control/include/bindu_execution_native'
     native_sources=[args.source/'servo_control/src/bindu_execution_native'/name
@@ -126,8 +129,10 @@ def main():
                 command.append(str(write_pdo_check(args.source,work)))
             elif name=='test_position_trajectory':
                 command.extend(map(str,native_sources))
-            subprocess.run(command,check=True,capture_output=True,text=True)
-            result=subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=30)
+            compiled=subprocess.run(command,capture_output=True,text=True)
+            if compiled.returncode:raise RuntimeError(compiled.stdout+compiled.stderr)
+            result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=30)
+            if result.returncode:raise RuntimeError(result.stdout+result.stderr)
             results[name]=result.stdout.strip()
             print(result.stdout.strip())
     after={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}

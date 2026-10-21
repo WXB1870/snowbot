@@ -55,6 +55,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',type=Path,required=True)
     parser.add_argument('--prefix',type=Path,required=True)
+    parser.add_argument('--require-production-poll',action='store_true',help='Require the native fixture to embed the actual production position_poll body')
     args=parser.parse_args()
     source=args.source.resolve();prefix=args.prefix.resolve()
     tests=Path(__file__).resolve().parents[1]/'native'
@@ -107,7 +108,16 @@ def main():
         end=servo.index('\nbool ServoNode::position_ready()',start)
         methods=servo[start:end]+servo[servo.index('bool ServoNode::session_impedance_ready() const'):]
         for name in ('test_impedance_nominal','test_session_impedance'):
-            text=(tests/(name+'.cpp')).read_text().replace('// PRODUCTION_METHODS',methods)
+            text=(tests/(name+'.cpp')).read_text()
+            poll_fixture='// PRODUCTION_POLL_METHODS' in text
+            if name=='test_session_impedance' and args.require_production_poll and not poll_fixture:
+                raise RuntimeError('PRODUCTION_POLL_FIXTURE_REQUIRED')
+            text=text.replace('// PRODUCTION_METHODS',methods)
+            if poll_fixture:
+                poll_start=servo.index('void ServoNode::position_poll()')
+                poll_methods=servo[poll_start:servo.index('void ServoNode::position_step()',poll_start)]
+                text=text.replace('// PRODUCTION_POLL_METHODS',poll_methods)
+                print('Production position_poll SHA256 '+hashlib.sha256(poll_methods.encode()).hexdigest())
             path=work/(name+'.cpp');path.write_text(text);binary=work/name
             run(flags+[str(path),*map(str,objects),'-L'+str(prefix/'lib'),'-Wl,-rpath,'+str(prefix/'lib'),
                        '-lpinocchio_default','-lpinocchio_parsers','-lyaml-cpp','-o',str(binary)])
