@@ -1,0 +1,454 @@
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -5,6 +5,7 @@
+  */
+ #include "servo_control/ethercat_driver.h"
+ 
++#include <array>
+ #include <cstdio>
+ #include <cstring>
+ #include <cmath>
+@@ -76,6 +77,171 @@
+ 
+ EtherCATDriver::~EtherCATDriver() { stop(); }
+ 
++namespace {
++// Initialization-only evidence. No bus access, retries, error-ring mutation,
++// allocation, or output on the OP handshake / realtime paths.
++struct InitDiagnostics {
++    struct Count { unsigned read_positive=0, read_nonpositive=0, write_positive=0, write_nonpositive=0; };
++    struct FailedSDO {
++        unsigned sequence=0; uint16 slave=0, index=0; uint8 sub=0;
++        boolean complete_access=FALSE; bool write=false; int requested_size=0, returned_size=0, timeout=0, result=0;
++        uint32 value=0; unsigned copied_bytes=0;
++    };
++    struct CachedError { const char* stage=""; unsigned sequence=0; ec_errort error{}; };
++    struct Map {
++        uint16 config_address=0, station_alias=0, object_alias=0, obits=0, ibits=0;
++        uint32 manufacturer=0, product=0, revision=0, obytes=0, ibytes=0;
++        bool outputs=false, inputs=false; std::array<ec_smt,2> sm{};
++        std::array<uint8,2> sm_type{}; std::array<ec_fmmut,EC_MAXFMMU> fmmu{};
++    };
++    struct State { uint16 first=0, first_al=0, last=0, last_al=0; };
++    std::array<Count,EC_MAXSLAVE> counts{};
++    std::array<uint16,EC_MAXSLAVE> object_alias{};
++    std::array<FailedSDO,128> failed{};
++    std::array<CachedError,128> errors{};
++    std::array<Map,EC_MAXSLAVE> maps{};
++    std::array<State,EC_MAXSLAVE> states{};
++    std::array<int,EC_MAXSLAVE> op_write{};
++    unsigned sdo_calls=0, failed_count=0, failed_overflow=0, error_count=0, error_overflow=0;
++    unsigned unknown_slave_calls=0, readstate_calls=0;
++    int error_cursor=0, mapped_slaves=0, iomap_bytes=0, output_wkc=0, input_wkc=0;
++    int safeop_write=0, readstate_result=0, first_wkc=0, last_wkc=0;
++    uint16 safeop_return=0, safeop_raw=0;
++    bool mapped=false, checked_safeop=false, partial_bulk_error_cache=false;
++
++    void reset_error_cursor() noexcept {
++        error_cursor=ecx_context.elist ? ecx_context.elist->head : 0;
++    }
++    bool cached_errors(const char* stage, unsigned sequence=0) noexcept {
++        const auto* ring=ecx_context.elist;
++        if(!ring)return false;
++        const int end=ring->head;
++        bool found=false;
++        // This is our own cursor. SOEM head/tail/Signal/EcatError are untouched.
++        for(unsigned n=0;error_cursor!=end && n<EC_MAXELIST+1;++n){
++            if(error_cursor<0 || error_cursor>EC_MAXELIST){error_cursor=end;break;}
++            found=true;
++            if(error_count<errors.size())errors[error_count++]={stage,sequence,ring->Error[error_cursor]};
++            else ++error_overflow;
++            error_cursor=error_cursor==EC_MAXELIST ? 0 : error_cursor+1;
++        }
++        return found;
++    }
++    void sdo(unsigned sequence, bool write, uint16 slave, uint16 index, uint8 sub, boolean ca,
++             int requested, int returned, void* value, int timeout, int result) noexcept {
++        const bool error_added=cached_errors(write?"sdo_write":"sdo_read",sequence);
++        if(slave<counts.size()){
++            auto& c=counts[slave];
++            if(write){if(result>0)++c.write_positive;else ++c.write_nonpositive;}
++            else {if(result>0)++c.read_positive;else ++c.read_nonpositive;}
++        }else ++unknown_slave_calls;
++        if(!write && result>0 && index==0x2002 && sub==0 && returned==2 && requested>=2 && slave<object_alias.size())
++            std::memcpy(&object_alias[slave],value,2);
++        if(result>0 && !error_added)return;
++        if(failed_count==failed.size()){++failed_overflow;return;}
++        auto& f=failed[failed_count++];
++        f.sequence=sequence;f.slave=slave;f.index=index;f.sub=sub;f.complete_access=ca;f.write=write;
++        f.requested_size=requested;f.returned_size=returned;f.timeout=timeout;f.result=result;
++        // A failed read buffer is not a valid device value. Writes remain the original request bytes.
++        if(value && (write || result>0)){
++            const int available=write?requested:std::min(requested,returned);
++            f.copied_bytes=available>0?static_cast<unsigned>(std::min(available,4)):0;
++            std::memcpy(&f.value,value,f.copied_bytes);
++        }
++    }
++    void mapping(int bytes) noexcept {
++        iomap_bytes=bytes;mapped=true;partial_bulk_error_cache=true;
++        cached_errors("config_map_cached_tail");
++        mapped_slaves=std::min(ec_slavecount,EC_MAXSLAVE-1);
++        output_wkc=ec_group[0].outputsWKC;input_wkc=ec_group[0].inputsWKC;
++        for(int s=1;s<=mapped_slaves;++s){
++            const auto& v=ec_slave[s];auto& m=maps[s];
++            m.config_address=v.configadr;m.station_alias=v.aliasadr;m.object_alias=object_alias[s];
++            m.manufacturer=v.eep_man;m.product=v.eep_id;m.revision=v.eep_rev;
++            m.obits=v.Obits;m.ibits=v.Ibits;m.obytes=v.Obytes;m.ibytes=v.Ibytes;
++            m.outputs=v.outputs!=nullptr;m.inputs=v.inputs!=nullptr;
++            for(unsigned n=0;n<2;++n){m.sm[n]=v.SM[n+2];m.sm_type[n]=v.SMtype[n+2];}
++            for(unsigned n=0;n<EC_MAXFMMU;++n)m.fmmu[n]=v.FMMU[n];
++        }
++    }
++    void op_state(int result, int wkc) noexcept {
++        readstate_result=result;
++        if(!readstate_calls)first_wkc=wkc;
++        last_wkc=wkc;
++        for(int s=1;s<=std::min(ec_slavecount,EC_MAXSLAVE-1);++s){
++            auto& v=states[s];
++            if(!readstate_calls){v.first=ec_slave[s].state;v.first_al=ec_slave[s].ALstatuscode;}
++            v.last=ec_slave[s].state;v.last_al=ec_slave[s].ALstatuscode;
++        }
++        ++readstate_calls;
++        cached_errors("op_existing_readstate");
++    }
++    void dump(const char* outcome) const {
++        std::printf("[INIT-DIAG] outcome=%s sdo_calls=%u failed_or_cached_error=%u failed_overflow=%u cached_errors=%u error_overflow=%u unknown_slave_calls=%u bulk_cache_may_wrap=%u\n",
++            outcome,sdo_calls,failed_count,failed_overflow,error_count,error_overflow,unknown_slave_calls,unsigned(partial_bulk_error_cache));
++        for(unsigned s=0;s<counts.size();++s){const auto& c=counts[s];
++            if(c.read_positive||c.read_nonpositive||c.write_positive||c.write_nonpositive)
++                std::printf("[INIT-DIAG] SDO-count slave=%u read_positive=%u read_nonpositive=%u write_positive=%u write_nonpositive=%u\n",
++                    s,c.read_positive,c.read_nonpositive,c.write_positive,c.write_nonpositive);
++        }
++        for(unsigned n=0;n<failed_count;++n){const auto& f=failed[n];
++            std::printf("[INIT-DIAG] SDO seq=%u op=%s slave=%u index=0x%04x sub=0x%02x ca=%u request_size=%d returned_size=%d timeout=%d result=%d request_or_valid_read_bytes=%u raw=0x%08x\n",
++                f.sequence,f.write?"write":"read",unsigned(f.slave),unsigned(f.index),unsigned(f.sub),unsigned(f.complete_access),
++                f.requested_size,f.returned_size,f.timeout,f.result,f.copied_bytes,unsigned(f.value));
++        }
++        for(unsigned n=0;n<error_count;++n){const auto& e=errors[n];
++            std::printf("[INIT-DIAG] cached-error stage=%s sdo_seq=%u time=%u.%06u slave=%u index=0x%04x sub=0x%02x type=%u code=0x%08x\n",
++                e.stage,e.sequence,unsigned(e.error.Time.sec),unsigned(e.error.Time.usec),unsigned(e.error.Slave),
++                unsigned(e.error.Index),unsigned(e.error.SubIdx),unsigned(e.error.Etype),unsigned(e.error.AbortCode));
++        }
++        if(mapped){
++            std::printf("[INIT-DIAG] map_cache_only bytes=%d outputsWKC=%d inputsWKC=%d expectedWKC=%d slaves=%d\n",
++                iomap_bytes,output_wkc,input_wkc,output_wkc*2+input_wkc,mapped_slaves);
++            for(int s=1;s<=mapped_slaves;++s){const auto& m=maps[s];
++                std::printf("[INIT-DIAG] map slave=%d config=0x%04x station_alias=%u object2002_alias=%u man=0x%08x product=0x%08x rev=0x%08x Obits=%u Ibits=%u Obytes=%u Ibytes=%u outputs=%u inputs=%u\n",
++                    s,unsigned(m.config_address),unsigned(m.station_alias),unsigned(m.object_alias),unsigned(m.manufacturer),unsigned(m.product),unsigned(m.revision),
++                    unsigned(m.obits),unsigned(m.ibits),unsigned(m.obytes),unsigned(m.ibytes),unsigned(m.outputs),unsigned(m.inputs));
++                for(unsigned n=0;n<2;++n)std::printf("[INIT-DIAG] SM slave=%d sm=%u type=%u start=0x%04x length=%u flags=0x%08x\n",
++                    s,n+2,unsigned(m.sm_type[n]),unsigned(etohs(m.sm[n].StartAddr)),unsigned(etohs(m.sm[n].SMlength)),unsigned(etohl(m.sm[n].SMflags)));
++                for(unsigned n=0;n<EC_MAXFMMU;++n){const auto& f=m.fmmu[n];
++                    std::printf("[INIT-DIAG] FMMU slave=%d fmmu=%u active=%u type=%u length=%u physical=0x%04x\n",
++                        s,n,unsigned(f.FMMUactive),unsigned(f.FMMUtype),unsigned(etohs(f.LogLength)),unsigned(etohs(f.PhysStart)));
++                }
++            }
++        }
++        if(checked_safeop)std::printf("[INIT-DIAG] SAFE_OP write_result=%d statecheck_return=0x%02x master_raw=0x%02x per_slave_AL_not_refreshed_by_statecheck0=1\n",
++            safeop_write,unsigned(safeop_return),unsigned(safeop_raw));
++        std::printf("[INIT-DIAG] OP existing_readstate_calls=%u last_readstate_result=%d first_wkc=%d last_wkc=%d\n",
++            readstate_calls,readstate_result,first_wkc,last_wkc);
++        if(readstate_calls)for(int s=1;s<=mapped_slaves;++s){const auto& v=states[s];
++            std::printf("[INIT-DIAG] OP slave=%d write_result=%d first_state=0x%02x first_AL=0x%04x last_state=0x%02x last_AL=0x%04x\n",
++                s,op_write[s],unsigned(v.first),unsigned(v.first_al),unsigned(v.last),unsigned(v.last_al));
++        }
++    }
++};
++thread_local InitDiagnostics* current_init_diagnostics=nullptr;
++struct InitDiagnosticsScope {
++    InitDiagnostics* previous;
++    explicit InitDiagnosticsScope(InitDiagnostics& value) noexcept : previous(current_init_diagnostics) {current_init_diagnostics=&value;}
++    ~InitDiagnosticsScope(){current_init_diagnostics=previous;}
++};
++int init_sdo_write(uint16 slave,uint16 index,uint8 sub,boolean ca,int size,void* value,int timeout){
++    auto* d=current_init_diagnostics;
++    const unsigned sequence=d?++d->sdo_calls:0;
++    const int result=ec_SDOwrite(slave,index,sub,ca,size,value,timeout);
++    if(d)d->sdo(sequence,true,slave,index,sub,ca,size,size,value,timeout,result);
++    return result;
++}
++int init_sdo_read(uint16 slave,uint16 index,uint8 sub,boolean ca,int* size,void* value,int timeout){
++    auto* d=current_init_diagnostics;
++    const unsigned sequence=d?++d->sdo_calls:0;
++    const int requested=*size;
++    const int result=ec_SDOread(slave,index,sub,ca,size,value,timeout);
++    if(d)d->sdo(sequence,false,slave,index,sub,ca,requested,*size,value,timeout,result);
++    return result;
++}
++} // namespace
++
+ // ========== 电机 PDO 配置 (SDO, PREOP) ==========
+ void EtherCATDriver::motorPDOConfig(int slave) {
+     int s = slave;
+@@ -83,42 +249,42 @@
+     uint8_t zero = 0;
+ 
+     // RxPDO 0x1600: 6 entries
+-    ec_SDOwrite(s, 0x1600, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6040 << 16) | (0x00 << 8) | 0x10;  // Controlword
+-    ec_SDOwrite(s, 0x1600, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x200F << 16) | (0x01 << 8) | 0x20;  // KP
+-    ec_SDOwrite(s, 0x1600, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x200F << 16) | (0x02 << 8) | 0x20;  // KD
+-    ec_SDOwrite(s, 0x1600, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x200F << 16) | (0x03 << 8) | 0x20;  // Target position
+-    ec_SDOwrite(s, 0x1600, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x200F << 16) | (0x04 << 8) | 0x20;  // Target speed
+-    ec_SDOwrite(s, 0x1600, 5, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 5, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x200F << 16) | (0x05 << 8) | 0x20;  // Target torque
+-    ec_SDOwrite(s, 0x1600, 6, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 6, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     uint8_t n = 6;
+-    ec_SDOwrite(s, 0x1600, 0, FALSE, sizeof(n), &n, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 0, FALSE, sizeof(n), &n, EC_TIMEOUTSAFE);
+ 
+     // TxPDO 0x1A00: 4 entries
+-    ec_SDOwrite(s, 0x1A00, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6041 << 16) | (0x00 << 8) | 0x10;  // Statusword
+-    ec_SDOwrite(s, 0x1A00, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x2010 << 16) | (0x00 << 8) | 0x20;  // Actual position
+-    ec_SDOwrite(s, 0x1A00, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x2011 << 16) | (0x00 << 8) | 0x20;  // Actual speed
+-    ec_SDOwrite(s, 0x1A00, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x2012 << 16) | (0x00 << 8) | 0x20;  // Actual current
+-    ec_SDOwrite(s, 0x1A00, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     n = 4;
+-    ec_SDOwrite(s, 0x1A00, 0, FALSE, sizeof(n), &n, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 0, FALSE, sizeof(n), &n, EC_TIMEOUTSAFE);
+ 
+     // SM PDO assignment
+     uint16_t rx_pdo = 0x1600, tx_pdo = 0x1A00;
+     uint8_t one = 1;
+-    ec_SDOwrite(s, 0x1C12, 1, FALSE, sizeof(rx_pdo), &rx_pdo, EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C12, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C13, 1, FALSE, sizeof(tx_pdo), &tx_pdo, EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C13, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C12, 1, FALSE, sizeof(rx_pdo), &rx_pdo, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C12, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C13, 1, FALSE, sizeof(tx_pdo), &tx_pdo, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C13, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
+ 
+     printf("[PDO] Motor slave %d configured\n", s);
+ }
+@@ -129,24 +295,24 @@
+     // 检查电机 Station Alias，判断是手臂还是头腰
+     uint16_t alias = 0;
+     int size = sizeof(alias);
+-    ec_SDOread(s, 0x2002, 0, FALSE, &size, &alias, EC_TIMEOUTSAFE);
++    init_sdo_read(s, 0x2002, 0, FALSE, &size, &alias, EC_TIMEOUTSAFE);
+ 
+     int8_t mode = MODE_PT;
+     if (alias >= 17 && alias <= 20) {
+         // 头腰(17~20)使用标准 CSP 纯位置模式 (0x6060 = 8)
+         mode = MODE_CSP;
+-        ec_SDOwrite(s, 0x6060, 0, FALSE, sizeof(mode), &mode, EC_TIMEOUTSAFE);
++        init_sdo_write(s, 0x6060, 0, FALSE, sizeof(mode), &mode, EC_TIMEOUTSAFE);
+         uint16_t torque_limit = 1000;
+-        ec_SDOwrite(s, 0x60E0, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
+-        ec_SDOwrite(s, 0x60E1, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
++        init_sdo_write(s, 0x60E0, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
++        init_sdo_write(s, 0x60E1, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
+         printf("[SDO] Motor %d (alias %d): CSP mode (8) set, torque_limit=%d\n", s, alias, torque_limit);
+     } else {
+         // 手臂(1~16)使用 PT 阻抗模式 (0x6060 = 0xFF)
+         mode = MODE_PT;
+-        ec_SDOwrite(s, 0x6060, 0, FALSE, sizeof(mode), &mode, EC_TIMEOUTSAFE);
++        init_sdo_write(s, 0x6060, 0, FALSE, sizeof(mode), &mode, EC_TIMEOUTSAFE);
+         uint16_t torque_limit = 950;  // 95% 最大转矩
+-        ec_SDOwrite(s, 0x60E0, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
+-        ec_SDOwrite(s, 0x60E1, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
++        init_sdo_write(s, 0x60E0, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
++        init_sdo_write(s, 0x60E1, 0, FALSE, sizeof(torque_limit), &torque_limit, EC_TIMEOUTSAFE);
+         printf("[SDO] Motor %d (alias %d): PT mode set\n", s, alias);
+     }
+ }
+@@ -158,50 +324,50 @@
+     uint8_t zero = 0;
+ 
+     // 1. 禁用 SM PDO
+-    ec_SDOwrite(s, 0x1C12, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C13, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C12, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C13, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
+ 
+     // 2. RxPDO 0x1600 (outputs_t): 0x6040(16bit) + 0x607A(32bit) + 0x60FF(32bit) + 0x6071(16bit) + 0x6060(8bit) + reserved(8bit) = 14 bytes
+-    ec_SDOwrite(s, 0x1600, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6040 << 16) | (0x00 << 8) | 0x10;  // Controlword
+-    ec_SDOwrite(s, 0x1600, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x607A << 16) | (0x00 << 8) | 0x20;  // Target Position (counts)
+-    ec_SDOwrite(s, 0x1600, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x60FF << 16) | (0x00 << 8) | 0x20;  // Target Velocity
+-    ec_SDOwrite(s, 0x1600, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6071 << 16) | (0x00 << 8) | 0x10;  // Target Torque
+-    ec_SDOwrite(s, 0x1600, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6060 << 16) | (0x00 << 8) | 0x08;  // ModeOp
+-    ec_SDOwrite(s, 0x1600, 5, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 5, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x2000 << 16) | (0x00 << 8) | 0x08;  // Reserved padding
+-    ec_SDOwrite(s, 0x1600, 6, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 6, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     uint8_t n_rx = 6;
+-    ec_SDOwrite(s, 0x1600, 0, FALSE, sizeof(n_rx), &n_rx, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1600, 0, FALSE, sizeof(n_rx), &n_rx, EC_TIMEOUTSAFE);
+ 
+     // 3. TxPDO 0x1A00 (inputs_t): 0x6041(16bit) + 0x6064(32bit) + 0x606C(32bit) + 0x6077(16bit) + 0x6061(8bit) + reserved(8bit) = 14 bytes
+-    ec_SDOwrite(s, 0x1A00, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 0, FALSE, sizeof(zero), &zero, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6041 << 16) | (0x00 << 8) | 0x10;  // Statusword
+-    ec_SDOwrite(s, 0x1A00, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 1, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6064 << 16) | (0x00 << 8) | 0x20;  // Actual Position (counts)
+-    ec_SDOwrite(s, 0x1A00, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 2, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x606C << 16) | (0x00 << 8) | 0x20;  // Actual Velocity
+-    ec_SDOwrite(s, 0x1A00, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 3, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6077 << 16) | (0x00 << 8) | 0x10;  // Actual Torque
+-    ec_SDOwrite(s, 0x1A00, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 4, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x6061 << 16) | (0x00 << 8) | 0x08;  // ModeDisplay
+-    ec_SDOwrite(s, 0x1A00, 5, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 5, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     entry = ((uint32_t)0x2000 << 16) | (0x00 << 8) | 0x08;  // Reserved padding
+-    ec_SDOwrite(s, 0x1A00, 6, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 6, FALSE, sizeof(entry), &entry, EC_TIMEOUTSAFE);
+     uint8_t n_tx = 6;
+-    ec_SDOwrite(s, 0x1A00, 0, FALSE, sizeof(n_tx), &n_tx, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1A00, 0, FALSE, sizeof(n_tx), &n_tx, EC_TIMEOUTSAFE);
+ 
+     // 4. 指派 SM2/SM3
+     uint16_t rx_pdo = 0x1600, tx_pdo = 0x1A00;
+     uint8_t one = 1;
+-    ec_SDOwrite(s, 0x1C12, 1, FALSE, sizeof(rx_pdo), &rx_pdo, EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C12, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C13, 1, FALSE, sizeof(tx_pdo), &tx_pdo, EC_TIMEOUTSAFE);
+-    ec_SDOwrite(s, 0x1C13, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C12, 1, FALSE, sizeof(rx_pdo), &rx_pdo, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C12, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C13, 1, FALSE, sizeof(tx_pdo), &tx_pdo, EC_TIMEOUTSAFE);
++    init_sdo_write(s, 0x1C13, 0, FALSE, sizeof(one),   &one,    EC_TIMEOUTSAFE);
+ 
+     printf("[PDO] CSP Motor slave %d configured (0x607A/0x6064)\n", s);
+ }
+@@ -220,6 +386,8 @@
+ 
+ // ========== 初始化 ==========
+ bool EtherCATDriver::init(const std::string& ifname) {
++    InitDiagnostics diagnostics;
++    InitDiagnosticsScope diagnostics_scope(diagnostics);
+     strncpy(ifname_, ifname.c_str(), sizeof(ifname_) - 1);
+ 
+     // 重置接力标志（支持 stop 后再次 init）
+@@ -228,15 +396,22 @@
+ 
+     if (!ec_init(ifname_)) {
+         printf("[EtherCAT] Error: No socket on %s\n", ifname_);
++        diagnostics.dump("no_socket");
+         return false;
+     }
+ 
++    diagnostics.reset_error_cursor();
+     if (ec_config_init(FALSE) <= 0) {
++        diagnostics.partial_bulk_error_cache=true;
++        diagnostics.cached_errors("config_init_cached_tail");
+         printf("[EtherCAT] Error: No slaves found\n");
+         ec_close();
++        diagnostics.dump("no_slaves");
+         return false;
+     }
+ 
++    diagnostics.partial_bulk_error_cache=true;
++    diagnostics.cached_errors("config_init_cached_tail");
+     printf("[EtherCAT] %d slaves found\n", ec_slavecount);
+     for (int i = 1; i <= ec_slavecount; i++) {
+         printf("  Slave %d: %s  Man=0x%08X ID=0x%08X\n",
+@@ -257,7 +432,7 @@
+             uint16_t next_alias = 0;
+             int size = sizeof(next_alias);
+             if (s + 1 <= ec_slavecount) {
+-                ec_SDOread(s + 1, 0x2002, 0, FALSE, &size, &next_alias, EC_TIMEOUTSAFE);
++                init_sdo_read(s + 1, 0x2002, 0, FALSE, &size, &next_alias, EC_TIMEOUTSAFE);
+             }
+ 
+             if (next_alias >= 1 && next_alias <= 8) {
+@@ -282,7 +457,7 @@
+         // 尝试读取电机的 Station Alias (0x2002:00)
+         uint16_t alias = 0;
+         int size = sizeof(alias);
+-        int ret = ec_SDOread(s, 0x2002, 0, FALSE, &size, &alias, EC_TIMEOUTSAFE);
++        int ret = init_sdo_read(s, 0x2002, 0, FALSE, &size, &alias, EC_TIMEOUTSAFE);
+ 
+         if (ret > 0 && alias > 0) {
+             int motor_idx = -1;
+@@ -321,7 +496,7 @@
+ 
+     // === 3. IO 映射 + DC 同步 ===
+     ecx_context.manualstatechange = 1;
+-    ec_config_map(&IOmap_);
++    diagnostics.mapping(ec_config_map(&IOmap_));
+     // 配置 EtherCAT 分布式时钟，Sync0 周期与主站 PDO 周期保持 1 ms。
+     ec_configdc();
+     for (int i = 1; i <= ec_slavecount; i++) {
+@@ -331,8 +506,10 @@
+ 
+     // === 4. SAFE_OP ===
+     ec_slave[0].state = EC_STATE_SAFE_OP;
+-    ec_writestate(0);
+-    ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
++    diagnostics.safeop_write=ec_writestate(0);
++    diagnostics.safeop_return=ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
++    diagnostics.safeop_raw=ec_slave[0].state;diagnostics.checked_safeop=true;
++    diagnostics.cached_errors("safeop_cached_tail");
+     printf("[EtherCAT] SAFE_OP reached\n");
+ 
+     // === 4a. 在 mlockall 之前预创建 cycle_thread_ ===
+@@ -418,7 +595,7 @@
+             continue;
+         }
+         ec_slave[i].state = EC_STATE_OPERATIONAL;
+-        ec_writestate(i);
++        diagnostics.op_write[i]=ec_writestate(i);
+         op_slaves.push_back(i);
+     }
+ 
+@@ -432,7 +609,7 @@
+         handshake_last_wkc_.store(w);
+         handshake_last_pdo_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+             handshake_pdo_start.time_since_epoch()).count());
+-        ec_readstate();
++        diagnostics.op_state(ec_readstate(),w);
+         all_op = true;
+         for (int slave : op_slaves) {
+             if (ec_slave[slave].state != EC_STATE_OPERATIONAL) {
+@@ -455,6 +632,7 @@
+             }
+         }
+         ec_close();
++        diagnostics.dump("cannot_reach_op");
+         return false;
+     }
+ 
+@@ -503,6 +681,7 @@
+     printf("[RT] main-thread downgraded to SCHED_OTHER\n");
+ 
+     printf("[EtherCAT] Init complete, ready for control\n");
++    diagnostics.dump("handoff_complete");
+     return true;
+ }
+ 
