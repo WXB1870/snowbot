@@ -8,7 +8,13 @@
 #include <vector>
 #include <algorithm>
 using namespace position_session;
+#ifdef POSITION_PDO_OUTPUT_TEST
+void check_position_pdo_output();
+#endif
 int main(){
+#ifdef POSITION_PDO_OUTPUT_TEST
+ check_position_pdo_output();
+#endif
  ObservationCache cache;Observation o;o.valid_mask=0xfffff;o.wkc=o.expected_wkc=67;o.sample=1;o.sampled_ns=1000000000;
  o.position.fill(.2);o.status.fill(0x27);cache.publish(o);assert(cache.read().sample==1);
  Gate gate;Meta m{1,1,1000000000,1200000000,1};assert(gate.accepts(m,1000000000,1000000000));gate.commit(m,1000000000,1000000000);
@@ -19,8 +25,25 @@ int main(){
  Meta restart{2,1,1230000000,1400000000,1};assert(gate.accepts(restart,1230000000,1230000000));gate.commit(restart,1230000000,1230000000);m.operation=1;m.stamp=1410000000;m.expires=1500000000;assert(!gate.accepts(m,1410000000,1410000000));
  gate.interrupt();Meta old_session=restart;old_session.sequence=2;old_session.stamp=1410000000;old_session.expires=1500000000;
  assert(!gate.accepts(old_session,1410000000,1410000000));Meta new_session{3,1,1410000000,1500000000,1};assert(gate.accepts(new_session,1410000000,1410000000));
- Follower f;std::array<double,14> q{};q[0]=.4;q[1]=.2;q[8]=-.2;f.seed(q);q[0]=.8;assert(f.set(q));assert(f.step(.001));assert(f.q[0]==.4);double previous=f.q[0],velocity=0;
+ Follower f;std::array<double,joint_count> q{};q[0]=.4;q[1]=.2;q[8]=-.2;f.seed(q);q[0]=.8;assert(f.set(q));assert(f.step(.001));assert(f.q[0]==.4);double previous=f.q[0],velocity=0;
  for(int i=0;i<4000;++i){assert(f.step(.001));assert(std::abs(f.v[0])<=f.vmax+1e-9);assert(std::abs(f.v[0]-velocity)<=f.amax*.001+1e-9);assert(std::abs(f.q[0]-previous)<=f.vmax*.001+1e-9);previous=f.q[0];velocity=f.v[0];if(i==100){q[0]=.6;f.set(q);assert(f.q[0]==previous);}}
+ // Nonzero waist seeds and continuous retargets retain the same state.
+ Follower coupled;std::array<double,joint_count> seed{};seed[14]=.12;seed[15]=-.08;coupled.seed(seed);
+ auto goal=seed;goal[0]+=.01;goal[7]+=.10;goal[14]+=.04;assert(coupled.set(goal));
+ assert(coupled.step(.001));
+ for(unsigned cycle=0;cycle<200;++cycle){assert(coupled.step(.001));
+  assert(std::abs((coupled.q[0]-seed[0])/.01-(coupled.q[7]-seed[7])/.10)<1e-10);
+  assert(std::abs((coupled.q[14]-seed[14])/.04-(coupled.q[7]-seed[7])/.10)<1e-10);
+ }
+ for(unsigned cycle=0;cycle<3000;++cycle){auto before=coupled.q;auto speed=coupled.v;
+  if(cycle%200==0){goal=seed;goal[0]+=(cycle%400?-.3:.3);goal[7]+=(cycle%400?.1:-.1);goal[15]+=.1;assert(coupled.set(goal));assert(coupled.v==speed&&coupled.q==before);}
+  assert(coupled.step(.001));for(unsigned i=0;i<joint_count;++i){assert(std::abs(coupled.v[i])<=coupled.vmax+1e-10);assert(std::abs(coupled.v[i]-speed[i])<=coupled.amax*.001+1e-10);assert(std::abs(coupled.q[i]-before[i])<=coupled.vmax*.001+1e-10);}
+ }
+ Output selected;selected.selected=true;selected.policy=2;selected.session=90;selected.sequence=1;selected.operation=1;selected.deadline=1200000000;
+ Watchdog isolation;isolation.evaluate(selected,o,1000000000);
+ for(unsigned i=0;i<20;++i){assert(isolation.motor_enabled(false,true,i)==bool(controlled_mask&(1u<<i)));assert(!isolation.motor_enabled(false,false,i));}
+ assert(position_slot(14)==18&&position_slot(15)==19&&controlled_mask==0xc7f7f);
+ assert(std::abs(csp_radians(csp_counts(.1234))-.1234)<=.5/csp_counts_per_rad);
  assert(!f.step(.1));Interval clock;clock.reset(1000000000);assert(std::abs(clock.tick(1001000000)-.001)<1e-12);assert(clock.tick(1001000000)<0);
  Output p;p.selected=true;p.policy=2;p.operation=1;p.session=1;p.sequence=1;p.deadline=1100000000;p.q.fill(.3);Watchdog w;w.evaluate(p,o,1000000000);assert(!w.disabled&&w.reason==OK);
  o.sampled_ns=1100000000;w.evaluate(p,o,1100000000);assert(w.reason==EXPIRED&&!w.disabled&&w.output.q[0]==.2f);
@@ -39,10 +62,10 @@ int main(){
  p.operation=2;++p.sequence;p.q.fill(.41f);o.position.fill(.42f);
  w.evaluate(p,o,1401000000);assert(w.reason==PAUSED&&!w.disabled&&w.captured);
  assert(w.hold[0]==.41f&&w.hold_sample==20&&w.output.q[0]==.41f);
- o.attempted_ns=1401000000;w.report_hold(o,arms_mask);assert(o.hold_valid&&o.hold_position[0]==.41f);
- w.report_hold(o,arms_mask&~1u);assert(!o.hold_valid);
- o.status[0]=0x23;w.report_hold(o,arms_mask);assert(!o.hold_valid);
- o.status[0]=0x27;w.report_hold(o,arms_mask);assert(o.hold_valid);
+ o.attempted_ns=1401000000;w.report_hold(o,controlled_mask);assert(o.hold_valid&&o.hold_position[0]==.41f);
+ w.report_hold(o,controlled_mask&~1u);assert(!o.hold_valid);
+ o.status[0]=0x23;w.report_hold(o,controlled_mask);assert(!o.hold_valid);
+ o.status[0]=0x27;w.report_hold(o,controlled_mask);assert(o.hold_valid);
  p.q.fill(.43f);o.position.fill(.44f);o.sample=21;o.sampled_ns=1600000000;
  w.evaluate(p,o,1600000000);assert(w.reason==EXPIRED&&!w.disabled&&w.output.q[0]==.41f&&w.hold_sample==20);
  // Declared measured_hold does not turn invalid feedback/Fault/conflict or
@@ -51,7 +74,7 @@ int main(){
   p.operation=1;++p.sequence;p.deadline=1800000000;p.failure_reason=failure;
   o.sampled_ns=1601000000;w.evaluate(p,o,1601000000);
   assert(w.disabled&&w.reason==failure&&p.policy==2);
-  w.report_hold(o,arms_mask);assert(!o.hold_valid);
+  w.report_hold(o,controlled_mask);assert(!o.hold_valid);
  }
  p.failure_reason=0;p.operation=1;++p.sequence;w.evaluate(p,o,1601000000);
  assert(w.reason==OK&&!w.disabled&&!w.captured);

@@ -31,6 +31,14 @@ int main() {
   receive(tracker,msg,1,0);receive(tracker,msg,2,30000000);
   if(fresh(tracker,30000000)){std::cerr<<"FAIL: delayed second sample reused baseline across 30ms gap\n";++failures;}
  }
+ {position_session::Tracker tracker;Observation msg;msg.position[18]=.12;msg.position[19]=-.08;
+  receive(tracker,msg,1,0);receive(tracker,msg,2,1000000);
+  if(!fresh(tracker,1000000)||tracker.q[14]!=.12||tracker.q[15]!=-.08)++failures;
+  msg.status[19]=8;receive(tracker,msg,3,2000000);if(fresh(tracker,2000000))++failures;
+  msg.status[19]=0;msg.valid_mask&=~(1u<<18);receive(tracker,msg,4,3000000);if(fresh(tracker,3000000))++failures;
+  msg.valid_mask|=1u<<18;msg.speed[18]=std::numeric_limits<double>::quiet_NaN();receive(tracker,msg,5,4000000);if(fresh(tracker,4000000))++failures;
+  msg.speed[18]=0;msg.status[7]=msg.status[16]=8;receive(tracker,msg,6,5000000);receive(tracker,msg,7,6000000);if(!fresh(tracker,6000000))++failures;
+ }
  std::cout<<"tracker reconnect failures="<<failures<<"\n";
  return failures ? 1:0;
 }

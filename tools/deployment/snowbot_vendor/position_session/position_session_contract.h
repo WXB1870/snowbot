@@ -6,6 +6,13 @@
 #include <chrono>
 namespace position_session {
 constexpr int64_t maximum_ttl=200000000;
+// Independent position contract: L1..7, R1..7, waist1..2, radians.
+constexpr unsigned joint_count=16;
+constexpr uint32_t controlled_mask=0xc7f7f;
+constexpr unsigned position_slot(unsigned i){return i<7?i:i<14?i+1:i+4;}
+constexpr double csp_counts_per_rad=65536.0/6.28318530717958647692;
+inline int32_t csp_counts(double q){return int32_t(std::round(q*csp_counts_per_rad));}
+inline double csp_radians(int32_t q){return q/csp_counts_per_rad;}
 struct Meta {
  uint64_t session=0,sequence=0;int64_t stamp=0,expires=0;uint8_t operation=0;
  bool operator==(const Meta& b)const{return session==b.session && sequence==b.sequence && stamp==b.stamp && expires==b.expires && operation==b.operation;}
@@ -40,7 +47,7 @@ public:
 };
 struct Tracker {
  uint64_t received_messages=0;unsigned advances=0;uint64_t ready_sample=0;int64_t ready_ros=0;uint64_t boot=0,sample=0;int64_t progress=0,received=0,source=0;double age=-1;
- uint32_t valid=0,faults=0;int wkc=0,expected=0;std::array<double,14> q{},v{};
+ uint32_t valid=0,faults=0;int wkc=0,expected=0;std::array<double,joint_count> q{},v{};
  template<class M> void observe(const M& m,int64_t ros,int64_t steady){
   ++received_messages;
   const auto stamp=int64_t(m.header.stamp.sec)*1000000000+m.header.stamp.nanosec;
@@ -51,13 +58,13 @@ struct Tracker {
   if(m.pdo_sample>sample){advances=progress>0 && steady>=progress && steady-progress<=20000000 ? std::min(2u,advances+1):1;sample=m.pdo_sample;progress=steady;}
   received=steady;source=stamp;valid=m.valid_mask;
   for(unsigned i=0;i<20;++i)if(m.status[i]&8)faults|=1u<<i;
-  for(unsigned i=0;i<14;++i){const auto slot=i<7?i:i+1;q[i]=m.position[slot];v[i]=m.speed[slot];if(!std::isfinite(q[i]) || !std::isfinite(v[i]))valid&=~(1u<<slot);}
-  if(wkc!=expected || (valid&0x7f7f)!=0x7f7f || (faults&0x7f7f)){advances=0;ready_sample=0;ready_ros=0;}
+  for(unsigned i=0;i<joint_count;++i){const auto slot=position_slot(i);q[i]=m.position[slot];v[i]=m.speed[slot];if(!std::isfinite(q[i]) || !std::isfinite(v[i]))valid&=~(1u<<slot);}
+  if(wkc!=expected || (valid&controlled_mask)!=controlled_mask || (faults&controlled_mask)){advances=0;ready_sample=0;ready_ros=0;}
   if(advances<2){ready_sample=0;ready_ros=0;}
   else if(!ready_sample){ready_sample=sample;ready_ros=ros;}
  }
  bool fresh(int64_t ros,int64_t steady)const{
-  return advances>=2 && expected>0 && wkc==expected && (valid&0x7f7f)==0x7f7f && !(faults&0x7f7f) &&
+  return advances>=2 && expected>0 && wkc==expected && (valid&controlled_mask)==controlled_mask && !(faults&controlled_mask) &&
    progress>0 && steady>=progress && steady-progress<=20000000 && ros>=source && ros-source+int64_t(age*1e9)<=20000000;
  }
 };
