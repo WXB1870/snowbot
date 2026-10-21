@@ -91,21 +91,41 @@ def main():
     if not compiler:raise SystemExit('C++ compiler unavailable')
     sources=[args.source/'robot_control/include'/name for name in (
         'position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')]
+    names=['test_snowbot_reconnect_tracker','test_snowbot_connection_contract','test_position_connection_diagnostics','test_position_initialization','test_position_session']
+    native_include=args.source/'servo_control/include/bindu_execution_native'
+    native_sources=[args.source/'servo_control/src/bindu_execution_native'/name
+                    for name in ('interpolation.cpp','adaptive_stream.cpp')]
+    trajectory=args.source/'servo_control/include/position_trajectory.h'
+    if trajectory.is_file():
+        # Compile the exact common implementation copied and hashed by the preparer.
+        sources += [trajectory,*(native_include/name for name in
+                    ('interpolation.hpp','adaptive_stream.hpp','curve_math.hpp')),*native_sources]
+        missing=[str(path) for path in sources if not path.is_file()]
+        if missing:raise RuntimeError('CANDIDATE_NATIVE_SOURCE_MISSING:'+','.join(missing))
+        manifest=json.loads((args.source.parent/'position_release.json').read_text())
+        native_paths=[*(native_include/name for name in
+                      ('interpolation.hpp','adaptive_stream.hpp','curve_math.hpp')),*native_sources]
+        expected=manifest.get('native_execution',{})
+        if any(expected.get(path.name)!=hashlib.sha256(path.read_bytes()).hexdigest() for path in native_paths):
+            raise RuntimeError('CANDIDATE_NATIVE_SHA256_MISMATCH')
+        names.append('test_position_trajectory')
     before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     results={}
     with tempfile.TemporaryDirectory(prefix='connection-review-') as tmp:
         work=Path(tmp)
         shim=work/'rclcpp/qos.hpp';shim.parent.mkdir();shim.write_text(SHIM)
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
-        for name in ('test_snowbot_reconnect_tracker','test_snowbot_connection_contract','test_position_connection_diagnostics','test_position_initialization','test_position_session'):
+        for name in names:
             binary=work/name
             copied=work/(name+'.cpp');copied.write_bytes((root/(name+'.cpp')).read_bytes())
             command=[compiler,'-std=c++17','-Wall','-Wextra','-Werror','-pthread',
-                '-I'+str(args.source/'robot_control/include'),'-I'+str(args.source/'servo_control/include'),'-I'+str(work),'-I'+str(root),
+                '-I'+str(args.source/'robot_control/include'),'-I'+str(args.source/'servo_control/include'),'-I'+str(native_include),'-I'+str(work),'-I'+str(root),
                 str(copied),'-o',str(binary)]
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
+            elif name=='test_position_trajectory':
+                command.extend(map(str,native_sources))
             subprocess.run(command,check=True,capture_output=True,text=True)
             result=subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=30)
             results[name]=result.stdout.strip()

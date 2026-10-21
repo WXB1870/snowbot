@@ -1,6 +1,6 @@
 --- a/servo_control/include/servo_control/position_clock.h
 +++ b/servo_control/include/servo_control/position_clock.h
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,13 @@
 +#pragma once
 +#include <cstdint>
 +namespace position_session {
@@ -9,6 +9,8 @@
 + int64_t last_=0;
 +public:
 + void reset(int64_t now){last_=now;}
++ // A retarget must not erase a preceding sampling gap.
++ void admit(int64_t now,bool takeover){if(takeover)reset(now);}
 + double tick(int64_t now){const auto old=last_;last_=now;return old>0 && now>old ? (now-old)*1e-9 : -1.;}
 +};
 +} // namespace position_session

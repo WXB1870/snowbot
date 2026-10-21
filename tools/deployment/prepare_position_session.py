@@ -10,16 +10,20 @@ import tempfile
 
 ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
 COMPONENTS=('observation','takeover','timing','session')
+NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp')
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def prepare(source,output,*,observation_only=False,with_impedance=False):
+def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None):
     if observation_only and with_impedance:raise ValueError("IMPEDANCE_REQUIRES_FULL_SESSION")
     source,output=Path(source).resolve(),Path(output).absolute()
     if not source.is_dir() or source==output or source in output.parents or output in source.parents:
         raise ValueError('POSITION_SOURCE_OUTPUT_OVERLAP_OR_MISSING')
     if output.exists() or output.is_symlink():raise ValueError('POSITION_OUTPUT_EXISTS')
+    native=Path(execution_source).resolve() if execution_source else Path(__file__).resolve().parents[3]/'galbot/bindu/src/control/bindu_execution/native'
+    if not observation_only and any(not (native/n).is_file() or (native/n).is_symlink() for n in NATIVE_FILES):
+        raise ValueError('POSITION_EXECUTION_SOURCE_REQUIRED')
     baseline=json.loads((ASSETS/'baseline_manifest.json').read_text())
     if any(p.is_symlink() for p in source.rglob('*')):raise ValueError('POSITION_SOURCE_SYMLINK')
     for rel,expected in baseline.items():
@@ -39,6 +43,13 @@ def prepare(source,output,*,observation_only=False,with_impedance=False):
                     shutil.copy2(ASSETS/name,stage/'src'/package/'include'/name)
             for package in ('robot_control','dual_arm_control'):
                 shutil.copy2(ASSETS/'position_session_ros.h',stage/'src'/package/'include/position_session_ros.h')
+        if not observation_only:
+            shutil.copy2(ASSETS/'position_trajectory.h',stage/'src/servo_control/include/position_trajectory.h')
+            for name in NATIVE_FILES:
+                folder='include' if name.endswith('.hpp') else 'src'
+                destination=stage/'src/servo_control'/folder/'bindu_execution_native'/name
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(native/name,destination)
         if with_impedance:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'impedance')
@@ -56,7 +67,9 @@ def prepare(source,output,*,observation_only=False,with_impedance=False):
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
             driver_started=False,hardware_commands_sent=False,full_build_verified=False,
-            stop_policy='unconfirmed',execution_mode='position',impedance_available=with_impedance,
+            stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,
+            trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
+            native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,
             impedance_calibration_confirmed=False,source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
         (stage/'position_release.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
         stage.rename(output)
@@ -69,5 +82,6 @@ if __name__=='__main__':
     p.add_argument('source',type=Path);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--observation-only',action='store_true')
     p.add_argument('--with-impedance',action='store_true',help='Include optional backend; default execution mode remains position')
+    p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
     a=p.parse_args()
-    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance))
+    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source))

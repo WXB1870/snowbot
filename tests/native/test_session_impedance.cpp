@@ -3,8 +3,10 @@
 #include "servo_control/position_watchdog.h"
 #include "servo_control/position_follower.h"
 #include "servo_control/position_clock.h"
+#include "position_trajectory.h"
 #include <cassert>
 #include <iostream>
+#include <thread>
 constexpr double TEMPTIME=.001;
 position_session::Observation snapshot;
 position_session::Output applied;
@@ -21,6 +23,7 @@ struct ServoNode {
  position_session::Gate position_gate_;position_session::Tracker position_feedback_;
  position_session::Interval position_interval_;position_session::Follower position_follower_;
  position_session::Output position_output_;
+ uint8_t position_reference_mode_=0;position_session::TrajectoryQueue position_trajectory_;
  struct Time {int64_t nanoseconds()const{return position_session::steady_ns();}};Time now()const{return {};}
  bool session_impedance_ready()const;bool session_impedance_step();void position_step();
  void feedback(){auto t=position_session::steady_ns();snapshot.sampled_ns=snapshot.attempted_ns=t;snapshot.sensor_sampled_ns.fill(t);++snapshot.sample;
@@ -38,6 +41,52 @@ struct ServoNode {
 };
 
 // PRODUCTION_METHODS
+
+
+struct TrajectoryWire {
+ unsigned version=1;uint64_t segment_id=0;int64_t effective_at_ns=0;
+ std::vector<double> piece_start,duration,source_duration,source_elapsed,controls;
+ std::vector<unsigned char> control_count;std::array<double,16> max_velocity{},max_acceleration{},max_jerk{};
+};
+TrajectoryWire described(const bindu::execution::PreparedSegment& segment,uint64_t sequence,int64_t effective){
+ TrajectoryWire wire;wire.segment_id=sequence;wire.effective_at_ns=effective;wire.max_velocity.fill(.25);wire.max_acceleration.fill(.5);wire.max_jerk.fill(162);
+ for(const auto& d:segment.describe()){
+  wire.piece_start.push_back(d.start);wire.duration.push_back(d.duration);wire.source_duration.push_back(d.source_duration);wire.source_elapsed.push_back(d.source_elapsed);
+  for(const auto& axis:d.controls){wire.control_count.push_back(axis.size());wire.controls.insert(wire.controls.end(),axis.begin(),axis.end());}
+ }
+ return wire;
+}
+void check_trajectory_impedance(ServoNode& node){
+ using namespace position_session;using namespace bindu::execution;
+ snapshot.wrench.fill(0);snapshot.sensor_valid_mask=3;node.start();node.position_reference_mode_=1;
+ node.position_follower_.q[14]=.4; // The trajectory path must bypass this legacy follower.
+ JointLimits limits;JointState state;state.q.resize(16);state.v.resize(16);state.a.resize(16);
+ for(unsigned i=0;i<16;++i){state.q[i]=snapshot.position[position_slot(i)];limits.push_back({lower[i],upper[i],.25,.5,162});}
+ auto goal=state.q;goal[0]+=.001;goal[14]+=.001;
+ const auto segment=PreparedSegment::target(limits,state,goal,0.,30.,.2);
+ auto now=steady_ns();Meta source{99,1,now,now+200000000,1};auto wire=described(segment,1,now+5000000);
+ node.position_gate_.commit(source,now,now);node.position_output_.impedance_mode=true;
+ node.position_trajectory_.accept(wire,source,now,now,node.position_feedback_.q,{});
+ node.position_interval_.reset(now-1000000);node.feedback();node.position_step();
+ assert(applied.trajectory&&applied.impedance&&applied.trajectory_phase==1&&applied.q[14]==snapshot.position[18]);
+ std::this_thread::sleep_for(std::chrono::milliseconds(6));node.feedback();node.position_interval_.reset(steady_ns()-1000000);node.position_step();
+ assert(applied.impedance&&applied.reference_position==node.position_trajectory_.q&&applied.reference_speed==node.position_trajectory_.v);
+ now=steady_ns();Meta pause{99,2,now,now+200000000,2};const auto effective=now+3000000;
+ const auto brake=PreparedSegment::stop(limits,segment.sample((effective-wire.effective_at_ns)*1e-9),0.,.19);
+ auto pause_wire=described(brake,2,effective);node.position_trajectory_.accept(pause_wire,pause,now,now,node.position_feedback_.q,{});
+ node.position_gate_.commit(pause,now,now);
+ bool braking=false,held=false;
+ for(unsigned tick=0;tick<100 && !held;++tick){
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));node.feedback();node.position_interval_.reset(steady_ns()-1000000);node.position_step();
+  assert(applied.impedance&&applied.kp[0]==1&&applied.kd[0]==.2f&&applied.failure_reason==0);
+  braking|=applied.trajectory_phase==3;held=applied.trajectory_phase==4;
+ }
+ assert(braking&&held&&node.session_impedance_active_);
+ Watchdog guard;node.feedback();guard.evaluate(applied,snapshot,steady_ns());guard.report_hold(snapshot,controlled_mask);
+ assert(guard.reason==PAUSED&&!guard.disabled&&snapshot.hold_valid&&snapshot.hold_basis==1);
+ assert(guard.output.impedance&&guard.output.q==applied.q&&guard.output.kp==applied.kp&&guard.output.kd==applied.kd&&guard.output.torque==applied.torque);
+ std::cout<<"PASS same-time 16-axis nominal impedance sampling, Follower bypass, controlled PAUSE and unchanged final gains/torque with nominal-hold basis\n";
+}
 
 int main(int argc,char**argv){assert(argc==2);ServoNode node;
  snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.sensor_valid_mask=3;
@@ -59,5 +108,6 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  watchdog.evaluate(live,snapshot,position_session::steady_ns());assert(watchdog.disabled&&watchdog.reason==position_session::IMPEDANCE_INVALID);
  snapshot.sensor_valid_mask=3;snapshot.wrench[0]=NAN;node.feedback();assert(!node.session_impedance_ready());
  snapshot.wrench[0]=0;node.feedback();snapshot.sampled_ns-=21000000;assert(!node.session_impedance_ready());
+ check_trajectory_impedance(node);
  std::cout<<"PASS actual servo default position, gated impedance, waist output, sensor/calibration rejection, fixed-position PAUSE, RT expiry torque discard and resource isolation\n";
 }
