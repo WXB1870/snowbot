@@ -1,0 +1,10 @@
+artifacts/
+__pycache__/
+*.pyc
+.DS_Store
+*.so
+*.dylib
+.env
+.env.*
+*.pem
+*.key
