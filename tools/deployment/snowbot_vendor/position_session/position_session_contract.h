@@ -6,6 +6,8 @@
 #include <chrono>
 namespace position_session {
 constexpr int64_t maximum_ttl=200000000;
+// ROS delivery and progress budget; the raw PDO age limit remains 20 ms.
+constexpr int64_t ros_feedback_timeout_ns=40000000;
 // Independent position contract: L1..7, R1..7, waist1..2, radians.
 constexpr unsigned joint_count=16;
 constexpr uint32_t controlled_mask=0xc7f7f;
@@ -53,10 +55,10 @@ struct Tracker {
   ++received_messages;
   const auto stamp=int64_t(m.header.stamp.sec)*1000000000+m.header.stamp.nanosec;
   valid=0;faults=0;wkc=m.wkc;expected=m.expected_wkc;age=m.pdo_age;
-  if(!m.boot_id || !m.pdo_sample || !std::isfinite(age) || age<0 || age>.02 || stamp<=0 || ros<stamp || ros-stamp>20000000){advances=0;ready_sample=0;ready_ros=0;return;}
+  if(!m.boot_id || !m.pdo_sample || !std::isfinite(age) || age<0 || age>.02 || stamp<=0 || ros<stamp || ros-stamp>ros_feedback_timeout_ns){advances=0;ready_sample=0;ready_ros=0;return;}
   if(boot!=m.boot_id){boot=m.boot_id;sample=0;progress=0;advances=0;ready_sample=0;ready_ros=0;}
   if(m.pdo_sample<sample){advances=0;ready_sample=0;ready_ros=0;return;}
-  if(m.pdo_sample>sample){advances=progress>0 && steady>=progress && steady-progress<=20000000 ? std::min(2u,advances+1):1;sample=m.pdo_sample;progress=steady;}
+  if(m.pdo_sample>sample){advances=progress>0 && steady>=progress && steady-progress<=ros_feedback_timeout_ns ? std::min(2u,advances+1):1;sample=m.pdo_sample;progress=steady;}
   received=steady;source=stamp;valid=m.valid_mask;
   for(unsigned i=0;i<20;++i)if(m.status[i]&8)faults|=1u<<i;
   for(unsigned i=0;i<joint_count;++i){const auto slot=position_slot(i);q[i]=m.position[slot];v[i]=m.speed[slot];if(!std::isfinite(q[i]) || !std::isfinite(v[i]))valid&=~(1u<<slot);}
@@ -66,7 +68,7 @@ struct Tracker {
  }
  bool fresh(int64_t ros,int64_t steady)const{
   return advances>=2 && expected>0 && wkc==expected && (valid&controlled_mask)==controlled_mask && !(faults&controlled_mask) &&
-   progress>0 && steady>=progress && steady-progress<=20000000 && ros>=source && ros-source+int64_t(age*1e9)<=20000000;
+   progress>0 && steady>=progress && steady-progress<=ros_feedback_timeout_ns && ros>=source && ros-source+int64_t(age*1e9)<=ros_feedback_timeout_ns;
  }
 };
 } // namespace position_session

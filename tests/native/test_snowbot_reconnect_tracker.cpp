@@ -28,8 +28,9 @@ int main() {
   if(fresh(tracker,3000000)){std::cerr<<"FAIL: first valid sample after NaN reused old baseline\n";++failures;}
  }
  {position_session::Tracker tracker;Observation msg;
-  receive(tracker,msg,1,0);receive(tracker,msg,2,30000000);
-  if(fresh(tracker,30000000)){std::cerr<<"FAIL: delayed second sample reused baseline across 30ms gap\n";++failures;}
+  const auto late=position_session::ros_feedback_timeout_ns+1000000;
+  receive(tracker,msg,1,0);receive(tracker,msg,2,late);
+  if(fresh(tracker,late)){std::cerr<<"FAIL: delayed second sample reused baseline beyond ROS feedback budget\n";++failures;}
  }
  {position_session::Tracker tracker;Observation msg;msg.position[18]=.12;msg.position[19]=-.08;
   receive(tracker,msg,1,0);receive(tracker,msg,2,1000000);

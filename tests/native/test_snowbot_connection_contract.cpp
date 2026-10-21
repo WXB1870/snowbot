@@ -26,10 +26,11 @@ static void feedback_sequences() {
     position_session::Gate idle;
     for(unsigned i=3;i<500;++i){receive(t,m,i,int64_t(i)*1000000);CHECK(fresh(t,int64_t(i)*1000000));CHECK(!idle.selected());}
     // Duplicate PDO snapshots cannot refresh progress even when ROS publication time advances.
-    receive(t,m,499,530000000);CHECK(!fresh(t,530000000));
-    receive(t,m,500,531000000);CHECK(!fresh(t,531000000));receive(t,m,501,532000000);CHECK(fresh(t,532000000));
+    const auto stalled=499000000+position_session::ros_feedback_timeout_ns+1000000;
+    receive(t,m,499,stalled);CHECK(!fresh(t,stalled));
+    receive(t,m,500,stalled+1000000);CHECK(!fresh(t,stalled+1000000));receive(t,m,501,stalled+2000000);CHECK(fresh(t,stalled+2000000));
     // Source restart requires a new baseline.
-    m.boot_id=2;receive(t,m,1,533000000);CHECK(!fresh(t,533000000));receive(t,m,2,534000000);CHECK(fresh(t,534000000));
+    m.boot_id=2;receive(t,m,1,stalled+3000000);CHECK(!fresh(t,stalled+3000000));receive(t,m,2,stalled+4000000);CHECK(fresh(t,stalled+4000000));
     for(unsigned failure=0;failure<5;++failure){
         position_session::Tracker x;Observation o;receive(x,o,1,0);receive(x,o,2,1000000);CHECK(fresh(x,1000000));
         if(failure==0)o.wkc=61;
@@ -40,8 +41,9 @@ static void feedback_sequences() {
         receive(x,o,3,2000000);CHECK(!fresh(x,2000000));
         o=Observation{};receive(x,o,4,3000000);CHECK(!fresh(x,3000000));receive(x,o,5,4000000);CHECK(fresh(x,4000000));
     }
-    position_session::Tracker delayed;Observation o;receive(delayed,o,1,0);receive(delayed,o,2,30000000);CHECK(!fresh(delayed,30000000));
-    receive(delayed,o,3,31000000);CHECK(fresh(delayed,31000000));
+    const auto late=position_session::ros_feedback_timeout_ns+1000000;
+    position_session::Tracker delayed;Observation o;receive(delayed,o,1,0);receive(delayed,o,2,late);CHECK(!fresh(delayed,late));
+    receive(delayed,o,3,late+1000000);CHECK(fresh(delayed,late+1000000));
 }
 static void readiness_generation() {
     position_session::Tracker t;Observation m;

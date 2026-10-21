@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <limits>
 using namespace position_session;
 #ifdef POSITION_PDO_OUTPUT_TEST
 void check_position_pdo_output();
@@ -41,7 +42,70 @@ void check_latched_failures(){
  }
  std::cout<<"PASS continuous latched sampler/feedback/drive/policy/conflict failures across TTL, replay/deselection rejection and new takeover recovery\n";
 }
+
+namespace {
+constexpr int64_t tracker_ros=10000000000LL,tracker_steady=1000000000LL,ms=1000000;
+struct TrackerObservation {
+ struct {struct {int32_t sec=0;uint32_t nanosec=0;} stamp;} header;
+ uint64_t boot_id=1,pdo_sample=1;double pdo_age=0;
+ int wkc=67,expected_wkc=67;uint32_t valid_mask=0xfffff;
+ std::array<uint16_t,20> status{};std::array<double,20> position{},speed{};
+};
+void receive_tracker(Tracker& t,TrackerObservation& m,uint64_t sequence,int64_t ros,int64_t steady,int64_t delay=0){
+ m.pdo_sample=sequence;const auto source=ros-delay;
+ m.header.stamp.sec=int32_t(source/1000000000);m.header.stamp.nanosec=uint32_t(source%1000000000);
+ t.observe(m,ros,steady);
+}
+Tracker ready_tracker(){
+ Tracker t;TrackerObservation m;
+ receive_tracker(t,m,1,tracker_ros-ms,tracker_steady-ms);receive_tracker(t,m,2,tracker_ros,tracker_steady);
+ assert(t.fresh(tracker_ros,tracker_steady));return t;
+}
+void check_ros_feedback_budget(){
+ static_assert(ros_feedback_timeout_ns==40*ms && maximum_ttl==200*ms);
+ for(const auto delay:{21*ms,39*ms,40*ms,41*ms}){
+  const bool expected=delay<=40*ms;TrackerObservation m;Tracker receipt,progress;
+  receive_tracker(receipt,m,1,tracker_ros-ms,tracker_steady-ms,delay);
+  receive_tracker(receipt,m,2,tracker_ros,tracker_steady,delay);
+  assert((receipt.advances==2)==expected && receipt.fresh(tracker_ros,tracker_steady)==expected);
+  receive_tracker(progress,m,1,tracker_ros,tracker_steady);
+  receive_tracker(progress,m,2,tracker_ros+delay,tracker_steady+delay);
+  assert((progress.advances==2)==expected && progress.fresh(tracker_ros+delay,tracker_steady+delay)==expected);
+  auto no_progress=ready_tracker();no_progress.source=tracker_ros+delay;
+  assert(no_progress.fresh(tracker_ros+delay,tracker_steady+delay)==expected);
+  auto combined=ready_tracker();combined.age=.001;combined.source=tracker_ros-(delay-ms);
+  assert(combined.fresh(tracker_ros,tracker_steady)==expected);
+ }
+ for(const double age:{.02,.020000001,.021,-.001,std::numeric_limits<double>::quiet_NaN()}){
+  Tracker t;TrackerObservation m;m.pdo_age=age;
+  receive_tracker(t,m,1,tracker_ros-ms,tracker_steady-ms);receive_tracker(t,m,2,tracker_ros,tracker_steady);
+  assert(t.fresh(tracker_ros,tracker_steady)==(age==.02));
+ }
+ for(unsigned failure=0;failure<9;++failure){
+  auto t=ready_tracker();TrackerObservation m;uint64_t sequence=3;int64_t delay=0;
+  if(failure==0)m.wkc=66;
+  if(failure==1)m.expected_wkc=m.wkc=0;
+  if(failure==2)m.status[0]=8;
+  if(failure==3)m.valid_mask&=~1u;
+  if(failure==4)m.position[0]=std::numeric_limits<double>::quiet_NaN();
+  if(failure==5)m.speed[18]=std::numeric_limits<double>::infinity();
+  if(failure==6)sequence=1;
+  if(failure==7)sequence=0;
+  if(failure==8)delay=-ms;
+  receive_tracker(t,m,sequence,tracker_ros+ms,tracker_steady+ms,delay);
+  assert(!t.fresh(tracker_ros+ms,tracker_steady+ms));
+ }
+ auto t=ready_tracker();assert(!t.fresh(tracker_ros-1,tracker_steady) && !t.fresh(tracker_ros,tracker_steady-1));
+ TrackerObservation m;receive_tracker(t,m,2,tracker_ros+41*ms,tracker_steady+41*ms);
+ assert(!t.fresh(tracker_ros+41*ms,tracker_steady+41*ms)); // Duplicate PDO cannot renew progress.
+ Meta command{1,1,tracker_ros,tracker_ros+200*ms,1};assert(fresh(command,tracker_ros));
+ assert(!fresh(command,tracker_ros+200*ms));++command.expires;assert(!fresh(command,tracker_ros));
+ std::cout<<"PASS ROS feedback 40ms boundaries; raw PDO 20ms, WKC/Fault/validity/sequence/clocks and command TTL200ms preserved\n";
+}
+} // namespace
+
 int main(){
+ check_ros_feedback_budget();
 #ifdef POSITION_PDO_OUTPUT_TEST
  check_position_pdo_output();
 #endif
