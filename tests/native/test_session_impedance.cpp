@@ -23,7 +23,7 @@ struct ServoNode {
  position_session::Output position_output_;
  struct Time {int64_t nanoseconds()const{return position_session::steady_ns();}};Time now()const{return {};}
  bool session_impedance_ready()const;bool session_impedance_step();void position_step();
- void feedback(){auto t=position_session::steady_ns();snapshot.sampled_ns=snapshot.attempted_ns=t;++snapshot.sample;
+ void feedback(){auto t=position_session::steady_ns();snapshot.sampled_ns=snapshot.attempted_ns=t;snapshot.sensor_sampled_ns.fill(t);++snapshot.sample;
   position_feedback_.advances=2;position_feedback_.expected=position_feedback_.wkc=67;position_feedback_.valid=0xfffff;
   position_feedback_.age=0;position_feedback_.progress=position_feedback_.source=t;
   for(unsigned i=0;i<16;++i)position_feedback_.q[i]=snapshot.position[position_session::position_slot(i)];
@@ -52,7 +52,7 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  assert(gravity[7]==0&&gravity[15]==0&&gravity[16]==0&&gravity[17]==0);
  // Actual production watchdog, so ROS repetition cannot keep old torque alive.
  auto live=applied;position_session::Watchdog watchdog;node.feedback();watchdog.evaluate(live,snapshot,position_session::steady_ns());assert(!watchdog.disabled);
- snapshot.sampled_ns=live.deadline;watchdog.evaluate(live,snapshot,live.deadline);assert(watchdog.reason==position_session::EXPIRED&&!watchdog.disabled&&!watchdog.output.impedance);assert(watchdog.output.kp[0]==40&&watchdog.output.torque==live.hold_torque);
+ snapshot.sampled_ns=live.deadline;snapshot.sensor_sampled_ns.fill(live.deadline);watchdog.evaluate(live,snapshot,live.deadline);assert(watchdog.reason==position_session::EXPIRED&&!watchdog.disabled&&!watchdog.output.impedance);assert(watchdog.output.kp[0]==40&&watchdog.output.torque==live.hold_torque);
  live.policy=1;watchdog.evaluate(live,snapshot,live.deadline);assert(watchdog.disabled);
  node.start(2,2);node.position_step();assert(!applied.impedance&&applied.kp[0]==40);assert(!node.session_impedance_active_);
  node.start(1,3);snapshot.sensor_valid_mask=1;node.position_step();assert(applied.failure_reason==position_session::IMPEDANCE_INVALID&&!node.position_gate_.live(position_session::steady_ns()));
