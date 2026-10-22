@@ -14,6 +14,23 @@ void check_position_pdo_output();
 #endif
 // One continuous watchdog crosses TTL; healthy frames, PAUSE and deselection
 // cannot release a prior fault. Only a newly admitted explicit takeover can.
+// The 0.1 degree position band is explicit and finite on every controlled axis.
+void check_joint_limit_allowance(){
+ assert(std::abs(joint_limit_allowance-std::acos(-1.)/1800.)<1e-18);
+ std::array<double,joint_count> q{};
+ for(unsigned j=0;j<joint_count;++j)q[j]=(nominal_lower[j]+nominal_upper[j])*.5;
+ for(unsigned i=0;i<joint_count;++i){
+  const double saved=q[i];
+  assert(std::abs(lower[i]-(nominal_lower[i]-joint_limit_allowance))<1e-15);
+  assert(std::abs(upper[i]-(nominal_upper[i]+joint_limit_allowance))<1e-15);
+  q[i]=nominal_lower[i]-joint_limit_allowance;assert(in_limits(q));
+  q[i]-=1e-8;assert(!in_limits(q));
+  q[i]=nominal_upper[i]+joint_limit_allowance;assert(in_limits(q));
+  q[i]+=1e-8;assert(!in_limits(q));
+  q[i]=std::numeric_limits<double>::quiet_NaN();assert(!in_limits(q));q[i]=saved;
+ }
+ q[8]=0.00023968449386302382;assert(in_limits(q));
+}
 void check_latched_failures(){
  Observation obs;obs.sample=1;obs.valid_mask=0xfffff;obs.wkc=obs.expected_wkc=67;obs.status.fill(0x27);obs.position.fill(.2);
  for(auto cause:{FEEDBACK_INVALID,DRIVE_FAULT,UNCONFIRMED_POLICY,CONTROL_SOURCE_CONFLICT,CYCLE_OR_TRACKING_ERROR}){
@@ -178,6 +195,7 @@ int main(){
  w.evaluate(p,o,1601000000);assert(w.reason==PAUSED&&!w.disabled);
  o.sampled_ns=1602000000;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
  p.policy=0;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
+ check_joint_limit_allowance();
  check_latched_failures();
  std::atomic<bool> done{false};std::thread writer([&]{Observation s;for(uint64_t i=1;i<=200000;++i){s.sample=i;s.sampled_ns=i;s.position.fill(float(i));s.speed.fill(-float(i));cache.publish(s);}done=true;});
  unsigned coherent=0;while(!done.load()||coherent==0){auto s=cache.read();if(s.sample<=1)continue;++coherent;assert(s.sampled_ns==int64_t(s.sample));for(int j=0;j<20;++j){assert(s.position[j]==float(s.sample));assert(s.speed[j]==-float(s.sample));}}writer.join();

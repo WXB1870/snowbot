@@ -103,4 +103,28 @@ void target_pause_window(){
  std::cout<<"PASS distinct fixed 2s target PAUSE; ordinary/legacy remain 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
 }
 
-int main(){stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+void allowed_limit_seeds(){
+ const int64_t now=1000000000;Meta take{909,1,now,now+200000000,1};Wire wire;wire.segment_id=1;
+ wire.max_velocity.fill(.03);wire.max_acceleration.fill(.3);
+ auto measured=seed();measured[8]=0.00023968449386302382;
+ TrajectoryQueue queue;TargetSnapshot snapshot;std::array<double,16> velocity{};
+ assert(queue.snapshot(now,now,1,10000000,measured,snapshot));
+ auto prepared=TrajectoryQueue::prepare_target(wire,take,snapshot,measured);
+ assert(prepared->q[8]==measured[8]);
+ assert(!queue.commit(*prepared,now+1000000,now+1000000,measured,velocity));
+ assert(queue.sample(now+10000000)&&std::abs(queue.q[8]-measured[8])<1e-12);
+ for(unsigned i=0;i<joint_count;++i){
+  auto boundary=measured;boundary[i]=upper[i];TargetSnapshot point;
+  assert(queue.snapshot(now,now,1,10000000,boundary,point));
+  auto at_upper=TrajectoryQueue::prepare_target(wire,take,point,boundary);assert(at_upper->q[i]==boundary[i]);
+  boundary[i]=lower[i];assert(queue.snapshot(now,now,1,10000000,boundary,point));
+  auto at_lower=TrajectoryQueue::prepare_target(wire,take,point,boundary);assert(at_lower->q[i]==boundary[i]);
+  auto outside=boundary;outside[i]=lower[i]-1e-8;
+  assert(queue.snapshot(now,now,1,10000000,outside,point));
+  rejects([&]{TrajectoryQueue::prepare_target(wire,take,point,outside);});
+  outside[i]=upper[i]+1e-8;assert(queue.snapshot(now,now,1,10000000,outside,point));
+  rejects([&]{TrajectoryQueue::prepare_target(wire,take,point,outside);});
+ }
+ std::cout<<"PASS all 16 expanded boundary seeds; beyond 0.1 degree rejected; actual R2 measurement retained; 0.03/0.3 limits\n";
+}
+int main(){allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
