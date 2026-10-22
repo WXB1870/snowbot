@@ -20,7 +20,7 @@
 +            const std::vector<outpWrap>* reference_only=nullptr,
 +            const modCtl* auxiliary_config=nullptr
          );
- 
+
          /*正解接口函数*/
 --- a/dual_arm_control/include/dual_arm_control/msgPublish.h
 +++ b/dual_arm_control/include/dual_arm_control/msgPublish.h
@@ -72,7 +72,7 @@
 --- a/dual_arm_control/src/dual_arm_control/msgPublish.cpp
 +++ b/dual_arm_control/src/dual_arm_control/msgPublish.cpp
 @@ -148,11 +148,16 @@
- 
+
      position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1,std::bind(&ArmCtlNode::position_callback,this,std::placeholders::_1));
      position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1);
 -    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
@@ -86,7 +86,7 @@
      position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
          const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 -        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="middle";m.wire_version=2;m.control_source="position";
-+        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="middle";m.wire_version=3;m.control_source="position";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="middle";m.wire_version=4;m.control_source="position";
          m.startup_complete=!ifInitTemp && !checkTemp;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
          m.state=position_gate_.following(now)?"executing":"ready_idle";
          const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
@@ -104,7 +104,7 @@
 @@ -858,11 +863,22 @@
      lArm_velRet = vec_to_JntArray(lArm_spd_fdback);
      rArm_velRet = vec_to_JntArray(rArm_spd_fdback);
- 
+
 -    std::vector<outpWrap> mRes;
 +    std::vector<outpWrap> mRes,reference_only;
 +    const bool target_stream=position_gate_.selected()&&position_meta_.reference_mode==2;
@@ -124,7 +124,7 @@
 -        lArm_iq_fdback, rArm_iq_fdback
 +        lArm_iq_fdback, rArm_iq_fdback,target_stream?&reference_only:nullptr,target_stream?&modCtlMsg_get:nullptr
      );
- 
+
      //输出解包
 @@ -1089,7 +1105,7 @@
              // Demo/VR 仍保持原来的“到位后刷新”逻辑。
@@ -135,8 +135,12 @@
                  controlCal();
                  if(topic_point_mode){
                      topic_point_target_l = lArm_desPos_JntSpace;
-@@ -1505,12 +1521,14 @@
-  if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
+@@ -1502,15 +1518,17 @@
+  if(ifInitTemp||checkTemp||!position_feedback_.fresh(now,steady)){position_rejection_="startup_feedback_or_drive_invalid";return;}
+  if(!packet->command.if_streaming_joint_position || packet->command.ctl_trans_mod!=3){position_rejection_="position_mode_required";return;}
+  for(double q:packet->waist_position)if(!std::isfinite(q)){position_rejection_="nonfinite_waist_target";return;}
+- if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
++ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
   auto native=std::make_shared<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(packet->command);
   position_dispatch_=true;upperMonitor_msg_callback(native);position_dispatch_=false;
 - if(m.operation!=0){
@@ -151,7 +155,7 @@
 + if(packet->meta.reference_mode==2&&m.operation==1&&m.session!=position_meta_.session)position_nominal_bootstrap_expires_=m.expires;
 + position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_target_packet_=packet;position_rejection_.clear();
  }
- 
+
  bool ArmCtlNode::position_ready(){
 --- a/robot_control/src/robot_control/msgPublisher.cpp
 +++ b/robot_control/src/robot_control/msgPublisher.cpp
@@ -160,13 +164,16 @@
      position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
          const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 -        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="upper";m.wire_version=2;m.control_source=control_source_==ControlSource::Topic?"topic":"other";
-+        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="upper";m.wire_version=3;m.control_source=control_source_==ControlSource::Topic?"topic":"other";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="upper";m.wire_version=4;m.control_source=control_source_==ControlSource::Topic?"topic":"other";
          m.startup_complete=!ifInitTemp && !ifForceToRetZero;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
          m.state=position_gate_.following(now)?"executing":"ready_idle";
          const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
-@@ -943,8 +943,8 @@
+@@ -941,10 +941,10 @@
+  if(!position_feedback_.fresh(now,steady)){position_rejection_="feedback_or_drive_invalid";return;}
+  for(unsigned i=0;i<7;++i)if(!std::isfinite(packet->command.l_arm_position[i])||!std::isfinite(packet->command.r_arm_position[i])){position_rejection_="nonfinite_target";return;}
   for(double q:packet->waist_position)if(!std::isfinite(q)){position_rejection_="nonfinite_waist_target";return;}
-  if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
+- if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
++ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
   auto native=std::make_shared<snowbot_ctl_msgs::msg::JointPositionCommand>(packet->command);
 - if(m.operation==2)for(unsigned i=0;i<7;++i){native->l_arm_position[i]=position_feedback_.q[i];native->r_arm_position[i]=position_feedback_.q[i+7];}
 - for(unsigned i=0;i<2;++i)position_waist_target_[i]=m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
@@ -177,7 +184,7 @@
  }
 --- a/servo_control/include/ros_controller/rosLoop.h
 +++ b/servo_control/include/ros_controller/rosLoop.h
-@@ -195,6 +195,11 @@
+@@ -195,6 +195,12 @@
          rclcpp::TimerBase::SharedPtr position_receipt_timer_;
          void position_poll();
          uint8_t position_reference_mode_=0;
@@ -185,7 +192,8 @@
 +        position_session::FixedText position_target_error_;
 +        uint64_t position_target_barrier_=0;bool position_target_pause_requested_=false;
 +        int64_t position_target_prepare_ns_=10000000;
-+        void position_target_dispatch();
++        void position_target_dispatch();void position_interrupt();
++        position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
          double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
          position_session::Interval position_interval_;
          position_session::Output position_output_;
@@ -202,8 +210,12 @@
   bool selected=false;
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -112,13 +112,18 @@
-     position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
+@@ -109,16 +109,21 @@
+     });
+     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
+     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
+-    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
++    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if((position_gate_.selected()||position_target_takeover_valid_)&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_interrupt();position_pending_=false;}});
      rcl_interfaces::msg::ParameterDescriptor reference_descriptor;reference_descriptor.read_only=true;
      const auto reference_mode=declare_parameter<std::string>("position_reference_mode","follower",reference_descriptor);
 -    if(reference_mode!="follower" && reference_mode!="trajectory")throw std::invalid_argument("position_reference_mode");
@@ -223,26 +235,50 @@
          if(const auto error=position_session::inspect_servo_command(*result.packet,result.origin.get(),result.context,result.command))throw std::invalid_argument(error);
          const auto endpoint=position_connection::check_publisher(*this,position_feedback_sub_,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");
          if(!endpoint.ready())throw std::invalid_argument(endpoint.reason);
-@@ -132,7 +137,7 @@
+@@ -132,13 +137,13 @@
      if(!std::isfinite(position_follower_.vmax)||!std::isfinite(position_follower_.amax)||position_follower_.vmax<=0||position_follower_.amax<=0)throw std::invalid_argument("position dynamic limits");
      position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
          const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 -        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=2;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
-+        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?3:2;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?4:2;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
          m.startup_complete=position_startup_complete_ && !shutdown_mode_;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
          m.state=!m.selected?"idle":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
          const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+         if(!position_initialized_)m.state="initialization_failed";
+         else if(!ready)m.state="waiting_feedback_or_fault";
+-        if(!ready && position_gate_.selected()){position_gate_.interrupt();position_pending_=false;}
++        if(!ready && (position_gate_.selected()||position_target_takeover_valid_)){position_interrupt();position_pending_=false;}
+         const std::string report=ready?(position_reference_mode_&&position_cycle_reason_?position_cycle_reason_:position_rejection_):position_wait_reason_;
+         if(report!=position_last_report_ || now-position_last_report_ns_>=5000000000LL){
+             if(!report.empty())RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
 @@ -157,7 +162,7 @@
              for(unsigned i=0;i<7 && position_receipts_.pop(receipt);++i){
                  snowbot_ctl_msgs::msg::PositionSessionState m;
                  m.header.stamp=rclcpp::Time(receipt.decided_ros);m.layer="servo";
 -                m.instance_id=position_instance_id_;m.wire_version=2;m.reference_mode=1;
-+                m.instance_id=position_instance_id_;m.wire_version=position_reference_mode_==2?3:2;m.reference_mode=position_reference_mode_;
++                m.instance_id=position_instance_id_;m.wire_version=position_reference_mode_==2?4:2;m.reference_mode=position_reference_mode_;
                  m.feedback_boot_id=receipt.boot;m.feedback_sample=receipt.sample;
                  m.state=receipt.accepted?"accepted":"rejected";
                  if(receipt.accepted){m.session=receipt.session;m.sequence=receipt.sequence;}
-@@ -2339,6 +2344,38 @@
+@@ -2289,7 +2294,7 @@
+  if(position_reference_mode_){position_submit(packet);return;}
+  const auto now=this->now().nanoseconds();const auto steady=position_session::steady_ns();const auto m=position_session::meta(packet->meta);
+  position_rejected_session_=m.session;position_rejected_sequence_=m.sequence;
+- if(!position_ready()){position_gate_.interrupt();position_rejection_=position_wait_reason_;return;}
++ if(!position_ready()){position_interrupt();position_rejection_=position_wait_reason_;return;}
+  if(packet->meta.feedback_boot_id!=position_feedback_.boot || packet->meta.feedback_sample<position_feedback_.ready_sample || packet->meta.feedback_sample>position_feedback_.sample || m.stamp<position_feedback_.ready_ros){position_rejection_="feedback_baseline_mismatch";return;}
+
+  if(!position_startup_complete_ || shutdown_mode_ || sigInterrupt.load() || impedance_enable_){position_rejection_="startup_shutdown_or_mode_conflict";return;}
+@@ -2337,8 +2342,62 @@
+  }
+  position_rejected_session_=position_rejected_sequence_=0;position_rejection_.clear();
  }
++void ServoNode::position_interrupt(){
++ if(position_reference_mode_!=2){position_gate_.interrupt();return;}
++ position_gate_.invalidate_pending(position_target_takeover_valid_?position_target_takeover_.source:position_session::Meta{});
++ position_target_takeover_valid_=false;position_target_pause_requested_=true;
++ if(position_target_pending_&&position_admission_)position_admission_->defer_packet(position_target_pending_);
++}
  void ServoNode::position_submit(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
   const auto source=position_session::meta(packet->meta);
 + if(position_reference_mode_==2){
@@ -252,12 +288,28 @@
 +     (position_target_pending_&&source==position_session::meta(position_target_pending_->meta)))return;
 +  const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
 +  auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
++  const bool cancel_takeover=source.operation==2&&position_target_takeover_valid_&&
++   source.session==position_target_takeover_.source.session&&source.sequence>position_target_takeover_.source.sequence&&source.stamp>=position_target_takeover_.source.stamp;
++  if(cancel_takeover)context.identity=position_target_takeover_.identity;
 +  position_session::ServoCommand checked;
 +  const auto error=position_session::inspect_servo_command(*packet,position_origin_packet_.get(),context,checked);
 +  if(error||packet->meta.reference_mode!=2||
-+     (!checked.derived&&!position_gate_.accepts(source,ros,steady))||
-+     (checked.derived&&(!position_gate_.live(steady)||!position_session::fresh(source,ros)||packet->frame_sequence<=position_v2_.frame))){
++     (!checked.derived&&!cancel_takeover&&!position_gate_.accepts(source,ros,steady,position_session::maximum_target_pause_ttl))||
++     (cancel_takeover&&!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl))||
++     (checked.derived&&(!position_gate_.live(steady)||!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||packet->frame_sequence<=position_v2_.frame))){
 +   position_target_error_.reason(error?error:"target_identity_or_order");position_cycle_reason_=position_target_error_.c_str();return;
++  }
++  if(cancel_takeover){
++   // No reference for this session has been adopted. Cancel its takeover before
++   // activation; this is not a braking trajectory or physical-stop confirmation.
++   ++position_target_barrier_;position_interrupt();
++   position_target_error_.reason("takeover_canceled_before_activation");position_cycle_reason_=position_target_error_.c_str();
++   position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
++   if(position_receipts_enabled_)position_receipts_.push(source.session,source.sequence,position_feedback_.boot,position_feedback_.sample,ros,false,position_cycle_reason_);
++   return;
++  }
++  if(!checked.derived&&source.operation==1&&position_target_takeover_valid_){
++   position_target_error_.reason("takeover_already_pending");position_cycle_reason_=position_target_error_.c_str();return;
 +  }
 +  // Auxiliary updates retain the exact source and only refresh native PD/torque.
 +  // They cannot displace a pending target or control operation.
@@ -270,17 +322,17 @@
 +  }
 +  if(source.session==position_admission_source_.session&&source.sequence<position_admission_source_.sequence)return;
 +  if(!checked.derived&&source.operation==0&&position_target_pause_requested_)return;
-+  if(!checked.derived&&source.operation==1)position_target_pause_requested_=false;
++  if(!checked.derived&&source.operation==1){position_target_pause_requested_=false;position_target_takeover_=checked;position_target_takeover_valid_=true;}
 +  if(!checked.derived&&source.operation==2){++position_target_barrier_;position_target_pause_requested_=true;}
 +  if(position_target_pending_&&!position_admission_->defer_packet(position_target_pending_)){
-+   position_gate_.interrupt();position_target_error_.reason("target_retirement_full");position_cycle_reason_=position_target_error_.c_str();return;
++   position_interrupt();position_target_error_.reason("target_retirement_full");position_cycle_reason_=position_target_error_.c_str();return;
 +  }
 +  position_target_pending_=packet;position_target_dispatch();return;
 + }
   if(position_v2_.rejected.blocks(source))return;
   if(position_admission_->busy() && source==position_admission_source_)return;
   const auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
-@@ -2348,14 +2385,30 @@
+@@ -2348,33 +2407,52 @@
   }
   position_admission_source_=source;
  }
@@ -289,7 +341,8 @@
 + const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
 + const auto source=position_session::meta(position_target_pending_->meta);
 + position_session::TargetSnapshot snapshot;
-+ if(!position_session::fresh(source,ros)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
++ if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
++  if(source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
 +  position_v2_.rejected.reject(source,"target_snapshot_or_expired");position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
 +  position_cycle_reason_=position_v2_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
 + }
@@ -306,24 +359,38 @@
     position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load(),!impedance_enable_,position_policy_,
     position_feedback_,this->now().nanoseconds(),position_session::steady_ns(),position_gate_,position_trajectory_,position_output_,position_interval_):result->error.c_str();
 - if(error){
-+ if(error&&position_reference_mode_==2&&((std::strcmp(error,"target_generation_late")==0&&position_session::fresh(source,this->now().nanoseconds()))||std::strcmp(error,"target_superseded_by_pause")==0)){
++ if(error&&position_reference_mode_==2&&((std::strcmp(error,"target_generation_late")==0&&position_session::fresh(source,this->now().nanoseconds(),position_session::maximum_target_pause_ttl))||std::strcmp(error,"target_superseded_by_pause")==0)){
 +  // A late ordinary result is retried from a new dated snapshot if no newer
 +  // pending target exists. New input never cancels a completed valid result.
 +  if(!position_target_pending_&&result->context.barrier==position_target_barrier_&&std::strcmp(error,"target_generation_late")==0)position_target_pending_=result->packet;
 + }else if(error){
++  if(position_reference_mode_==2&&source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
    position_v2_.rejected.reject(source,error);position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
    position_cycle_reason_=position_v2_.rejected.reason.c_str();
   }else{
-@@ -2367,7 +2420,7 @@
+   if(!result->command.derived){
+    result->retired_packet=std::move(position_origin_packet_);position_origin_packet_=result->packet;
+    position_local_hold_=false;
++   if(position_reference_mode_==2&&source.operation==1)position_target_takeover_valid_=false;
+    if(source.operation==1)for(unsigned i=0;i<position_session::joint_count;++i)EtherCAT_setSingleMotorEnable(position_session::position_slot(i),true);
+   }
    position_rejected_session_=position_rejected_sequence_=0;position_cycle_reason_=nullptr;
- 
+
   }
 - if(position_receipts_enabled_ && !result->command.derived)position_receipts_.push(source.session,source.sequence,
 + if(position_receipts_enabled_ && !result->command.derived && !(error&&position_reference_mode_==2&&(std::strcmp(error,"target_generation_late")==0||std::strcmp(error,"target_superseded_by_pause")==0)))position_receipts_.push(source.session,source.sequence,
     position_feedback_.boot,position_feedback_.sample,this->now().nanoseconds(),!error,error);
   position_admission_->release(result);
  }
-@@ -2383,7 +2436,7 @@
+ void ServoNode::position_step(){
+  if(!position_gate_.selected())return;
+  const auto now=position_session::steady_ns();const auto dt=position_interval_.tick(now);
+- if(impedance_enable_){position_gate_.interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CONTROL_SOURCE_CONFLICT;if(position_reference_mode_)position_cycle_reason_="control_source_conflict";else position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}
++ if(impedance_enable_){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CONTROL_SOURCE_CONFLICT;if(position_reference_mode_)position_cycle_reason_="control_source_conflict";else position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}
+  // Never let a local ROS loop stall extend the source's monotonic deadline.
+  if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
+   bool valid=std::isfinite(dt)&&dt>0&&dt<=.01;
+@@ -2383,7 +2461,7 @@
     if(valid){const auto& source=position_trajectory_.source();
      position_output_.session=source.session;position_output_.sequence=source.sequence;position_output_.operation=source.operation;
      position_output_.deadline=position_trajectory_.deadline();position_output_.source_stamp_ns=source.stamp;position_output_.expires_at_ns=source.expires;
@@ -332,6 +399,23 @@
      position_output_.sample_time_ns=this->now().nanoseconds();position_output_.rt_deadline=now+20000000;
      position_output_.reference_position=position_trajectory_.q;position_output_.reference_speed=position_trajectory_.v;position_output_.reference_acceleration=position_trajectory_.a;
      for(unsigned i=0;i<position_session::joint_count;++i){position_output_.q[i]=position_trajectory_.q[i];position_output_.v[i]=position_trajectory_.v[i];}
+@@ -2394,7 +2472,7 @@
+   }
+   const auto& reference=position_reference_mode_?position_trajectory_.q:position_follower_.q;
+   for(unsigned i=0;i<position_session::joint_count;++i)if(!std::isfinite(reference[i])||reference[i]<position_session::lower[i]||reference[i]>position_session::upper[i]||std::abs(reference[i]-position_feedback_.q[i])>.25)valid=false;
+-  if(!valid){position_gate_.interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;if(position_reference_mode_)position_cycle_reason_="cycle_limit_or_tracking_error";else position_rejection_="cycle_limit_or_tracking_error";}
++  if(!valid){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;if(position_reference_mode_)position_cycle_reason_="cycle_limit_or_tracking_error";else position_rejection_="cycle_limit_or_tracking_error";}
+  }
+  EtherCAT_positionOutput(position_output_);
+ }
+@@ -2411,6 +2489,6 @@
+ bool ServoNode::position_endpoint(){
+  const auto endpoint=position_connection::check_publisher(*this,position_feedback_sub_,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");
+  if(!endpoint.ready()){position_wait_reason_=endpoint.reason;position_feedback_.advances=0;position_feedback_.ready_sample=0;position_feedback_.ready_ros=0;return false;}
+- if(position_feedback_gid_!=endpoint.publisher_gid){position_feedback_=position_session::Tracker{};position_gate_.interrupt();position_feedback_gid_=endpoint.publisher_gid;}
++ if(position_feedback_gid_!=endpoint.publisher_gid){position_feedback_=position_session::Tracker{};position_interrupt();position_feedback_gid_=endpoint.publisher_gid;}
+  return true;
+ }
 --- a/servo_control/src/servo_control/ethercat_driver.cpp
 +++ b/servo_control/src/servo_control/ethercat_driver.cpp
 @@ -894,7 +894,7 @@

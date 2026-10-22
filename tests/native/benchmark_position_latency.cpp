@@ -47,7 +47,13 @@ int main(int argc,char** argv){
    if(first_nonzero_input<0&&std::abs(goal[0]-measured[0])>1e-12)first_nonzero_input=tick;
    next+=period+(jitter?((inputs%4==0)?4:(inputs%4==1?-3:inputs%4==2?2:-3)):0);
   }
-  if(tick==4000){has_pending=true;pause_sent=true;pending_source={1,++sequence,now,now+200000000,2};}
+  if(tick==4000){has_pending=true;pause_sent=true;
+#ifdef TARGET_STREAM
+   pending_source={1,++sequence,now,now+2000000000LL,2};
+#else
+   pending_source={1,++sequence,now,now+200000000,2};
+#endif
+  }
   if(pending && tick>=ready){
    const char* error=queue.commit(*pending,now,now,measured,speed);
    if(error){++rejected;std::cout<<"REJECT "<<tick<<' '<<error<<'\n';}
@@ -91,7 +97,7 @@ int main(int argc,char** argv){
    if(now>=queue.deadline()){++expired_samples;continue;}
    if(tick>=800&&tick<1450){const double v=queue.v[0];const bool rest=std::abs(v)<1e-5;++constant_samples;constant_rest_samples+=rest;constant_restarts+=!rest&&constant_was_rest;constant_was_rest=rest;constant_sum_v+=v;constant_sum_v2+=v*v;constant_min_v=std::min(constant_min_v,v);constant_max_v=std::max(constant_max_v,v);}
    for(unsigned i=0;i<16;++i){max_v=std::max(max_v,std::abs(queue.v[i]));max_a=std::max(max_a,std::abs(queue.a[i]));max_j=std::max(max_j,std::abs(queue.j[i]));}
-   for(unsigned i=0;i<16;++i){const double error=std::abs(queue.q[i]-goal[i]);sum_error+=error*error;max_error=std::max(max_error,error);++error_count;if(i==0)axis0_error+=error*error;if(i==7)axis7_error+=error*error;if(i==14)waist_error+=error*error;}
+   if(tick<4000)for(unsigned i=0;i<16;++i){const double error=std::abs(queue.q[i]-goal[i]);sum_error+=error*error;max_error=std::max(max_error,error);++error_count;if(i==0)axis0_error+=error*error;if(i==7)axis7_error+=error*error;if(i==14)waist_error+=error*error;}
    if(first_motion_ms<0 && std::abs(queue.q[0]-measured[0])>1e-10)first_motion_ms=tick;
    if(tick>=1500 && reverse_ms<0 && queue.v[0]<-1e-7)reverse_ms=tick-1500;
    if(tick>=4000 && pause_sent && stop_ms<0 && queue.phase(now)==4)stop_ms=tick-4000;

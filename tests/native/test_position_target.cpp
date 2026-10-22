@@ -78,4 +78,29 @@ void stale_and_invalid(){
  auto p=TrajectoryQueue::prepare_target(w,take,s,goal);speed[0]=.011;assert(std::string(q.commit(*p,restart+1000000,restart+1000000,measured,speed))=="trajectory_takeover_seed");
  std::cout<<"PASS explicit target version/curve/limit/layout rejection, 12ms late result, original TTL, PAUSE supersedes stale result, takeover rest gate\n";
 }
-int main(){stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();}
+void target_pause_window(){
+ using namespace bindu::execution;
+ static_assert(maximum_ttl==200000000&&maximum_target_pause_ttl==2000000000LL);
+ const int64_t now=1000000000;Meta take{44,1,now,now+200000000,1};assert(fresh(take,now));
+ auto over=take;++over.expires;assert(!fresh(over,now,maximum_target_pause_ttl));
+ Meta pause{44,2,now+20000000,now+2020000000,2};assert(!fresh(pause,pause.stamp));assert(fresh(pause,pause.stamp,maximum_target_pause_ttl));
+ assert(!fresh(pause,pause.expires,maximum_target_pause_ttl));auto too_long=pause;++too_long.expires;assert(!fresh(too_long,too_long.stamp,maximum_target_pause_ttl));
+ Gate gate;assert(gate.accepts(take,now,now));gate.commit(take,now,now);
+ assert(!gate.accepts(pause,pause.stamp,pause.stamp));assert(gate.accepts(pause,pause.stamp,pause.stamp,maximum_target_pause_ttl));gate.commit(pause,pause.stamp,pause.stamp);
+ const auto deadline=gate.deadline();for(unsigned i=0;i<1000;++i){assert(fresh(pause,pause.stamp+i*1000000,maximum_target_pause_ttl));assert(gate.deadline()==deadline);}assert(deadline==pause.expires);
+ unsigned feasible=0,impossible=0;double longest=0.;Wire w;w.segment_id=2;
+ Limits l;l.lower=lower[0];l.upper=upper[0];l.velocity=.25;l.acceleration=.5;l.jerk=162;
+ for(int vi=-20;vi<=20;++vi)for(int ai=-20;ai<=20;++ai){
+  const double v=.25*vi/20,a=.5*ai/20;Brake brake;
+  if(!AdaptiveStream::brake(l,{0.,v,a,0.},brake)){++impossible;continue;}++feasible;
+  TargetSnapshot snapshot;snapshot.q=seed();snapshot.v[0]=v;snapshot.a[0]=a;snapshot.valid=true;snapshot.effective_ros=snapshot.effective_steady=pause.stamp+110000000;snapshot.version=1;
+  auto stop=TrajectoryQueue::prepare_target(w,pause,snapshot,snapshot.q);longest=std::max(longest,stop->segment->end());
+  assert(stop->segment->end()<(pause.expires-snapshot.effective_ros)*1e-9);
+  const auto end=stop->segment->sample(stop->segment->end());for(unsigned i=0;i<16;++i){assert(std::abs(end.v[i])<1e-8&&std::abs(end.a[i])<1e-8);}
+ }
+ assert(feasible>1000&&impossible>0);
+ TargetSnapshot unsafe;unsafe.q=seed();unsafe.q[0]=upper[0]-.0001;unsafe.v[0]=.25;unsafe.valid=true;unsafe.effective_ros=unsafe.effective_steady=pause.stamp+10000000;rejects([&]{TrajectoryQueue::prepare_target(w,pause,unsafe,unsafe.q);});
+ std::cout<<"PASS distinct fixed 2s target PAUSE; ordinary/legacy remain 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
+}
+
+int main(){stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}

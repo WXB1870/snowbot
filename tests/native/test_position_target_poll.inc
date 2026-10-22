@@ -78,3 +78,28 @@ void check_target_production(){
  assert(!periodic_allocations&&!periodic_deletions);
  std::cout<<"PASS actual target submit/dispatch/poll: derived auxiliary updates without replan/TTL renewal, bounded latest merge, no ordinary starvation, 12/25/100ms single-tail retry, PAUSE priority including late PAUSE, original expiry, revocation, fixed-capacity/error handling, zero periodic new/delete\n";
 }
+
+void check_bootstrap_interrupts(){
+ using namespace position_session;
+ for(unsigned scenario=0;scenario<6;++scenario){
+  ServoNode node;node.position_reference_mode_=2;
+  node.position_admission_=std::make_unique<TrajectoryAdmission<Packet>>(node.position_trajectory_,[](auto& result){inspect_entered=true;while(inspect_hold.load())std::this_thread::yield();if(auto e=inspect_servo_command(*result.packet,result.origin.get(),result.context,result.command))throw std::invalid_argument(e);});
+  auto make=[&](uint64_t session,uint64_t sequence,uint8_t operation){node.feedback();auto p=std::make_shared<Packet>();const auto now=steady_ns();p->meta.session=session;p->meta.sequence=sequence;p->meta.operation=operation;p->meta.reference_mode=2;p->meta.source_stamp_ns=now;p->meta.expires_at_ns=now+(operation==2?2000000000LL:200000000LL);p->meta.feedback_boot_id=node.position_feedback_.boot;p->meta.feedback_sample=node.position_feedback_.sample;p->meta.middle_instance_id=32;
+   for(unsigned i=0;i<7;++i){p->command.l_position[i]=node.position_feedback_.q[i];p->command.r_position[i]=node.position_feedback_.q[i+7];p->command.l_kp[i]=p->command.r_kp[i]=40;p->command.l_kd[i]=p->command.r_kd[i]=2;}p->waist_position={node.position_feedback_.q[14],node.position_feedback_.q[15]};p->trajectory.version=2;p->trajectory.segment_id=sequence;p->trajectory.max_velocity.fill(.25);p->trajectory.max_acceleration.fill(.5);p->trajectory.max_jerk.fill(162);return p;};
+  auto drain=[&](){const auto until=steady_ns()+1000000000;do{node.feedback();periodic_allocations=periodic_deletions=0;count_periodic_memory=true;node.position_poll();count_periodic_memory=false;assert(!periodic_allocations&&!periodic_deletions);assert(steady_ns()<until);std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(node.position_admission_->busy()||node.position_target_pending_);};
+  uint64_t session=900+scenario*3;
+  if(scenario==1){node.position_submit(make(session-1,1,1));drain();node.position_interrupt();}
+  const auto enabled_before=enable_requests;auto take=make(session,1,1);inspect_hold=true;inspect_entered=false;node.position_submit(take);while(!inspect_entered.load())std::this_thread::yield();
+  if(scenario<=1){auto pause=make(session,2,2);const auto before=node.position_target_barrier_;count_periodic_memory=true;node.position_submit(pause);count_periodic_memory=false;assert(!periodic_allocations&&!periodic_deletions);assert(node.position_target_barrier_>before&&!node.position_target_takeover_valid_);assert(std::string(node.position_cycle_reason_)=="takeover_canceled_before_activation");}
+  else if(scenario==2){count_periodic_memory=true;node.position_interrupt();count_periodic_memory=false;assert(!periodic_allocations&&!periodic_deletions);}
+  else if(scenario==3){auto wrong=make(session,2,2);wrong->meta.lease_id="wrong-lease";const auto before=node.position_target_barrier_;node.position_submit(wrong);assert(node.position_target_barrier_==before&&node.position_target_takeover_valid_);}
+  else if(scenario==4)node.position_initialized_=false;
+  else std::this_thread::sleep_for(std::chrono::milliseconds(210));
+  inspect_hold=false;drain();
+  if(scenario==3){assert(node.position_gate_.last().session==session&&enable_requests==enabled_before+16);continue;}
+  assert(node.position_gate_.last().session!=session&&enable_requests==enabled_before&&!node.position_target_takeover_valid_);
+  node.position_submit(take);drain();assert(node.position_gate_.last().session!=session&&enable_requests==enabled_before);
+  node.position_initialized_=true;node.position_submit(make(session+1,1,1));drain();assert(node.position_gate_.last().session==session+1&&enable_requests==enabled_before+16);
+ }
+ std::cout<<"PASS actual bootstrap first/recovery in-flight PAUSE and helper interruption retire old takeover without enables; wrong authority cannot cancel; terminal rejection/expiry clears pending identity; fresh-session recovery and zero counted periodic new/delete\n";
+}

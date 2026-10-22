@@ -6,6 +6,8 @@
 #include <chrono>
 namespace position_session {
 constexpr int64_t maximum_ttl=200000000;
+// A target-stream PAUSE is a separate stop command, never a motion renewal.
+constexpr int64_t maximum_target_pause_ttl=2000000000;
 // ROS delivery and progress budget; the raw PDO age limit remains 20 ms.
 constexpr int64_t ros_feedback_timeout_ns=40000000;
 // Independent position contract: L1..7, R1..7, waist1..2, radians.
@@ -20,22 +22,29 @@ struct Meta {
  bool operator==(const Meta& b)const{return session==b.session && sequence==b.sequence && stamp==b.stamp && expires==b.expires && operation==b.operation;}
 };
 template<class M> Meta meta(const M& m){return {m.session,m.sequence,m.source_stamp_ns,m.expires_at_ns,m.operation};}
-inline bool fresh(const Meta& m,int64_t now){return m.session && m.sequence && m.stamp>0 && m.expires>m.stamp && m.expires-m.stamp<=maximum_ttl && now>=m.stamp && now<m.expires && m.operation<=2;}
+inline bool fresh(const Meta& m,int64_t now,int64_t pause_limit=maximum_ttl){return m.session && m.sequence && m.stamp>0 && m.expires>m.stamp && m.expires-m.stamp<=(m.operation==2?pause_limit:maximum_ttl) && now>=m.stamp && now<m.expires && m.operation<=2;}
 class Gate {
  bool interrupted_=false;uint64_t generation_=0;Meta last_{};int64_t deadline_=0;std::array<uint64_t,32> retired_{};unsigned count_=0;
 public:
  const char* rejection="";
  void interrupt(){if(selected()){if(!interrupted_)++generation_;interrupted_=true;deadline_=0;}}
+ // Explicit target-stream cancellation also invalidates work before selection.
+ // Retire an unadopted takeover identity so a queued duplicate cannot reactivate it.
+ void invalidate_pending(const Meta& pending){
+  ++generation_;interrupted_=true;deadline_=0;
+  if(pending.session&&pending.session!=last_.session&&
+     std::find(retired_.begin(),retired_.end(),pending.session)==retired_.end()&&count_<retired_.size())retired_[count_++]=pending.session;
+ }
  uint64_t generation()const{return generation_;}
  const Meta& last()const{return last_;}
  bool selected()const{return last_.session!=0;}
  bool live(int64_t now)const{return selected() && now>0 && now<deadline_;}
  bool following(int64_t now)const{return live(now) && last_.operation!=2;}
  int64_t deadline()const{return deadline_;}
- bool accepts(const Meta& m,int64_t ros,int64_t steady) {
+ bool accepts(const Meta& m,int64_t ros,int64_t steady,int64_t pause_limit=maximum_ttl) {
   rejection="";
   if(interrupted_ && m.session==last_.session){rejection="new_session_required";return false;}
-  if(!fresh(m,ros) || steady<=0){rejection="expired_or_invalid";return false;}
+  if(!fresh(m,ros,pause_limit) || steady<=0){rejection="expired_or_invalid";return false;}
   if(m.session!=last_.session){
    if(m.operation!=1 || (following(steady)) || count_==retired_.size() || std::find(retired_.begin(),retired_.end(),m.session)!=retired_.end()){
     rejection="session_conflict_or_retired";return false;}

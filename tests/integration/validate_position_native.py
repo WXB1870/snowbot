@@ -101,6 +101,9 @@ def write_receipt_poll_check(source, work, root):
     if 'void ServoNode::position_target_dispatch()' in text:
         begin=text.index('void ServoNode::position_target_dispatch()')
         poll=text[begin:start]+poll
+    if 'void ServoNode::position_interrupt()' in text:
+        begin=text.index('void ServoNode::position_interrupt()');end=text.index('void ServoNode::position_submit(',begin)
+        poll=text[begin:end]+poll
     ready=''
     if 'bool ServoNode::session_impedance_ready() const' in text:
         start=text.index('bool ServoNode::session_impedance_ready() const')
@@ -126,7 +129,8 @@ TARGET_FIELDS = r"""
  uint64_t position_target_barrier_=0;bool position_target_pause_requested_=false;
  int64_t position_target_prepare_ns_=10000000;
  double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
- void position_target_dispatch();void position_submit(const Packet::SharedPtr packet);
+ position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
+ void position_interrupt();void position_target_dispatch();void position_submit(const Packet::SharedPtr packet);
 """
 
 
@@ -141,12 +145,32 @@ def write_target_poll_check(source, work, root):
         'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
     body=body[:body.index(' void start(')]+TARGET_FIELDS+'};\n'
     body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
-    start=text.index('void ServoNode::position_submit(')
+    start=text.index('void ServoNode::position_interrupt()') if 'void ServoNode::position_interrupt()' in text else text.index('void ServoNode::position_submit(')
     methods=text[start:text.index('void ServoNode::position_step()',start)]
     methods=methods.replace('snowbot_ctl_msgs::msg::PositionSessionServo','Packet')
     checks=(root/'test_position_target_poll.inc').read_text()
-    main='\nint main(){snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;check_target_production();}\n'
+    main='\nint main(){snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;check_target_production();check_bootstrap_interrupts();}\n'
     path=work/'test_production_target.cpp';path.write_text(preamble+body+methods+checks+main);return path
+
+def write_position_cycle_check(source, work, root):
+    fixture=(root/'test_session_impedance.cpp').read_text()
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
+    preamble='\n'.join(line for line in preamble.splitlines() if
+        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
+    clock='int64_t cycle_now_ns=1000000000;int64_t cycle_clock(){cycle_now_ns+=100;return cycle_now_ns;}\nposition_session::OutputCache* active_cycle_cache=nullptr;\n'
+    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body='\n'.join(line for line in body.splitlines() if
+        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
+    body=body[:body.index(' void start(')]+TARGET_FIELDS+'};\n'
+    body=body.replace('snapshot.sensor_sampled_ns.fill(t);','').replace('position_session::steady_ns()','cycle_clock()')
+    body=body.replace('void EtherCAT_positionOutput(const position_session::Output& p){applied=p;++writes;}',
+        'void EtherCAT_positionOutput(const position_session::Output& p){active_cycle_cache->publish(p);applied=p;++writes;}')
+    start=text.index('void ServoNode::position_interrupt()')
+    methods=text[start:text.index('bool ServoNode::position_ready()',start)]
+    methods=methods.replace('snowbot_ctl_msgs::msg::PositionSessionServo','Packet').replace('position_session::steady_ns()','cycle_clock()')
+    checks=(root/'test_position_cycle.inc').read_text()
+    path=work/'test_production_position_cycle.cpp';path.write_text(preamble+clock+body+methods+checks);return path
 
 def write_middle_check(source, work, root):
     text=(source/'dual_arm_control/src/controller/ArmInterface.cpp').read_text()
@@ -200,6 +224,8 @@ def main():
             names.append('test_position_target')
             if 'void ServoNode::position_target_dispatch()' in (args.source/'servo_control/src/ros_controller/rosLoop.cpp').read_text():
                 names.append('test_production_target');sources.append(root/'test_position_target_poll.inc')
+                if 'void ServoNode::position_interrupt()' in (args.source/'servo_control/src/ros_controller/rosLoop.cpp').read_text():
+                    names.append('test_production_position_cycle');sources.append(root/'test_position_cycle.inc')
         middle=args.source/'dual_arm_control/src/controller/ArmInterface.cpp'
         if 'reference_only' in middle.read_text():
             names.append('test_position_middle');sources.append(middle)
@@ -219,6 +245,8 @@ def main():
             binary=work/name
             if name=='test_position_middle':
                 copied=write_middle_check(args.source,work,root)
+            elif name=='test_production_position_cycle':
+                copied=write_position_cycle_check(args.source,work,root)
             elif name=='test_production_target':
                 copied=write_target_poll_check(args.source,work,root)
             elif name=='test_production_receipt':
@@ -235,7 +263,7 @@ def main():
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
-            elif name in ('test_position_trajectory','test_production_receipt','test_position_target','test_production_target'):
+            elif name in ('test_position_trajectory','test_production_receipt','test_position_target','test_production_target','test_production_position_cycle'):
                 command.extend(map(str,native_sources))
             compiled=subprocess.run(command,capture_output=True,text=True)
             if compiled.returncode:failed(compiled.stdout+compiled.stderr)

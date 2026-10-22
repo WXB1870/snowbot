@@ -111,7 +111,7 @@ def main():
                 obs_pub.publish(msg)
                 state=PositionSessionState();state.header.stamp=msg.header.stamp
                 state.layer='servo';state.control_source=args.execution_mode;state.startup_complete=True
-                if target_stream:state.wire_version=3;state.reference_mode=2
+                if target_stream:state.wire_version=4;state.reference_mode=2
                 state.feedback_ready=True;state.instance_id=333;state.feedback_boot_id=333
                 state.feedback_sample=sample;state.stop_policy='disable_no_load';state.state='ready_idle'
                 servo_state_pub.publish(state)
@@ -162,7 +162,7 @@ def main():
         observer.now=lambda:observer.get_clock().now().nanoseconds*1e-9
         events=[];observer.event=lambda *args,**kwargs:events.append((args,kwargs))
         d.node=observer;d.health=SessionHealth(observer.now,reference_mode=2)
-        d.envelopes=SourceEnvelope(session,observer.now)
+        d.envelopes=SourceEnvelope(session,observer.now,target_stream=True)
         d.sent={};d.target_instance=d.source_identity=d.takeover_pending=None
         d.target_fault='';d.applied_sequence=0
         d.arm_type=PositionSessionCommand;d.publishers={'arms':cmd_pub}
@@ -197,7 +197,7 @@ def main():
             metadata=d.sent[1][0];original_expiry=metadata['expires_at_ns']
             assert d.takeover_pending[0]['expires_at_ns']==original_expiry
             ack=PositionSessionState();ack.header.stamp=feedback.get_clock().now().to_msg()
-            ack.layer='servo';ack.wire_version=3;ack.reference_mode=2;ack.instance_id=333;ack.feedback_boot_id=333
+            ack.layer='servo';ack.wire_version=4;ack.reference_mode=2;ack.instance_id=333;ack.feedback_boot_id=333
             ack.session=session;ack.sequence=1;ack.state='accepted';ack.reason='synthetic_memory_servo'
             ack_pub.publish(ack)
             assert pump(.06,lambda:d.takeover_pending is None)
@@ -212,6 +212,10 @@ def main():
             d.io.sending_hold=True;d.send(CONTROL_GROUPS,target);d.io.sending_hold=False
             sequence=d.envelopes.sequence
             assert pump(.08,lambda:any(f.meta.session==session and f.meta.sequence==sequence and f.meta.operation==2 for f in frames))
+            pause_meta=d.sent[sequence][0]
+            assert pause_meta['expires_at_ns']-pause_meta['source_stamp_ns']==2_000_000_000
+            assert pump(.08,lambda:any(f.meta.session==session and f.meta.sequence==sequence and f.meta.expires_at_ns==pause_meta['expires_at_ns'] for f in frames))
+            checks[f'pause_{round(1/period)}hz_original_two_second_stop_deadline_preserved']=True
             checks[f'bootstrap_{round(1/period)}hz_single_takeover_ack_then_unblocked_target_stream']=True
         finally:
             health_probes.remove(d.health)

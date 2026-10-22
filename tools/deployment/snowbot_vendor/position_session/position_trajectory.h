@@ -36,7 +36,7 @@ struct ServoCommand {
  Meta source{};SourceIdentity identity{};uint64_t frame=0,feedback_boot=0,feedback_sample=0,middle_instance=0;
  std::array<double,joint_count> target{};
  std::array<float,joint_count> kp{},kd{},torque{};
- bool derived=false;
+ bool derived=false,target_stream=false;
 };
 struct RejectedTrajectory {
  Meta source{};FixedText reason;bool active=false;
@@ -47,7 +47,7 @@ struct RejectedTrajectory {
 };
 template<class Packet> const char* inspect_servo_command(const Packet& packet,const Packet* origin,
  const AdmissionContext& context,ServoCommand& result)noexcept{
- result.source=meta(packet.meta);result.frame=packet.frame_sequence;
+ result.source=meta(packet.meta);result.frame=packet.frame_sequence;result.target_stream=packet.meta.reference_mode==2;
  result.feedback_boot=packet.meta.feedback_boot_id;result.feedback_sample=packet.meta.feedback_sample;
  result.middle_instance=packet.meta.middle_instance_id;result.identity.epoch=packet.meta.epoch;
  if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&packet.trajectory.version==2))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
@@ -240,10 +240,10 @@ struct ServoAdmissionState {
   const bool derived=source==gate.last();
   if(derived!=command.derived)return "admission_source_changed";
   if(derived){
-   if(!gate.live(steady)||!fresh(source,ros)||command.frame<=frame)return "duplicate_or_expired_frame";
+   if(!gate.live(steady)||!fresh(source,ros,command.target_stream?maximum_target_pause_ttl:maximum_ttl)||command.frame<=frame)return "duplicate_or_expired_frame";
   }else{
    if(source.operation!=1 && !command.identity.authority(identity))return "source_authority_changed";
-   if(!gate.accepts(source,ros,steady))return gate.rejection;
+   if(!gate.accepts(source,ros,steady,command.target_stream?maximum_target_pause_ttl:maximum_ttl))return gate.rejection;
    if(!prepared || !(prepared->source==source))return "prepared_source_mismatch";
    prepared->admission=gate.generation()+1;
    if(const auto error=trajectory.commit(*prepared,ros,steady,feedback.q,feedback.v))return error;
