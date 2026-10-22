@@ -14,22 +14,24 @@ void check_position_pdo_output();
 #endif
 // One continuous watchdog crosses TTL; healthy frames, PAUSE and deselection
 // cannot release a prior fault. Only a newly admitted explicit takeover can.
-// The 0.1 degree position band is explicit and finite on every controlled axis.
+// The position band is finite: R3 lower 1 degree, all other bounds 0.1 degree.
 void check_joint_limit_allowance(){
  assert(std::abs(joint_limit_allowance-std::acos(-1.)/1800.)<1e-18);
  std::array<double,joint_count> q{};
  for(unsigned j=0;j<joint_count;++j)q[j]=(nominal_lower[j]+nominal_upper[j])*.5;
  for(unsigned i=0;i<joint_count;++i){
-  const double saved=q[i];
-  assert(std::abs(lower[i]-(nominal_lower[i]-joint_limit_allowance))<1e-15);
+  const double saved=q[i],lower_allowance=i==9?std::acos(-1.)/180.:joint_limit_allowance;
+  assert(std::abs(lower[i]-(nominal_lower[i]-lower_allowance))<1e-15);
   assert(std::abs(upper[i]-(nominal_upper[i]+joint_limit_allowance))<1e-15);
-  q[i]=nominal_lower[i]-joint_limit_allowance;assert(in_limits(q));
+  q[i]=nominal_lower[i]-lower_allowance;assert(in_limits(q));
   q[i]-=1e-8;assert(!in_limits(q));
   q[i]=nominal_upper[i]+joint_limit_allowance;assert(in_limits(q));
   q[i]+=1e-8;assert(!in_limits(q));
   q[i]=std::numeric_limits<double>::quiet_NaN();assert(!in_limits(q));q[i]=saved;
  }
  q[8]=0.00023968449386302382;assert(in_limits(q));
+ q[9]=-0.5822895169258118;assert(in_limits(q)); // Recorded startup rejection.
+ q[9]=nominal_lower[9]-std::acos(-1.)/180.-1e-8;assert(!in_limits(q));
 }
 void check_latched_failures(){
  Observation obs;obs.sample=1;obs.valid_mask=0xfffff;obs.wkc=obs.expected_wkc=67;obs.status.fill(0x27);obs.position.fill(.2);

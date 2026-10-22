@@ -1,6 +1,6 @@
 --- a/servo_control/include/servo_control/position_follower.h
 +++ b/servo_control/include/servo_control/position_follower.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,55 @@
 +#pragma once
 +#include <array>
 +#include "position_session_contract.h"
@@ -46,7 +46,8 @@
 +constexpr std::array<double,joint_count> nominal_lower{-3.14,0.0,-2.61,-1.57,-3.14,-1.309,-1.274,-3.14,-3.14,-0.58,-1.57,-3.14,-1.309,-1.274,-1.17,-.79};
 +constexpr std::array<double,joint_count> nominal_upper{3.14,3.14,0.58,1.57,3.14,1.274,1.449,3.14,0.0,2.61,1.57,3.14,1.274,1.449,1.17,.55};
 +constexpr std::array<double,joint_count> with_allowance(std::array<double,joint_count> bounds,double delta){for(double& q:bounds)q+=delta;return bounds;}
-+constexpr auto lower=with_allowance(nominal_lower,-joint_limit_allowance);
++// Site-approved R3 lower allowance totals 1 degree; all other bounds stay unchanged.
++constexpr auto lower=[] {auto bounds=with_allowance(nominal_lower,-joint_limit_allowance);bounds[9]=nominal_lower[9]-0.017453292519943295;return bounds;}();
 +constexpr auto upper=with_allowance(nominal_upper,joint_limit_allowance);
 +inline bool in_limits(const std::array<double,joint_count>& q){
 + for(unsigned i=0;i<joint_count;++i){
