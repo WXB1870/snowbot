@@ -11,6 +11,7 @@ static bool count_memory=false;
 static unsigned allocations=0,deletions=0;
 void* operator new(std::size_t n){if(count_memory)++allocations;if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
 void operator delete(void* p)noexcept{if(count_memory&&p)++deletions;std::free(p);}
+void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
 static unsigned checks=0;
 #define CHECK(c) do {++checks;if(!(c))throw std::runtime_error(#c);}while(0)
 struct Observation {
