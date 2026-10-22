@@ -29,7 +29,7 @@ struct SourceIdentity {
  bool authority(const SourceIdentity& b)const noexcept{return lease==b.lease&&profile==b.profile&&epoch==b.epoch;}
 };
 struct AdmissionContext {
- uint64_t generation=0,instance=0,frame=0;Meta last{};SourceIdentity identity{};
+ uint64_t generation=0,instance=0,frame=0,barrier=0;Meta last{};SourceIdentity identity{};
  std::array<double,joint_count> target{};FixedText publisher;
 };
 struct ServoCommand {
@@ -50,7 +50,7 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
  result.source=meta(packet.meta);result.frame=packet.frame_sequence;
  result.feedback_boot=packet.meta.feedback_boot_id;result.feedback_sample=packet.meta.feedback_sample;
  result.middle_instance=packet.meta.middle_instance_id;result.identity.epoch=packet.meta.epoch;
- if(packet.meta.reference_mode!=1||packet.trajectory.version!=1||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
+ if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&packet.trajectory.version==2))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
  if(!result.identity.command.assign(packet.meta.source_command_id)||!result.identity.lease.assign(packet.meta.lease_id)||
     !result.identity.profile.assign(packet.meta.profile_hash)||!result.identity.command.size||!result.identity.lease.size||!result.identity.profile.size)return "source_identity_layout";
  for(unsigned i=0;i<7;++i){
@@ -69,13 +69,19 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
  return nullptr;
 }
 
+// Snapshot at one future switch instant, taken by the sampling owner. No segment
+// pointer escapes; background generation cannot race timeline reclamation.
+struct TargetSnapshot {
+ std::array<double,joint_count> q{},v{},a{};
+ int64_t effective_ros=0,effective_steady=0;uint64_t version=0;bool valid=false;
+};
 // The original servo thread owns the bounded timeline and samples it. A separate
 // admission worker imports/certifies immutable segments and reclaims old ones.
 // Sampling/commit do not plan, allocate, free trajectories, log or renew TTL.
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
- struct Entry {std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;};
- std::array<Entry,8> entries_{};unsigned count_=0;const Entry* selected_=nullptr;int64_t clock_offset_=0;
+ struct Entry {std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false;};
+ std::array<Entry,8> entries_{};unsigned count_=0;const Entry* selected_=nullptr;int64_t clock_offset_=0;uint64_t version_=0;
  static_assert(std::atomic<const Segment*>::is_always_lock_free,"lock-free retirement required");
  std::array<std::atomic<const Segment*>,8> retired_{};
  std::array<double,joint_count> velocity_{},acceleration_{},jerk_{};
@@ -86,7 +92,7 @@ class TrajectoryQueue {
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
 public:
  struct Prepared {
-  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;
+  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
  std::array<double,joint_count> q{},v{},a{},j{};
@@ -125,12 +131,48 @@ public:
   for(unsigned i=0;i<joint_count;++i){require(std::abs(last.v[i])<1e-8&&std::abs(last.a[i])<1e-8,"trajectory_endpoint_not_rest");result->q[i]=first.q[i];result->v[i]=first.v[i];result->a[i]=first.a[i];}
   result->source=source;result->id=wire.segment_id;result->effective=wire.effective_at_ns;return result;
  }
+ // The worker uses a dated q/v/a seed, never a moving measured seed. Ordinary
+ // targets cannot invalidate this snapshot; only a committed switch changes it.
+ bool snapshot(int64_t ros,int64_t steady,uint8_t operation,int64_t budget,
+   const std::array<double,joint_count>& measured,TargetSnapshot& out)const noexcept {
+  out={};if(budget<2000000||budget>50000000)return false;
+  out.effective_ros=ros+budget;out.effective_steady=steady+budget;out.version=version_;
+  if(operation==1){out.q=measured;out.valid=true;return true;}
+  out.effective_ros=out.effective_steady-clock_offset_;
+  const auto* entry=at(out.effective_steady);if(!entry||out.effective_steady>=entry->deadline)return false;
+  std::array<double,joint_count> j{};
+  out.valid=entry->segment->sample_into((out.effective_steady-entry->start)*1e-9,
+    out.q.data(),out.v.data(),out.a.data(),j.data(),joint_count);return out.valid;
+ }
+ template<class Wire> static std::unique_ptr<Prepared> prepare_target(const Wire& wire,const Meta& source,
+   const TargetSnapshot& snapshot,const std::array<double,joint_count>& goal,
+   double max_v=.25,double max_a=.5,double max_j=162.) {
+  using namespace bindu::execution;
+  require(wire.version==2&&wire.segment_id==source.sequence&&wire.effective_at_ns==0,"target_version_or_identity");
+  require(wire.duration.empty()&&wire.piece_start.empty()&&wire.source_duration.empty()&&wire.source_elapsed.empty()&&
+    wire.control_count.empty()&&wire.controls.empty(),"target_contains_curve");
+  require(snapshot.valid&&snapshot.effective_ros<source.expires,"target_snapshot_or_expired");
+  auto result=std::make_unique<Prepared>();JointLimits limits;limits.reserve(joint_count);
+  for(unsigned i=0;i<joint_count;++i){
+   const double v=wire.max_velocity[i],a=wire.max_acceleration[i],j=wire.max_jerk[i];
+   require(std::isfinite(v)&&std::isfinite(a)&&std::isfinite(j)&&v>0&&a>0&&j>0&&v<=max_v&&a<=max_a&&j<=max_j,"trajectory_dynamic_limits");
+   limits.push_back({lower[i],upper[i],v,a,j});result->velocity[i]=v;result->acceleration[i]=a;result->jerk[i]=j;
+  }
+  JointState seed;seed.q.assign(snapshot.q.begin(),snapshot.q.end());seed.v.assign(snapshot.v.begin(),snapshot.v.end());seed.a.assign(snapshot.a.begin(),snapshot.a.end());seed.j.assign(joint_count,0.);
+  const auto segment=source.operation==2?Segment::stop(limits,seed,0.,(source.expires-snapshot.effective_ros)*1e-9):
+   Segment::target(limits,seed,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
+  result->segment=std::make_unique<const Segment>(segment);result->source=source;result->id=source.sequence;
+  result->effective=snapshot.effective_ros;result->q=snapshot.q;result->v=snapshot.v;result->a=snapshot.a;
+  result->target_stream=true;result->version=snapshot.version;return result;
+ }
  // Bounded, allocation-free commit on the original servo thread. Ownership is
  // transferred only after every check; retired segments are deleted by worker.
  const char* commit(Prepared& input,int64_t ros,int64_t steady,
    const std::array<double,joint_count>& measured_q,const std::array<double,joint_count>& measured_v)noexcept {
   const auto& source=input.source;
-  if(input.effective<ros+2000000 || input.effective>ros+150000000 || input.effective>=source.expires)return "trajectory_late_or_expired";
+  if(input.target_stream&&input.version!=version_)return "target_snapshot_changed";
+  if(input.target_stream&&input.effective<ros+1000000)return "target_generation_late";
+  if(input.effective<ros+(input.target_stream?1000000:2000000) || input.effective>ros+150000000 || input.effective>=source.expires)return "trajectory_late_or_expired";
   const int64_t offset=source.operation==1?steady-ros:clock_offset_;
   if(source.operation!=1 && std::abs((steady-ros)-offset)>2000000)return "trajectory_clock_changed";
   const int64_t start=input.effective+offset,deadline=source.expires+offset;
@@ -153,8 +195,8 @@ public:
    if(slot.compare_exchange_strong(empty,entries_[i].segment.get(),std::memory_order_release,std::memory_order_relaxed)){entries_[i].segment.release();break;}}
   for(unsigned i=0;i<kept;++i)if(remove)entries_[i]=std::move(entries_[i+remove]);
   count_=kept;auto& entry=entries_[count_++];entry.segment=std::move(input.segment);entry.source=source;
-  entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
-  velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;return nullptr;
+  entry.target_stream=input.target_stream;entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
+  velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;++version_;return nullptr;
  }
  // Non-periodic convenience for native fixtures and offline callers.
  template<class Wire> void accept(const Wire& wire,const Meta& source,int64_t ros,int64_t steady,
@@ -172,7 +214,7 @@ public:
  int64_t deadline()const noexcept{return selected_->deadline;}
  uint8_t phase(int64_t now)const noexcept{
   if(now<selected_->start)return 1;
-  if(source().operation!=2)return 2;
+  if(source().operation!=2)return selected_->target_stream&&(now-selected_->start)*1e-9>=selected_->segment->end()?5:2;
   return (now-selected_->start)*1e-9>=selected_->segment->end()?4:3;
  }
 };
@@ -217,33 +259,45 @@ struct ServoAdmissionState {
 // The original servo thread never locks or waits for import/reclamation.
 template<class Packet> class TrajectoryAdmission {
 public:
- struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;std::string error;};
+ struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;};
 private:
- TrajectoryQueue& queue_;typename Packet::SharedPtr input_,origin_;AdmissionContext context_{};std::array<double,3> limits_{};std::function<void(Result&)> inspect_;
+ TrajectoryQueue& queue_;typename Packet::SharedPtr input_,origin_;AdmissionContext context_{};std::array<double,3> limits_{};std::function<void(Result&)> inspect_;TargetSnapshot snapshot_{};
  std::atomic<bool> stopping_{false},ready_{false},busy_{false};
  static_assert(std::atomic<Result*>::is_always_lock_free,"lock-free admission handoff required");
- std::atomic<Result*> completed_{nullptr},returned_{nullptr};std::thread worker_;
+ std::atomic<Result*> completed_{nullptr},returned_{nullptr};
+ std::array<typename Packet::SharedPtr,64> deferred_{};std::atomic<unsigned> deferred_read_{0},deferred_write_{0};
+ std::thread worker_;
+ void reclaim_packets()noexcept{auto read=deferred_read_.load(std::memory_order_relaxed);const auto write=deferred_write_.load(std::memory_order_acquire);
+  while(read!=write){deferred_[read].reset();read=(read+1)%deferred_.size();deferred_read_.store(read,std::memory_order_release);}}
+
  void run(){
   while(!stopping_.load(std::memory_order_acquire)){
+   reclaim_packets();
    if(auto result=returned_.exchange(nullptr,std::memory_order_acq_rel)){
     delete result;queue_.reclaim();busy_.store(false,std::memory_order_release);
    }
    if(!ready_.exchange(false,std::memory_order_acq_rel)){
     std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;
    }
-   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;
-   try{if(inspect_)inspect_(*result);if(!result->command.derived)result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}
+   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
+   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2]);else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
    completed_.store(result,std::memory_order_release);
   }
-  delete completed_.exchange(nullptr);delete returned_.exchange(nullptr);queue_.reclaim();
+  delete completed_.exchange(nullptr);delete returned_.exchange(nullptr);reclaim_packets();queue_.reclaim();
  }
 public:
  explicit TrajectoryAdmission(TrajectoryQueue& queue,std::function<void(Result&)> inspect={}):queue_(queue),inspect_(std::move(inspect)),worker_([this]{run();}){}
  ~TrajectoryAdmission(){stopping_.store(true,std::memory_order_release);worker_.join();}
- bool submit(typename Packet::SharedPtr packet,double velocity,double acceleration,double jerk,const AdmissionContext& context={},typename Packet::SharedPtr origin={})noexcept{
+ bool submit(typename Packet::SharedPtr packet,double velocity,double acceleration,double jerk,const AdmissionContext& context={},typename Packet::SharedPtr origin={},const TargetSnapshot& snapshot={})noexcept{
   if(busy_.exchange(true,std::memory_order_acq_rel))return false;
-  input_=std::move(packet);origin_=std::move(origin);context_=context;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
+  input_=std::move(packet);origin_=std::move(origin);context_=context;snapshot_=snapshot;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
+ }
+ bool defer_packet(typename Packet::SharedPtr& packet)noexcept{
+  if(!packet)return true;
+  const auto write=deferred_write_.load(std::memory_order_relaxed);const auto next=(write+1)%deferred_.size();
+  if(next==deferred_read_.load(std::memory_order_acquire))return false;
+  deferred_[write]=std::move(packet);deferred_write_.store(next,std::memory_order_release);return true;
  }
  bool busy()const noexcept{return busy_.load(std::memory_order_acquire);}
  Result* poll()noexcept{return completed_.exchange(nullptr,std::memory_order_acq_rel);}

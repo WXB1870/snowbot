@@ -1,0 +1,81 @@
+// Pure-memory production target-stream tests. No ROS or devices.
+#include "position_trajectory.h"
+#include <cassert>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <new>
+thread_local bool periodic=false;
+thread_local size_t allocated=0,deleted=0;
+void* operator new(std::size_t n){if(periodic)++allocated;if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+void operator delete(void* p)noexcept{if(periodic&&p)++deleted;std::free(p);}
+void* operator new[](std::size_t n){return ::operator new(n);}
+void operator delete[](void* p)noexcept{::operator delete(p);}
+void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
+void operator delete[](void* p,std::size_t)noexcept{::operator delete(p);}
+using namespace position_session;
+struct Wire {
+ unsigned version=2;uint64_t segment_id=0;int64_t effective_at_ns=0;
+ std::vector<double> piece_start,duration,source_duration,source_elapsed,controls;
+ std::vector<unsigned char> control_count;
+ std::array<double,16> max_velocity{},max_acceleration{},max_jerk{};
+ Wire(){max_velocity.fill(.25);max_acceleration.fill(.5);max_jerk.fill(162);}
+};
+template<class F>void rejects(F run){bool yes=false;try{run();}catch(const std::exception&){yes=true;}assert(yes);}
+std::array<double,16> seed(){std::array<double,16> q{};q[1]=.2;q[8]=-.2;q[14]=.12;q[15]=-.08;return q;}
+void bounded(const TrajectoryQueue& q){for(unsigned i=0;i<16;++i){assert(q.q[i]>=lower[i]-1e-9&&q.q[i]<=upper[i]+1e-9);assert(std::abs(q.v[i])<=.25+1e-9);assert(std::abs(q.a[i])<=.5+1e-9);assert(std::abs(q.j[i])<=162+1e-7);}}
+void stream(int period,bool jitter){
+ TrajectoryQueue q;auto measured=seed(),goal=measured;std::array<double,16> speed{};
+ int next=0;uint64_t sequence=0;double max_delta_a=0;bool moving=false;
+ for(int tick=0;tick<2000;++tick){
+  const int64_t now=1000000000LL+tick*1000000LL;
+  if(tick==next){
+   Meta m{7,++sequence,now,now+200000000,sequence==1?uint8_t(1):uint8_t(0)};Wire w;w.segment_id=sequence;
+   const double t=tick*.001;goal=seed();goal[0]+=.004*std::sin(t*3);goal[7]+=.003*std::sin(t*5);goal[14]+=.0015*std::sin(t*4);
+   TargetSnapshot snapshot;periodic=true;assert(q.snapshot(now,now,m.operation,10000000,measured,snapshot));periodic=false;
+   auto p=TrajectoryQueue::prepare_target(w,m,snapshot,goal);
+   const auto first=p->segment->sample(0.);
+   for(unsigned i=0;i<16;++i){assert(std::abs(first.q[i]-snapshot.q[i])<1e-12);assert(std::abs(first.v[i]-snapshot.v[i])<1e-12);assert(std::abs(first.a[i]-snapshot.a[i])<1e-11);}
+   // Neither unrelated measurement movement nor worker preparation reseeds an update.
+   auto disturbed=measured;if(sequence>1)disturbed[0]+=.5;
+   periodic=true;assert(!q.commit(*p,now+1000000,now+1000000,disturbed,speed));periodic=false;
+   q.reclaim();next+=period+(jitter?(sequence%4==0?4:sequence%4==1?-3:sequence%4==2?2:-3):0);
+  }
+  const auto before=q.a;periodic=true;assert(q.sample(now));periodic=false;bounded(q);
+  if(tick)for(unsigned i=0;i<16;++i){const auto delta=std::abs(q.a[i]-before[i]);max_delta_a=std::max(max_delta_a,delta);assert(delta<=.162+1e-7);}
+  moving|=std::abs(q.v[0])>1e-6;
+ }
+ assert(moving&&max_delta_a>0);
+ const int64_t now=3000000000LL;Meta pause{7,++sequence,now,now+200000000,2};Wire w;w.segment_id=sequence;
+ TargetSnapshot snapshot;assert(q.snapshot(now,now,2,10000000,measured,snapshot));
+ auto stop=TrajectoryQueue::prepare_target(w,pause,snapshot,goal);periodic=true;assert(!q.commit(*stop,now+1000000,now+1000000,measured,speed));periodic=false;q.reclaim();
+ bool stopped=false;
+ for(int tick=0;tick<200;++tick){periodic=true;assert(q.sample(now+tick*1000000));periodic=false;bounded(q);stopped|=q.phase(now+tick*1000000)==4;if(tick>=10)assert(q.deadline()==pause.expires);}
+ assert(stopped);for(unsigned i=0;i<16;++i){assert(std::abs(q.v[i])<1e-10);assert(std::abs(q.a[i])<1e-10);}
+ assert(!allocated&&!deleted);
+ std::cout<<"PASS target stream "<<1000/period<<"Hz jitter="<<jitter<<": measured-seed isolation, exact C2 seed, sampled jerk/dynamics, timestamped 1ms sampling, PAUSE/TTL, zero periodic new/delete\n";
+}
+void stale_and_invalid(){
+ TrajectoryQueue q;const auto measured=seed();std::array<double,16> speed{};auto goal=measured;goal[0]+=.005;
+ const int64_t now=1000000000;Meta m{1,1,now,now+200000000,1};Wire w;w.segment_id=1;TargetSnapshot s;assert(q.snapshot(now,now,1,10000000,measured,s));
+ auto first=TrajectoryQueue::prepare_target(w,m,s,goal);assert(!q.commit(*first,now+1000000,now+1000000,measured,speed));assert(q.sample(now+10000000));
+ auto wrong=w;wrong.version=1;rejects([&]{TrajectoryQueue::prepare_target(wrong,m,s,goal);});
+ wrong=w;wrong.duration.push_back(.1);rejects([&]{TrajectoryQueue::prepare_target(wrong,m,s,goal);});
+ wrong=w;wrong.max_acceleration[0]=.5001;rejects([&]{TrajectoryQueue::prepare_target(wrong,m,s,goal);});
+ wrong=w;wrong.effective_at_ns=now+10000000;rejects([&]{TrajectoryQueue::prepare_target(wrong,m,s,goal);});
+ auto badgoal=goal;badgoal[0]=NAN;rejects([&]{TrajectoryQueue::prepare_target(w,m,s,badgoal);});
+ const int64_t update=now+20000000;Meta next{1,2,update,update+200000000,0};w.segment_id=2;assert(q.snapshot(update,update,0,10000000,measured,s));
+ auto late=TrajectoryQueue::prepare_target(w,next,s,goal);
+ assert(std::string(q.commit(*late,update+12000000,update+12000000,measured,speed))=="target_generation_late");assert(q.sample(update+12000000)&&q.id()==1);
+ auto short_ttl=next;short_ttl.expires=update+5000000;rejects([&]{TrajectoryQueue::prepare_target(w,short_ttl,s,goal);});
+ auto old=TrajectoryQueue::prepare_target(w,next,s,goal);
+ auto pause=next;pause.sequence=3;pause.operation=2;w.segment_id=3;
+ auto stop=TrajectoryQueue::prepare_target(w,pause,s,goal);assert(!q.commit(*stop,update+1000000,update+1000000,measured,speed));
+ assert(std::string(q.commit(*old,update+1000000,update+1000000,measured,speed))=="target_snapshot_changed");
+ assert(q.sample(update+10000000)&&q.id()==3);assert(q.source().operation==2);q.reclaim();
+ // A takeover requires rest; ordinary updates above never use this measurement.
+ const int64_t restart=update+50000000;Meta take{2,1,restart,restart+200000000,1};w.segment_id=1;assert(q.snapshot(restart,restart,1,10000000,measured,s));
+ auto p=TrajectoryQueue::prepare_target(w,take,s,goal);speed[0]=.011;assert(std::string(q.commit(*p,restart+1000000,restart+1000000,measured,speed))=="trajectory_takeover_seed");
+ std::cout<<"PASS explicit target version/curve/limit/layout rejection, 12ms late result, original TTL, PAUSE supersedes stale result, takeover rest gate\n";
+}
+int main(){stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();}

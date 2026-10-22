@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
-COMPONENTS=('observation','takeover','timing','session','receipt')
+COMPONENTS=('observation','takeover','timing','session','receipt','target')
 NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp')
 
 def digest(path):
@@ -34,7 +34,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
     stage=Path(tempfile.mkdtemp(prefix='.position-',dir=output.parent))
     try:
         shutil.copytree(source,stage/'src')
-        patches=COMPONENTS[:1] if observation_only else COMPONENTS[:-1]
+        patches=COMPONENTS[:1] if observation_only else COMPONENTS[:4]
         for name in patches:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/(name+'.patch'))],cwd=stage/'src',check=True,capture_output=True,text=True)
         if not observation_only:
@@ -57,6 +57,11 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'receipt.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             shutil.copy2(ASSETS/'position_receipt.h',stage/'src/servo_control/include/position_receipt.h')
             patches=(*patches,'receipt')
+            # The target stream is a pure-position extension. Keep the optional
+            # impedance assembly's original ingress and PAUSE behavior byte-for-byte.
+            if not with_impedance:
+                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'target.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                patches=(*patches,'target')
         changed={}
         for p in (stage/'src').rglob('*'):
             if not p.is_file():continue
@@ -71,7 +76,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
             driver_started=False,hardware_commands_sent=False,full_build_verified=False,
-            stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,
+            stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only and not with_impedance,
+            target_wire_version=3,target_reference_mode=2,target_prepare_ms=10.,
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
             native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,

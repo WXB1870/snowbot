@@ -32,13 +32,18 @@ class PositionReleaseTests(unittest.TestCase):
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
         manifest=json.loads((output/'position_release.json').read_text())
-        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'impedance'})
+        self.assertEqual(set(manifest['components']),{*(set(vendor.COMPONENTS)-{'target'}),'impedance'})
+        self.assertFalse(manifest['target_stream_available'])
+        self.assertNotIn('target_stream', (output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
         self.assertEqual(manifest['execution_mode'],'position')
         self.assertTrue(manifest['impedance_available'])
         self.assertFalse(manifest['impedance_calibration_confirmed'])
         self.assertEqual(manifest['stop_policy'],'unconfirmed')
         default=json.loads((self.release/'position_release.json').read_text())
         self.assertFalse(default['impedance_available'])
+        self.assertTrue(default['target_stream_available'])
+        self.assertEqual((default['target_wire_version'],default['target_reference_mode']),(3,2))
+        self.assertEqual(default['target_prepare_ms'],10.)
         self.assertEqual((self.release/'src/servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes(),
                          (self.baseline/'servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes())
         for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):

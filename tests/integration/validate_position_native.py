@@ -92,9 +92,15 @@ def write_receipt_poll_check(source, work, root):
     body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
     body='\n'.join(line for line in body.splitlines() if
         'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.index(' void start(')]+'};\n'
+    body=body[:body.index(' void start(')]
+    if 'void ServoNode::position_target_dispatch()' in text:
+        body+=TARGET_FIELDS
+    body+='};\n'
     start=text.index('void ServoNode::position_poll()')
     poll=text[start:text.index('void ServoNode::position_step()',start)]
+    if 'void ServoNode::position_target_dispatch()' in text:
+        begin=text.index('void ServoNode::position_target_dispatch()')
+        poll=text[begin:start]+poll
     ready=''
     if 'bool ServoNode::session_impedance_ready() const' in text:
         start=text.index('bool ServoNode::session_impedance_ready() const')
@@ -113,10 +119,52 @@ def write_receipt_poll_check(source, work, root):
     path.write_text(preamble+body+poll+ready+described+checks+main)
     return path
 
+TARGET_FIELDS = r"""
+ std::string position_feedback_gid_="publisher";
+ position_session::Meta position_admission_source_{};position_session::FixedText position_target_error_{};
+ Packet::SharedPtr position_target_pending_;
+ uint64_t position_target_barrier_=0;bool position_target_pause_requested_=false;
+ int64_t position_target_prepare_ns_=10000000;
+ double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
+ void position_target_dispatch();void position_submit(const Packet::SharedPtr packet);
+"""
+
+
+def write_target_poll_check(source, work, root):
+    fixture=(root/'test_session_impedance.cpp').read_text()
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
+    preamble='\n'.join(line for line in preamble.splitlines() if
+        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
+    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body='\n'.join(line for line in body.splitlines() if
+        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
+    body=body[:body.index(' void start(')]+TARGET_FIELDS+'};\n'
+    body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
+    start=text.index('void ServoNode::position_submit(')
+    methods=text[start:text.index('void ServoNode::position_step()',start)]
+    methods=methods.replace('snowbot_ctl_msgs::msg::PositionSessionServo','Packet')
+    checks=(root/'test_position_target_poll.inc').read_text()
+    main='\nint main(){snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;check_target_production();}\n'
+    path=work/'test_production_target.cpp';path.write_text(preamble+body+methods+checks+main);return path
+
+def write_middle_check(source, work, root):
+    text=(source/'dual_arm_control/src/controller/ArmInterface.cpp').read_text()
+    start=text.index('std::vector<outpWrap> ArmCtlOptInterface::Traj_temp_outp(')
+    opening=text.index('{',start);depth=1;end=opening+1
+    while depth:
+        depth+=(text[end]=='{')-(text[end]=='}');end+=1
+    fixture=(root/'test_position_middle.cpp').read_text()
+    path=work/'test_position_middle.cpp';path.write_text(fixture.replace('// PRODUCTION_FUNCTION',text[start:end]))
+    return path
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',type=Path,required=True,help='Unified vendor src root')
     parser.add_argument("--output",type=Path)
+    parser.add_argument("--baseline",type=Path,help="Old prepared src for touched middle default-path differential")
+    parser.add_argument("--sanitize",action="store_true",help="AddressSanitizer and UndefinedBehaviorSanitizer, pure memory tests only")
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[1]/"native"
     compiler=shutil.which('c++')
@@ -148,36 +196,71 @@ def main():
         if any(expected.get(path.name)!=hashlib.sha256(path.read_bytes()).hexdigest() for path in native_paths):
             raise RuntimeError('CANDIDATE_NATIVE_SHA256_MISMATCH')
         names.append('test_position_trajectory')
+        if 'prepare_target' in trajectory.read_text():
+            names.append('test_position_target')
+            if 'void ServoNode::position_target_dispatch()' in (args.source/'servo_control/src/ros_controller/rosLoop.cpp').read_text():
+                names.append('test_production_target');sources.append(root/'test_position_target_poll.inc')
+        middle=args.source/'dual_arm_control/src/controller/ArmInterface.cpp'
+        if 'reference_only' in middle.read_text():
+            names.append('test_position_middle');sources.append(middle)
+    sources.append(Path(__file__).resolve())
+    if args.baseline:sources.append(args.baseline/'dual_arm_control/src/controller/ArmInterface.cpp')
+    sources.extend(root/(name+'.cpp') for name in names if (root/(name+'.cpp')).is_file())
     before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     results={}
+    def failed(detail):
+        if args.output:args.output.write_text(json.dumps(dict(passed=False,source=str(args.source),tests=results,failure=detail,source_hashes=before,hardware_accessed=False),indent=2)+'\n')
+        raise RuntimeError(detail)
     with tempfile.TemporaryDirectory(prefix='connection-review-') as tmp:
         work=Path(tmp)
         shim=work/'rclcpp/qos.hpp';shim.parent.mkdir();shim.write_text(SHIM)
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
         for name in names:
             binary=work/name
-            if name=='test_production_receipt':
+            if name=='test_position_middle':
+                copied=write_middle_check(args.source,work,root)
+            elif name=='test_production_target':
+                copied=write_target_poll_check(args.source,work,root)
+            elif name=='test_production_receipt':
                 copied=write_receipt_poll_check(args.source,work,root)
             else:
                 copied=work/(name+'.cpp');copied.write_bytes((root/(name+'.cpp')).read_bytes())
             command=[compiler,'-std=c++17','-Wall','-Wextra','-Werror','-pthread',
                 '-I'+str(args.source/'robot_control/include'),'-I'+str(args.source/'servo_control/include'),'-I'+str(native_include),'-I'+str(work),'-I'+str(root),
                 str(copied),'-o',str(binary)]
+            if name=='test_position_middle':
+                command[1:1]=['-DTARGET_AUXILIARY']
+                command+=['-Wno-sign-compare','-Wno-comment']
+            if args.sanitize:command[1:1]=['-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer']
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
-            elif name in ('test_position_trajectory','test_production_receipt'):
+            elif name in ('test_position_trajectory','test_production_receipt','test_position_target','test_production_target'):
                 command.extend(map(str,native_sources))
             compiled=subprocess.run(command,capture_output=True,text=True)
-            if compiled.returncode:raise RuntimeError(compiled.stdout+compiled.stderr)
+            if compiled.returncode:failed(compiled.stdout+compiled.stderr)
             result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=30)
-            if result.returncode:raise RuntimeError(result.stdout+result.stderr)
-            results[name]=result.stdout.strip()
-            print(result.stdout.strip())
+            if result.returncode:failed(result.stdout+result.stderr)
+            if name=='test_position_middle':
+                if args.baseline:
+                    baseline=work/'middle-baseline';baseline.mkdir()
+                    old=write_middle_check(args.baseline,baseline,root)
+                    baseline_command=[flag for flag in command if flag!='-DTARGET_AUXILIARY']
+                    baseline_command[baseline_command.index(str(copied))]=str(old)
+                    baseline_command[baseline_command.index('-o')+1]=str(baseline/'check')
+                    compiled_old=subprocess.run(baseline_command,capture_output=True,text=True)
+                    if compiled_old.returncode:failed(compiled_old.stdout+compiled_old.stderr)
+                    old_result=subprocess.run([str(baseline/'check')],capture_output=True,text=True,timeout=30)
+                    if old_result.returncode or old_result.stdout!=result.stdout:failed('MIDDLE_DEFAULT_OUTPUT_DIFFERENTIAL:'+old_result.stderr)
+                results[name]=dict(default_output_sha256=hashlib.sha256(result.stdout.encode()).hexdigest(),baseline_compared=bool(args.baseline),checks=result.stderr.strip())
+                print(result.stderr.strip())
+            else:
+                results[name]=result.stdout.strip()
+                print(result.stdout.strip())
     after={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     if before!=after:raise RuntimeError('SOURCE_CHANGED_DURING_NATIVE_TESTS')
     report=dict(passed=True,source=str(args.source),source_hashes=after,tests=results,
-        real_ros_transport=False,real_controller_input=False,hardware_accessed=False)
+        real_ros_transport=False,real_controller_input=False,hardware_accessed=False,sanitized=args.sanitize)
     if args.output:args.output.write_text(json.dumps(report,indent=2)+'\n')
 
 if __name__=='__main__':main()

@@ -1,0 +1,345 @@
+--- a/ctl_msgs/msg/PositionTrajectory.msg
++++ b/ctl_msgs/msg/PositionTrajectory.msg
+@@ -1,5 +1,7 @@
+ # Certified Bindu curve description; order L1..7,R1..7,waist1..2, rad.
+-# Version 0 selects the unchanged Follower path; version 1 requires session_v2.
++# Version 0: Follower; version 1: session_v2 curve; version 2: session_v3 target.
++# V2 target: segment_id=source sequence, effective_at_ns=0, all curve arrays empty.
++# Original positions live in command/waist_position; limits are profile-clamped.
+ uint8 version
+ uint64 segment_id
+ int64 effective_at_ns
+--- a/dual_arm_control/include/controller/ArmInterface.h
++++ b/dual_arm_control/include/controller/ArmInterface.h
+@@ -302,7 +302,9 @@
+         std::vector<outpWrap> Traj_temp_outp(
+             KDL::JntArray lArm_posRet, KDL::JntArray rArm_posRet,
+             KDL::JntArray lArm_velRet, KDL::JntArray rArm_velRet,
+-            std::vector<double> lArm_iq_Ret, std::vector<double> rArm_iq_Ret
++            std::vector<double> lArm_iq_Ret, std::vector<double> rArm_iq_Ret,
++            const std::vector<outpWrap>* reference_only=nullptr,
++            const modCtl* auxiliary_config=nullptr
+         );
+ 
+         /*正解接口函数*/
+--- a/dual_arm_control/include/dual_arm_control/msgPublish.h
++++ b/dual_arm_control/include/dual_arm_control/msgPublish.h
+@@ -347,6 +347,9 @@
+         void position_wait();
+         position_session::Gate position_gate_;
+         position_session::Tracker position_feedback_;
++        snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr position_target_packet_;
++        std::array<double,14> position_nominal_q_{},position_nominal_v_{};
++        int64_t position_nominal_stamp_=0,position_nominal_bootstrap_expires_=0;uint64_t position_nominal_session_=0;
+         snowbot_ctl_msgs::msg::PositionSessionMeta position_meta_;
+         snowbot_ctl_msgs::msg::PositionTrajectory position_trajectory_;
+         rclcpp::Subscription<snowbot_ctl_msgs::msg::PositionSessionUpper>::SharedPtr position_sub_;
+--- a/dual_arm_control/src/controller/ArmInterface.cpp
++++ b/dual_arm_control/src/controller/ArmInterface.cpp
+@@ -669,7 +669,8 @@
+ std::vector<outpWrap> ArmCtlOptInterface::Traj_temp_outp(
+     KDL::JntArray lArm_posRet, KDL::JntArray rArm_posRet,
+     KDL::JntArray lArm_velRet, KDL::JntArray rArm_velRet,
+-    std::vector<double> lArm_iq_Ret, std::vector<double> rArm_iq_Ret
++    std::vector<double> lArm_iq_Ret, std::vector<double> rArm_iq_Ret,
++    const std::vector<outpWrap>* reference_only,const modCtl* auxiliary_config
+ ){
+     outpWrap lArm_outpWrap;
+     outpWrap rArm_outpWrap;
+@@ -683,7 +684,21 @@
+     //位置控制量、PD控制量计算
+     std::vector<std::vector<ctlOutp>> posCtlRes;
+     ArmPD allArmPDoutp;
+-    if(this->outpMod == 2 || this->outpMod == 4){
++    if(reference_only){
++        this->ifOutpUseGravComp=auxiliary_config->gravComp_ctl.ifUseGravComp;
++        this->GravCompInpChoose=auxiliary_config->gravComp_ctl.GravCompInpMod;
++        this->outpMod=auxiliary_config->transMod;
++        for(unsigned i=0;i<SINGLEARMDOF;++i){rigidityMod_l[i]=auxiliary_config->base_rigiditiCtl_mod_l[i];rigidityMod_r[i]=auxiliary_config->base_rigiditiCtl_mod_r[i];}
++        // The executor owns motion generation. Reuse the existing PD/dynamics
++        // path with the observed adopted nominal reference, without evaluating
++        // either joint or Cartesian interpolation here.
++        posCtlRes.resize(2);
++        for(unsigned arm=0;arm<2;++arm){posCtlRes[arm].resize(SINGLEARMDOF);
++            for(unsigned i=0;i<SINGLEARMDOF;++i){auto& value=posCtlRes[arm][i];
++                value.posDes=reference_only->at(arm).posDes.at(i);value.velDes=reference_only->at(arm).velDes.at(i);
++                value.grav_TorDes=value.interia_TorDes=value.feedforward_TorDes=0.;value.ifReachEnd=false;}}
++        allArmPDoutp=mArmPDInte.PDInteOutp(this->outpMod,rigidityMod_l[0]);
++    }else if(this->outpMod == 2 || this->outpMod == 4){
+         //采用点位控制模式
+         posCtlRes = FrameSpace_track.IKsolveResOutp(lArm_TorRet, rArm_TorRet);
+         allArmPDoutp = mArmPDInte.PDInteOutp(this->outpMod, rigidityMod_l[0]);
+--- a/dual_arm_control/src/dual_arm_control/msgPublish.cpp
++++ b/dual_arm_control/src/dual_arm_control/msgPublish.cpp
+@@ -148,11 +148,16 @@
+ 
+     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1,std::bind(&ArmCtlNode::position_callback,this,std::placeholders::_1));
+     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1);
+-    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
++    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());position_nominal_stamp_=0;
++        if(msg->reference_mode==2&&msg->reference_valid&&msg->output_valid&&msg->session_selected){
++            bool finite=true;for(unsigned i=0;i<14;++i)finite=finite&&std::isfinite(msg->reference_position[i])&&std::isfinite(msg->reference_speed[i]);
++            if(finite){position_nominal_stamp_=msg->sample_time_ns;position_nominal_session_=msg->session;
++                for(unsigned i=0;i<14;++i){position_nominal_q_[i]=msg->reference_position[i];position_nominal_v_[i]=msg->reference_speed[i];}}}
++        if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
+     position_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1);
+     position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="middle";m.wire_version=2;m.control_source="position";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="middle";m.wire_version=3;m.control_source="position";
+         m.startup_complete=!ifInitTemp && !checkTemp;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+         m.state=position_gate_.following(now)?"executing":"ready_idle";
+         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+@@ -363,8 +368,8 @@
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+         if(!position_feedback_.fresh(this->now().nanoseconds(),now))position_gate_.interrupt();
+         if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
+-            snowbot_ctl_msgs::msg::PositionSessionServo packet;packet.meta=position_meta_;packet.trajectory=position_trajectory_;packet.command=tempCtlData_pub;packet.frame_sequence=++position_frame_;packet.waist_position=position_waist_target_;
+-            for(unsigned i=0;i<7;++i){packet.command.l_position[i]=lArm_desPos_JntSpace[i];packet.command.r_position[i]=rArm_desPos_JntSpace[i];packet.command.l_speed[i]=0;packet.command.r_speed[i]=0;}
++            snowbot_ctl_msgs::msg::PositionSessionServo packet;packet.meta=position_meta_;packet.trajectory=position_trajectory_;packet.command=tempCtlData_pub;if(position_meta_.reference_mode==2){packet.command.if_use_debugmod=false;packet.command.if_topic_point_position=true;}packet.frame_sequence=++position_frame_;packet.waist_position=position_waist_target_;
++            for(unsigned i=0;i<7;++i){packet.command.l_position[i]=position_meta_.reference_mode==2?position_target_packet_->command.l_arm_des_pos_jntspace[i]:lArm_desPos_JntSpace[i];packet.command.r_position[i]=position_meta_.reference_mode==2?position_target_packet_->command.r_arm_des_pos_jntspace[i]:rArm_desPos_JntSpace[i];packet.command.l_speed[i]=0;packet.command.r_speed[i]=0;}
+             position_pub_->publish(packet);
+         }
+     }else mCtlData_pub->publish(tempCtlData_pub);
+@@ -858,11 +863,22 @@
+     lArm_velRet = vec_to_JntArray(lArm_spd_fdback);
+     rArm_velRet = vec_to_JntArray(rArm_spd_fdback);
+ 
+-    std::vector<outpWrap> mRes;
++    std::vector<outpWrap> mRes,reference_only;
++    const bool target_stream=position_gate_.selected()&&position_meta_.reference_mode==2;
++    if(target_stream){
++        reference_only.resize(2);const auto now=this->now().nanoseconds();
++        const bool nominal=position_nominal_session_==position_meta_.session&&position_nominal_stamp_>0&&now>=position_nominal_stamp_&&now-position_nominal_stamp_<=20000000;
++        if(!nominal&&!(position_nominal_session_!=position_meta_.session&&now<position_nominal_bootstrap_expires_&&position_feedback_.fresh(now,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))){
++            position_gate_.interrupt();position_rejection_="nominal_reference_unavailable";return;
++        }
++        for(unsigned arm=0;arm<2;++arm)for(unsigned i=0;i<7;++i){
++            reference_only[arm].posDes.push_back(nominal?position_nominal_q_[arm*7+i]:(arm?rArm_pos_fdback[i]:lArm_pos_fdback[i]));
++            reference_only[arm].velDes.push_back(nominal?position_nominal_v_[arm*7+i]:(arm?rArm_spd_fdback[i]:lArm_spd_fdback[i]));}
++    }
+     mRes = solverInterface->Traj_temp_outp(
+         lArm_posRet, rArm_posRet,
+         lArm_velRet, rArm_velRet,
+-        lArm_iq_fdback, rArm_iq_fdback
++        lArm_iq_fdback, rArm_iq_fdback,target_stream?&reference_only:nullptr,target_stream?&modCtlMsg_get:nullptr
+     );
+ 
+     //输出解包
+@@ -1089,7 +1105,7 @@
+             // Demo/VR 仍保持原来的“到位后刷新”逻辑。
+             const bool recalculate = ifFirstTemp ||
+                 (topic_point_mode ? topic_target_changed : ifAllEnd);
+-            if(recalculate){
++            if(recalculate&&!(position_gate_.selected()&&position_meta_.reference_mode==2)){
+                 controlCal();
+                 if(topic_point_mode){
+                     topic_point_target_l = lArm_desPos_JntSpace;
+@@ -1505,12 +1521,14 @@
+  if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
+  auto native=std::make_shared<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(packet->command);
+  position_dispatch_=true;upperMonitor_msg_callback(native);position_dispatch_=false;
+- if(m.operation!=0){
++ if(packet->meta.reference_mode==2&&m.operation!=1)ifReInit_get=false;
++ if((packet->meta.reference_mode!=2&&m.operation!=0)||(packet->meta.reference_mode==2&&m.operation==1)){
+   lArm_stPos_get.assign(position_feedback_.q.begin(),position_feedback_.q.begin()+7);
+   rArm_stPos_get.assign(position_feedback_.q.begin()+7,position_feedback_.q.begin()+14);ifReInit_get=true;
+  }
+- for(unsigned i=0;i<2;++i)position_waist_target_[i]=m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
+- position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_rejection_.clear();
++ for(unsigned i=0;i<2;++i)position_waist_target_[i]=packet->meta.reference_mode!=2&&m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
++ if(packet->meta.reference_mode==2&&m.operation==1&&m.session!=position_meta_.session)position_nominal_bootstrap_expires_=m.expires;
++ position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_target_packet_=packet;position_rejection_.clear();
+ }
+ 
+ bool ArmCtlNode::position_ready(){
+--- a/robot_control/src/robot_control/msgPublisher.cpp
++++ b/robot_control/src/robot_control/msgPublisher.cpp
+@@ -99,7 +99,7 @@
+     position_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1);
+     position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="upper";m.wire_version=2;m.control_source=control_source_==ControlSource::Topic?"topic":"other";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="upper";m.wire_version=3;m.control_source=control_source_==ControlSource::Topic?"topic":"other";
+         m.startup_complete=!ifInitTemp && !ifForceToRetZero;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+         m.state=position_gate_.following(now)?"executing":"ready_idle";
+         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+@@ -943,8 +943,8 @@
+  for(double q:packet->waist_position)if(!std::isfinite(q)){position_rejection_="nonfinite_waist_target";return;}
+  if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
+  auto native=std::make_shared<snowbot_ctl_msgs::msg::JointPositionCommand>(packet->command);
+- if(m.operation==2)for(unsigned i=0;i<7;++i){native->l_arm_position[i]=position_feedback_.q[i];native->r_arm_position[i]=position_feedback_.q[i+7];}
+- for(unsigned i=0;i<2;++i)position_waist_target_[i]=m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
++ if(packet->meta.reference_mode!=2&&m.operation==2)for(unsigned i=0;i<7;++i){native->l_arm_position[i]=position_feedback_.q[i];native->r_arm_position[i]=position_feedback_.q[i+7];}
++ for(unsigned i=0;i<2;++i)position_waist_target_[i]=packet->meta.reference_mode!=2&&m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
+  position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_pending_=true;
+  position_dispatch_=true;joint_position_cmd_callback(native);position_dispatch_=false;position_rejection_.clear();
+ }
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -195,6 +195,11 @@
+         rclcpp::TimerBase::SharedPtr position_receipt_timer_;
+         void position_poll();
+         uint8_t position_reference_mode_=0;
++        snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr position_target_pending_;
++        position_session::FixedText position_target_error_;
++        uint64_t position_target_barrier_=0;bool position_target_pause_requested_=false;
++        int64_t position_target_prepare_ns_=10000000;
++        void position_target_dispatch();
+         double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
+         position_session::Interval position_interval_;
+         position_session::Output position_output_;
+--- a/servo_control/include/servo_control/position_watchdog.h
++++ b/servo_control/include/servo_control/position_watchdog.h
+@@ -4,7 +4,7 @@
+ struct Output {
+  std::array<float,joint_count> q{},v{},kp{},kd{},torque{};
+  uint64_t session=0,sequence=0;int64_t deadline=0;uint8_t operation=0,policy=0,failure_reason=0;
+- bool impedance_mode=false,trajectory=false,nominal_hold=false;uint64_t admission_generation=0;uint8_t trajectory_phase=0;uint64_t segment_id=0;
++ bool impedance_mode=false,trajectory=false,nominal_hold=false;uint8_t reference_mode=0;uint64_t admission_generation=0;uint8_t trajectory_phase=0;uint64_t segment_id=0;
+  int64_t sample_time_ns=0,source_stamp_ns=0,expires_at_ns=0,rt_deadline=0;
+  std::array<double,joint_count> reference_position{},reference_speed{},reference_acceleration{};
+  bool selected=false;
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -112,13 +112,18 @@
+     position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
+     rcl_interfaces::msg::ParameterDescriptor reference_descriptor;reference_descriptor.read_only=true;
+     const auto reference_mode=declare_parameter<std::string>("position_reference_mode","follower",reference_descriptor);
+-    if(reference_mode!="follower" && reference_mode!="trajectory")throw std::invalid_argument("position_reference_mode");
+-    position_reference_mode_=reference_mode=="trajectory"?1:0;
++    if(reference_mode!="follower" && reference_mode!="trajectory" && reference_mode!="target_stream")throw std::invalid_argument("position_reference_mode");
++    position_reference_mode_=reference_mode=="target_stream"?2:reference_mode=="trajectory"?1:0;
++    const auto prepare_ms=declare_parameter<double>("position_target_prepare_ms",10.,reference_descriptor);
++    if(!std::isfinite(prepare_ms)||prepare_ms<2.||prepare_ms>50.)throw std::invalid_argument("position_target_prepare_ms");
++    position_target_prepare_ns_=int64_t(prepare_ms*1000000.);
++    if(position_reference_mode_==2&&impedance_enable_)throw std::invalid_argument("target_stream_requires_pure_position");
+     trajectory_max_velocity_=declare_parameter<double>("trajectory_max_velocity",.25,reference_descriptor);
+     trajectory_max_acceleration_=declare_parameter<double>("trajectory_max_acceleration",.5,reference_descriptor);
+     trajectory_max_jerk_=declare_parameter<double>("trajectory_max_jerk",162.,reference_descriptor);
+     if(!std::isfinite(trajectory_max_velocity_)||!std::isfinite(trajectory_max_acceleration_)||!std::isfinite(trajectory_max_jerk_)||trajectory_max_velocity_<=0||trajectory_max_acceleration_<=0||trajectory_max_jerk_<=0)throw std::invalid_argument("trajectory dynamic limits");
+     if(position_reference_mode_)position_admission_=std::make_unique<position_session::TrajectoryAdmission<snowbot_ctl_msgs::msg::PositionSessionServo>>(position_trajectory_,[this](auto& result){
++        if(result.packet->meta.reference_mode!=position_reference_mode_)throw std::invalid_argument("reference_mode_conflict");
+         if(const auto error=position_session::inspect_servo_command(*result.packet,result.origin.get(),result.context,result.command))throw std::invalid_argument(error);
+         const auto endpoint=position_connection::check_publisher(*this,position_feedback_sub_,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");
+         if(!endpoint.ready())throw std::invalid_argument(endpoint.reason);
+@@ -132,7 +137,7 @@
+     if(!std::isfinite(position_follower_.vmax)||!std::isfinite(position_follower_.amax)||position_follower_.vmax<=0||position_follower_.amax<=0)throw std::invalid_argument("position dynamic limits");
+     position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=2;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
++        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?3:2;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
+         m.startup_complete=position_startup_complete_ && !shutdown_mode_;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+         m.state=!m.selected?"idle":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
+         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+@@ -157,7 +162,7 @@
+             for(unsigned i=0;i<7 && position_receipts_.pop(receipt);++i){
+                 snowbot_ctl_msgs::msg::PositionSessionState m;
+                 m.header.stamp=rclcpp::Time(receipt.decided_ros);m.layer="servo";
+-                m.instance_id=position_instance_id_;m.wire_version=2;m.reference_mode=1;
++                m.instance_id=position_instance_id_;m.wire_version=position_reference_mode_==2?3:2;m.reference_mode=position_reference_mode_;
+                 m.feedback_boot_id=receipt.boot;m.feedback_sample=receipt.sample;
+                 m.state=receipt.accepted?"accepted":"rejected";
+                 if(receipt.accepted){m.session=receipt.session;m.sequence=receipt.sequence;}
+@@ -2339,6 +2344,38 @@
+ }
+ void ServoNode::position_submit(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
+  const auto source=position_session::meta(packet->meta);
++ if(position_reference_mode_==2){
++  if(position_v2_.rejected.blocks(source))return;
++  // Derived bridge frames never renew TTL or trigger another generation.
++  if((position_admission_->busy()&&source==position_admission_source_)||
++     (position_target_pending_&&source==position_session::meta(position_target_pending_->meta)))return;
++  const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
++  auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
++  position_session::ServoCommand checked;
++  const auto error=position_session::inspect_servo_command(*packet,position_origin_packet_.get(),context,checked);
++  if(error||packet->meta.reference_mode!=2||
++     (!checked.derived&&!position_gate_.accepts(source,ros,steady))||
++     (checked.derived&&(!position_gate_.live(steady)||!position_session::fresh(source,ros)||packet->frame_sequence<=position_v2_.frame))){
++   position_target_error_.reason(error?error:"target_identity_or_order");position_cycle_reason_=position_target_error_.c_str();return;
++  }
++  // Auxiliary updates retain the exact source and only refresh native PD/torque.
++  // They cannot displace a pending target or control operation.
++  if(checked.derived&&(position_target_pending_||position_admission_->busy()))return;
++  // Once a PAUSE is requested no ordinary target may replace it. Valid takeover
++  // requires a new session after interruption; Gate remains the authority owner.
++  if(position_target_pending_){const auto waiting=position_session::meta(position_target_pending_->meta);
++   if(waiting.operation==2&&source.operation!=1)return;
++   if(waiting.session==source.session&&source.sequence<=waiting.sequence)return;
++  }
++  if(source.session==position_admission_source_.session&&source.sequence<position_admission_source_.sequence)return;
++  if(!checked.derived&&source.operation==0&&position_target_pause_requested_)return;
++  if(!checked.derived&&source.operation==1)position_target_pause_requested_=false;
++  if(!checked.derived&&source.operation==2){++position_target_barrier_;position_target_pause_requested_=true;}
++  if(position_target_pending_&&!position_admission_->defer_packet(position_target_pending_)){
++   position_gate_.interrupt();position_target_error_.reason("target_retirement_full");position_cycle_reason_=position_target_error_.c_str();return;
++  }
++  position_target_pending_=packet;position_target_dispatch();return;
++ }
+  if(position_v2_.rejected.blocks(source))return;
+  if(position_admission_->busy() && source==position_admission_source_)return;
+  const auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
+@@ -2348,14 +2385,30 @@
+  }
+  position_admission_source_=source;
+ }
++void ServoNode::position_target_dispatch(){
++ if(!position_target_pending_||position_admission_->busy())return;
++ const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
++ const auto source=position_session::meta(position_target_pending_->meta);
++ position_session::TargetSnapshot snapshot;
++ if(!position_session::fresh(source,ros)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
++  position_v2_.rejected.reject(source,"target_snapshot_or_expired");position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
++  position_cycle_reason_=position_v2_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
++ }
++ auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);context.barrier=position_target_barrier_;
++ if(position_admission_->submit(std::move(position_target_pending_),trajectory_max_velocity_,trajectory_max_acceleration_,trajectory_max_jerk_,context,position_origin_packet_,snapshot))position_admission_source_=source;
++}
+ void ServoNode::position_poll(){
+  if(!position_admission_)return;
+- auto* result=position_admission_->poll();if(!result)return;
++ auto* result=position_admission_->poll();if(!result){if(position_reference_mode_==2)position_target_dispatch();return;}
+  const auto source=position_session::meta(result->packet->meta);
+- const auto error=result->error.empty()?position_v2_.commit(result->command,result->prepared.get(),result->context,
++ const auto error=position_reference_mode_==2&&result->context.barrier!=position_target_barrier_?"target_superseded_by_pause":result->error.empty()?position_v2_.commit(result->command,result->prepared.get(),result->context,
+    position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load(),!impedance_enable_,position_policy_,
+    position_feedback_,this->now().nanoseconds(),position_session::steady_ns(),position_gate_,position_trajectory_,position_output_,position_interval_):result->error.c_str();
+- if(error){
++ if(error&&position_reference_mode_==2&&((std::strcmp(error,"target_generation_late")==0&&position_session::fresh(source,this->now().nanoseconds()))||std::strcmp(error,"target_superseded_by_pause")==0)){
++  // A late ordinary result is retried from a new dated snapshot if no newer
++  // pending target exists. New input never cancels a completed valid result.
++  if(!position_target_pending_&&result->context.barrier==position_target_barrier_&&std::strcmp(error,"target_generation_late")==0)position_target_pending_=result->packet;
++ }else if(error){
+   position_v2_.rejected.reject(source,error);position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
+   position_cycle_reason_=position_v2_.rejected.reason.c_str();
+  }else{
+@@ -2367,7 +2420,7 @@
+   position_rejected_session_=position_rejected_sequence_=0;position_cycle_reason_=nullptr;
+ 
+  }
+- if(position_receipts_enabled_ && !result->command.derived)position_receipts_.push(source.session,source.sequence,
++ if(position_receipts_enabled_ && !result->command.derived && !(error&&position_reference_mode_==2&&(std::strcmp(error,"target_generation_late")==0||std::strcmp(error,"target_superseded_by_pause")==0)))position_receipts_.push(source.session,source.sequence,
+    position_feedback_.boot,position_feedback_.sample,this->now().nanoseconds(),!error,error);
+  position_admission_->release(result);
+ }
+@@ -2383,7 +2436,7 @@
+    if(valid){const auto& source=position_trajectory_.source();
+     position_output_.session=source.session;position_output_.sequence=source.sequence;position_output_.operation=source.operation;
+     position_output_.deadline=position_trajectory_.deadline();position_output_.source_stamp_ns=source.stamp;position_output_.expires_at_ns=source.expires;
+-    position_output_.trajectory=true;position_output_.trajectory_phase=position_trajectory_.phase(now);position_output_.segment_id=position_trajectory_.id();position_output_.admission_generation=position_trajectory_.admission();
++    position_output_.trajectory=true;position_output_.reference_mode=position_reference_mode_;position_output_.trajectory_phase=position_trajectory_.phase(now);position_output_.segment_id=position_trajectory_.id();position_output_.admission_generation=position_trajectory_.admission();
+     position_output_.sample_time_ns=this->now().nanoseconds();position_output_.rt_deadline=now+20000000;
+     position_output_.reference_position=position_trajectory_.q;position_output_.reference_speed=position_trajectory_.v;position_output_.reference_acceleration=position_trajectory_.a;
+     for(unsigned i=0;i<position_session::joint_count;++i){position_output_.q[i]=position_trajectory_.q[i];position_output_.v[i]=position_trajectory_.v[i];}
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -894,7 +894,7 @@
+     obs.session_reason=session_watchdog_.reason;obs.session_selected=session_packet.selected;
+     session_watchdog_.report_hold(obs,position_written);
+     const auto& applied=session_watchdog_.output;
+-    obs.execution_mode=applied.impedance_mode?1:0;obs.reference_mode=applied.trajectory?1:0;obs.segment_id=applied.segment_id;obs.sample_time_ns=applied.sample_time_ns;
++    obs.execution_mode=applied.impedance_mode?1:0;obs.reference_mode=applied.reference_mode;obs.segment_id=applied.segment_id;obs.sample_time_ns=applied.sample_time_ns;
+     obs.source_stamp_ns=applied.source_stamp_ns;obs.expires_at_ns=applied.expires_at_ns;obs.trajectory_phase=applied.trajectory_phase;
+     obs.reference_position=applied.reference_position;obs.reference_speed=applied.reference_speed;obs.reference_acceleration=applied.reference_acceleration;
+     obs.output_position=applied.q;obs.output_speed=applied.v;obs.output_torque=applied.torque;obs.output_kp=applied.kp;obs.output_kd=applied.kd;

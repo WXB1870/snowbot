@@ -40,7 +40,7 @@ struct SlowDuration:std::vector<double>{
 struct DelayedWire:Wire {SlowDuration duration;};
 struct AdmissionPacket {
  using SharedPtr=std::shared_ptr<AdmissionPacket>;
- struct {uint64_t session=7,sequence=2;int64_t source_stamp_ns=1020000000,expires_at_ns=1220000000;uint8_t operation=0;} meta;
+ struct {uint64_t session=7,sequence=2;int64_t source_stamp_ns=1020000000,expires_at_ns=1220000000;uint8_t operation=0,reference_mode=1;} meta;
  DelayedWire trajectory;
 };
 void check_admission_isolation(const PreparedSegment& first,const PreparedSegment& second,
