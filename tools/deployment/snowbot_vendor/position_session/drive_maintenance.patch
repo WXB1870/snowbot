@@ -1,0 +1,283 @@
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -1,3 +1,4 @@
++#include "std_srvs/srv/trigger.hpp"
+ #include "position_connection_diagnostics.h"
+ #include "position_session_contract.h"
+ #include "position_trajectory.h"
+@@ -206,6 +207,9 @@
+         position_session::Output position_output_;
+         uint64_t position_frame_=0;
+         bool position_startup_complete_=false;
++        bool drive_startup_finished_=false;
++        uint32_t drive_reported_fault_mask_=~uint32_t(0);
++        rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr drive_diagnostics_service_,drive_reset_service_;
+         std::string position_stop_policy_;
+         void position_step();
+ 
+--- a/servo_control/include/servo_control/drive_maintenance.h
++++ b/servo_control/include/servo_control/drive_maintenance.h
+@@ -0,0 +1,66 @@
++#pragma once
++#include "servo_control/position_observation.h"
++#include <atomic>
++
++namespace drive_maintenance {
++constexpr uint32_t all_axes = 0xfffff;
++enum State : unsigned { idle, queued, low, pulse, verify, cleared, rejected, aborted, fault_remains };
++inline bool active(State s) { return s >= queued && s <= verify; }
++inline const char* name(State s) {
++    switch(s) {
++    case idle:return "idle"; case queued:return "queued_not_completed";
++    case low:return "reset_low"; case pulse:return "reset_pulse"; case verify:return "waiting_fault_clear";
++    case cleared:return "fault_clear_observed_disabled"; case rejected:return "rejected_interlock";
++    case aborted:return "aborted_interlock_or_pdo"; case fault_remains:return "fault_remains_no_retry";
++    } return "unknown";
++}
++inline uint32_t faults(const position_session::Observation& s) {
++    uint32_t mask=0; for(unsigned i=0;i<20;++i) if(s.status[i]&8u)mask|=1u<<i; return mask;
++}
++// One ROS requester, one existing PDO writer. No bus calls, allocation or sleeps.
++// Terminal states are retained until another explicit manual request.
++class Reset {
++    std::atomic<State> state_{idle};
++    std::atomic<uint32_t> target_{0};
++    int64_t phase_ns_=0,started_ns_=0;
++    uint64_t last_sample_=0;
++public:
++    State state() const { return state_.load(); }
++    uint32_t target() const { return target_.load(); }
++    bool busy() const { return active(state()); }
++    bool request() {
++        State old=state();
++        return !active(old) && state_.compare_exchange_strong(old,queued);
++    }
++    // While true, caller suppresses every normal command writer for this cycle.
++    bool step(const position_session::Observation& s, int64_t now,
++              uint32_t requested, bool selected, bool exiting, uint32_t& pulse_mask) {
++        pulse_mask=0;
++        const auto phase=state();
++        if(!active(phase))return false;
++        bool safe=!requested && !selected && !exiting && s.sample>0 &&
++            s.valid_mask==all_axes && s.expected_wkc>0 && s.wkc==s.expected_wkc &&
++            s.sampled_ns>0 && now>=s.sampled_ns && now-s.sampled_ns<=20000000;
++        for(unsigned i=0;i<20;++i) safe=safe && !(s.status[i]&4u);
++        if(!safe){state_.store(phase==queued?rejected:aborted);return phase!=queued;}
++        if(phase==queued) {
++            target_.store(faults(s));phase_ns_=started_ns_=now;last_sample_=s.sample;
++            state_.store(target()?low:cleared);return true;
++        }
++        if(now<phase_ns_ || now-started_ns_>600000000){state_.store(fault_remains);return true;}
++        // No pulse or successful result without a new successful PDO receive.
++        const bool advanced=s.sample>last_sample_;last_sample_=s.sample;
++        if(!advanced){state_.store(aborted);return true;}
++        if(phase==low && now-phase_ns_>=10000000){phase_ns_=now;state_.store(pulse);}
++        if(state()==pulse) {
++            if(now-phase_ns_<10000000)pulse_mask=target();
++            else{phase_ns_=now;state_.store(verify);}
++        } else if(phase==verify && now-phase_ns_>=10000000 && !faults(s))state_.store(cleared);
++        return true;
++    }
++};
++// Only the fault-reset bit may be asserted; switch-on/voltage/operation bits stay clear.
++inline uint16_t reset_controlword(uint32_t pulse_mask,unsigned axis) {
++    return (pulse_mask&(1u<<axis))?0x0080:0x0000;
++}
++} // namespace drive_maintenance
+--- a/servo_control/include/servo_control/ethercat_driver.h
++++ b/servo_control/include/servo_control/ethercat_driver.h
+@@ -6,6 +6,7 @@
+ #ifndef ETHERCAT_DRIVER_H
+ #define ETHERCAT_DRIVER_H
+ #include "servo_control/position_observation.h"
++#include "servo_control/drive_maintenance.h"
+ #include "servo_control/position_watchdog.h"
+ 
+ #include <inttypes.h>
+@@ -110,6 +111,9 @@
+     position_session::Observation observation() { return observation_cache_.read(); }
+     void sessionOutput(const position_session::Output& v){session_output_.publish(v);session_bypass_.store(false);}
+     void sessionBypass(){session_bypass_.store(true);}
++    bool requestDriveReset() { return drive_reset_.request(); }
++    bool driveResetBusy() const { return drive_reset_.busy(); }
++    std::string driveDiagnostics(); // Cached PDO only; ROS thread, no SDO access.
+     bool init(const std::string& ifname);
+     void cycle();             // 单次 PDO 收发 (由 ROS loop 调用)
+     void stop();
+@@ -151,6 +155,7 @@
+     void printCommunicationStatus() const; // Cached values only; call outside RT thread.
+ 
+ private:
++    drive_maintenance::Reset drive_reset_;
+     void realtimeLoop();
+     void motorPDOConfig(int slave);
+     void cspPDOConfig(int slave);
+--- a/servo_control/include/servo_control/transmit.h
++++ b/servo_control/include/servo_control/transmit.h
+@@ -3,6 +3,10 @@
+ #include "servo_control/position_watchdog.h"
+ void EtherCAT_positionOutput(const position_session::Output& output);
+ void EtherCAT_positionBypass();
++#include <string>
++std::string EtherCAT_driveDiagnostics();
++bool EtherCAT_requestDriveReset();
++bool EtherCAT_driveResetBusy();
+ #ifndef TRANSMIT_H
+ #define TRANSMIT_H
+ 
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -78,6 +78,22 @@
+     has_received_command_(false),
+     ifFirstTemp(true)
+ {
++    // Explicit operator maintenance, same mutually-exclusive ROS callback group.
++    drive_diagnostics_service_=create_service<std_srvs::srv::Trigger>("~/drive_diagnostics",
++        [this](const std_srvs::srv::Trigger::Request::SharedPtr, std_srvs::srv::Trigger::Response::SharedPtr reply){
++            reply->success=EtherCAT_isOperational();
++            reply->message="boot_id="+std::to_string(position_boot_id_)+" startup_finished="+std::to_string(drive_startup_finished_)+"\n"+EtherCAT_driveDiagnostics();
++        });
++    drive_reset_service_=create_service<std_srvs::srv::Trigger>("~/reset_drive_faults",
++        [this](const std_srvs::srv::Trigger::Request::SharedPtr, std_srvs::srv::Trigger::Response::SharedPtr reply){
++            if(!drive_startup_finished_ || shutdown_mode_ || sigInterrupt.load() || impedance_enable_ ||
++               position_reference_mode_!=2 || position_gate_.selected() || position_pending_ ||
++               position_target_pending_ || position_target_takeover_valid_ || (position_admission_&&position_admission_->busy())) {
++                reply->success=false;reply->message="rejected_startup_shutdown_session_or_mode";return;
++            }
++            reply->success=EtherCAT_requestDriveReset();
++            reply->message=reply->success?"queued_not_completed; inspect /servo_node/drive_diagnostics; no enable or homing follows":"driver_unavailable_or_reset_busy";
++        });
+     //反馈值发送器初始化
+     RetData_pub = this->create_publisher<snowbot_ctl_msgs::msg::RetInformation>(
+         "dualArmCtl_fdback",
+@@ -106,6 +122,11 @@
+         m.output_position=s.output_position;m.output_speed=s.output_speed;m.output_torque=s.output_torque;m.output_kp=s.output_kp;m.output_kd=s.output_kd;
+         for(unsigned i=0;i<position_session::joint_count;++i)m.hold_position[i]=s.hold_position[i];
+         position_observation_pub_->publish(m);
++        const auto fault_mask=drive_maintenance::faults(s);
++        if(s.valid_mask==drive_maintenance::all_axes && m.pdo_age>=0 && m.pdo_age<=.02 && fault_mask!=drive_reported_fault_mask_){
++            drive_reported_fault_mask_=fault_mask;
++            if(fault_mask)RCLCPP_WARN(this->get_logger(),"Drive faults (cached PDO): %s",EtherCAT_driveDiagnostics().c_str());
++        }
+     });
+     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
+     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
+@@ -515,6 +536,7 @@
+     impedance_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+         "~/impedance_enable", 10,
+         [this](const std_msgs::msg::Bool::SharedPtr msg) {
++            if(EtherCAT_driveResetBusy())return;
+             if (!impedance_inited_ && msg->data) {
+                 RCLCPP_WARN(this->get_logger(),
+                             "Impedance not initialized, ignore enable");
+@@ -1320,6 +1342,7 @@
+ 
+     position_initialized_=true;position_init_error_.clear();
+     position_startup_complete_=arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load();
++    drive_startup_finished_=!sigInterrupt.load();
+     //开启ros2循环
+     while (rclcpp::ok()){
+         //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
+@@ -2021,6 +2044,8 @@
+ 
+ // 夹爪控制回调 (data: [pos_rad, spd, tor], Kp/Kd跟手臂关节7)
+ void ServoNode::gripper_cmd_apply(const std_msgs::msg::Float64MultiArray::SharedPtr msg, bool is_left){
++    if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
++
+     if (shutdown_mode_) return;   // 关机回零期间忽略外部夹爪指令
+ 
+     double pos = 0.0, spd = 0.0, tor = 0.0;   // 速度默认 0, 避免驱动器 KD 前馈产生位置偏差
+@@ -2150,6 +2175,8 @@
+ // ========== 躯干/头部电机回调 & runin (纯位置模式) ==========
+ 
+ void ServoNode::torso_cmd_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg){
++    if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
++
+     if(position_gate_.selected()){position_rejection_="legacy_waist_source_conflict";return;}
+     if (shutdown_mode_) return;   // 关机回零期间忽略外部指令
+     // 支持纯位置格式 [pos0, pos1] 以及旧版 [pos,spd,tor,kp,kd] x 2
+@@ -2204,6 +2231,8 @@
+ }
+ 
+ void ServoNode::head_cmd_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg){
++    if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
++
+     if (shutdown_mode_) return;   // 关机回零期间忽略外部指令
+     if (msg->data.size() == 2) {
+         h_pos_target[0] = msg->data[0];
+@@ -2302,6 +2331,7 @@
+ }
+ 
+ void ServoNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
++ if(EtherCAT_driveResetBusy()){position_rejection_="manual_reset_in_progress";return;}
+  if(position_reference_mode_){position_submit(packet);return;}
+  const auto now=this->now().nanoseconds();const auto steady=position_session::steady_ns();const auto m=position_session::meta(packet->meta);
+  position_rejected_session_=m.session;position_rejected_sequence_=m.sequence;
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -1,3 +1,4 @@
++#include <sstream>
+ /*
+  * @brief EtherCAT 直接驱动实现
+  *        基于 SNOWBOT_SOEM_Demo/sensor_motor_test.c
+@@ -626,6 +627,25 @@
+ }
+ 
+ // ========== 单次 PDO 收发 (由 ROS loop 按 1kHz 调用) ==========
++std::string EtherCATDriver::driveDiagnostics() {
++    const auto s=observation();const auto now=position_session::steady_ns();
++    const double age=s.sampled_ns>0 && now>=s.sampled_ns?(now-s.sampled_ns)*1e-6:-1.;
++    std::ostringstream out;
++    out << "sample=" << s.sample << " age_ms=" << age << " wkc=" << s.wkc << "/" << s.expected_wkc
++        << " valid=0x" << std::hex << s.valid_mask << " fault_mask=0x" << drive_maintenance::faults(s)
++        << " reset_target=0x" << drive_reset_.target() << std::dec << " reset=" << drive_maintenance::name(drive_reset_.state())
++        << "\nmanufacturer_error_code=unavailable_not_mapped; controlwords=requests_cached_separately; q=rad v=rad/s";
++    for(unsigned i=0;i<20;++i) {
++        const char* group=i<8?"L":i<16?"R":i<18?"Head":"Waist";
++        const unsigned joint=i<16?i%8+1:i%2+1;
++        out << "\n" << group << joint << " slot=" << i << " valid=" << bool(s.valid_mask&(1u<<i))
++            << " sw=0x" << std::hex << s.status[i] << " cw=0x" << motor_sent_cw_[i].load() << std::dec
++            << " fault=" << bool(s.status[i]&8) << " operation_enabled=" << bool(s.status[i]&4)
++            << " requested=" << motor_enable_mask_[i].load() << " q=" << s.position[i] << " v=" << s.speed[i];
++    }
++    return out.str();
++}
++
+ void EtherCATDriver::cycle() {
+     if (!inOP_) return;
+     cycle_count_++;
+@@ -648,8 +668,21 @@
+     if(session_bypass_.load())session_packet.selected=false;
+     session_watchdog_.evaluate(session_packet,observation_rt_,position_session::steady_ns());
+     session_packet=session_watchdog_.output;
++    uint32_t reset_requested=0,reset_pulse=0;
++    for(unsigned m=0;m<20;++m)if(motor_enable_mask_[m].load())reset_requested|=1u<<m;
++    const bool reset_override=drive_reset_.step(observation_rt_,position_session::steady_ns(),
++        reset_requested,session_packet.selected,arm_shutdown_handoff_.load(),reset_pulse);
++    if(reset_override)session_packet.selected=false; // Suppress final session writes too.
+     // --- 电机 CiA402 使能 + 命令下发 (per-motor mask) ---
+     for (int m = 0; m < TOTAL_SLAVES; m++) {
++        if(reset_override) {
++            // No target/gain/torque writes and no enable-sequence advancement.
++            const auto cw=drive_maintenance::reset_controlword(reset_pulse,m);
++            if(is_csp_motor_[m]){if(csp_rx_[m])csp_rx_[m]->controlword=cw;}
++            else if(m_rx_[m])m_rx_[m]->controlword=cw;
++            enable_step[m]=0;enable_hold_captured[m]=false;
++            continue;
++        }
+         if (is_csp_motor_[m]) {
+             // ==================== CSP 模式 (头/腰) ====================
+             if (!csp_rx_[m] || !csp_tx_[m]) continue;
+--- a/servo_control/src/servo_control/transmit.cpp
++++ b/servo_control/src/servo_control/transmit.cpp
+@@ -41,6 +41,10 @@
+ 
+ void EtherCAT_positionOutput(const position_session::Output& output){if(g_ecat_driver)g_ecat_driver->sessionOutput(output);}
+ void EtherCAT_positionBypass(){if(g_ecat_driver)g_ecat_driver->sessionBypass();}
++
++std::string EtherCAT_driveDiagnostics(){return g_ecat_driver ? g_ecat_driver->driveDiagnostics() : "driver_unavailable";}
++bool EtherCAT_requestDriveReset(){return g_ecat_driver && g_ecat_driver->requestDriveReset();}
++bool EtherCAT_driveResetBusy(){return g_ecat_driver && g_ecat_driver->driveResetBusy();}
+ 
+ bool EtherCAT_isOperational() {
+     return g_ecat_driver && g_ecat_driver->isOperational();

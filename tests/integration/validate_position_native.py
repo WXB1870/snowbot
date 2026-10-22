@@ -30,6 +30,18 @@ inline void spin_some(Node* node){++node->callbacks;++node->state_updates;}
 }
 """
 
+def write_drive_cycle_check(source, work, root):
+    """Actual command writer with in-memory PDOs; SOEM header deliberately empty."""
+    driver=source/'servo_control'
+    (work/'ethercat.h').write_text('')
+    (work/'driver_test_access.h').write_text((driver/'include/servo_control/ethercat_driver.h').read_text().replace('private:','public:'))
+    text=(driver/'src/servo_control/ethercat_driver.cpp').read_text()
+    cycle=text[text.index('void EtherCATDriver::cycle() {'):text.index('    // --- PDO 收发 ---')]+'\n    (void)position_written;\n}\n'
+    diag=text[text.index('std::string EtherCATDriver::driveDiagnostics() {'):text.index('void EtherCATDriver::cycle() {')]
+    output=work/'test_drive_cycle.cpp'
+    output.write_text((root/'test_drive_cycle.inc').read_text().replace('// @ACTUAL_CYCLE@',cycle).replace('// @ACTUAL_DIAGNOSTICS@',diag))
+    return output
+
 def write_pdo_check(source, work):
     """Compile actual final PDO writes/owned-CSP fault guard with memory PDOs."""
     text=(source/'servo_control/src/servo_control/ethercat_driver.cpp').read_text()
@@ -250,6 +262,9 @@ def main():
         middle=args.source/'dual_arm_control/src/controller/ArmInterface.cpp'
         if 'reference_only' in middle.read_text():
             names.append('test_position_middle');sources.append(middle)
+    if (args.source/'servo_control/include/servo_control/drive_maintenance.h').is_file():
+        names.extend(('test_drive_reset','test_drive_cycle'))
+        sources.extend((args.source/'servo_control/include/servo_control/drive_maintenance.h',args.source/'servo_control/include/servo_control/ethercat_driver.h',root/'test_drive_cycle.inc'))
     sources.append(Path(__file__).resolve())
     if args.baseline:sources.append(args.baseline/'dual_arm_control/src/controller/ArmInterface.cpp')
     sources.extend(root/(name+'.cpp') for name in names if (root/(name+'.cpp')).is_file())
@@ -264,7 +279,9 @@ def main():
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
         for name in names:
             binary=work/name
-            if name=='test_production_legacy_ingress':
+            if name=='test_drive_cycle':
+                copied=write_drive_cycle_check(args.source,work,root)
+            elif name=='test_production_legacy_ingress':
                 copied=write_legacy_ingress_check(args.source,work,root)
             elif name=='test_position_middle':
                 copied=write_middle_check(args.source,work,root)
@@ -279,6 +296,7 @@ def main():
             command=[compiler,'-std=c++17','-Wall','-Wextra','-Werror','-pthread',
                 '-I'+str(args.source/'robot_control/include'),'-I'+str(args.source/'servo_control/include'),'-I'+str(native_include),'-I'+str(work),'-I'+str(root),
                 str(copied),'-o',str(binary)]
+            if name=='test_drive_cycle':command.append('-Wno-unused-variable')
             if name=='test_position_middle':
                 command[1:1]=['-DTARGET_AUXILIARY']
                 command+=['-Wno-sign-compare','-Wno-comment']

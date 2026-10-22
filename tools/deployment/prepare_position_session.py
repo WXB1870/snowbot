@@ -64,6 +64,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 patches=(*patches,'target')
                 subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'pause_hold.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
                 patches=(*patches,'pause_hold')
+                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                patches=(*patches,'drive_maintenance')
         changed={}
         for p in (stage/'src').rglob('*'):
             if not p.is_file():continue
