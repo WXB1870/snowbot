@@ -2,15 +2,18 @@
 
 Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录维护本轮118现场联调的专属资料：底层源码快照、补丁、现场问题、恢复备份与验证记录；Bindu公共框架和可复用适配接口仍在 `../galbot/bindu/`。
 
+双臂遥操是本项目的定制场景。实现时允许按需修改Bindu相关代码；可复用的能力和接口改进在Bindu维护，定制操作流程、按键方案、场景参数、现场配方与验证记录在Snowbot维护。现有双臂运行实现仍在Bindu，本轮补充归属和修改规则。
+
 - [代理规范](AGENTS.md)：本项目协作与执行边界。
 - [当前进度](当前进度.md)：原版恢复、改进版保全及未完成项。
+- [位置遥操作修改目标](位置遥操作修改目标.md)：能力复用、阻抗隔离边界、修改目标与完成条件。
 - [运行与验证](运行与验证.md)：本机准备工具、现场流程和验收边界。
 - [底层驱动问题记录](底层驱动问题记录.md)：接口差异、问题证据和修复历史。
 - [当日过程记录](过程记录/2026-10-21.md)：118联调与资料迁移记录。
 
-改进版可编辑源码位于 [development-src](artifacts/snowbot-118-session-20261021/development-src/)，完整归档和恢复回执与其同目录。补丁及环境入口位于 `tools/deployment/snowbot_vendor/`，准备工具为 `tools/deployment/prepare_snowbot_vendor.py`，配套离线测试在 `tests/`。
+改进版可编辑源码位于 [development-src](artifacts/snowbot-118-session-20261021/development-src/)，完整归档和恢复回执与其同目录。本轮位置会话唯一准备工具为[prepare_position_session.py](tools/deployment/prepare_position_session.py)，补丁与共用头在`tools/deployment/snowbot_vendor/position_session/`，候选源码／回退基线及证据在`artifacts/position-session-20261021/`，配套离线测试在`tests/`；旧`prepare_snowbot_vendor.py`仅复现历史补丁。
 
-当前118底层已恢复同事原版；本机改进版保留至Bindu提交 `49d4b42`，不据恢复前结果推定当前设备反馈或保护状态。历史JSON、源码归档和bundle逐字节保留，其中旧绝对路径及当时的Bindu路径只用于溯源。
+118已完成本轮位置会话软件部署：Bindu `5ee3868`／底层`f02b5de`叠加保留4处同事修改；后续初始化诊断版、现场运行／反馈时效限制及备份配方统一见[当前进度](当前进度.md)。此前原版恢复、JSON、源码归档和bundle保留为历史证据，其中旧绝对路径及当时的Bindu路径只用于溯源。
 
 本目录不自动连接、同步或启动机器人。机器人运动禁令及本机修改后同步的协作边界见[本项目规范](AGENTS.md#3-机器人软件工程约束)。
 
