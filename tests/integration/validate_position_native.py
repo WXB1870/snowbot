@@ -191,6 +191,8 @@ def write_position_cycle_check(source, work, root):
     start=text.index('void ServoNode::position_interrupt()')
     methods=text[start:text.index('bool ServoNode::position_ready()',start)]
     methods=methods.replace('snowbot_ctl_msgs::msg::PositionSessionServo','Packet').replace('position_session::steady_ns()','cycle_clock()')
+    if 'struct CycleFault' in (source/'servo_control/include/servo_control/position_observation.h').read_text():
+        preamble='#define POSITION_CYCLE_DIAGNOSTICS 1\n'+preamble
     checks=(root/'test_position_cycle.inc').read_text()
     path=work/'test_production_position_cycle.cpp';path.write_text(preamble+clock+body+methods+checks);return path
 

@@ -86,3 +86,154 @@
      if(position_gate_.selected() && !shutdown_mode_){position_rejection_="legacy_source_conflict";return;}
      // 关机回零独占目标、插补和使能控制，不能被排队的上位机消息重新覆盖。
      if (shutdown_mode_) {
+--- a/servo_control/include/servo_control/position_observation.h
++++ b/servo_control/include/servo_control/position_observation.h
+@@ -11,7 +11,17 @@
+ inline int64_t steady_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+ }
++// Fixed-size diagnostic copy only; never participates in a control decision.
++// origin: 1 = main-loop check, 2 = RT reference deadline.
++// checks: 1 = interval, 2 = sampling, 4 = nonfinite, 8 = limit, 16 = tracking.
++struct CycleFault {
++ uint8_t origin=0,checks=0;int16_t axis=-1;
++ int64_t detected_ns=0,rt_deadline_ns=0;
++ uint64_t session=0,sequence=0,pdo_sample=0;
++ double dt_s=0,reference=0,measured=0;
++};
+ struct Observation {
++ CycleFault cycle_fault{};
+  std::array<float,20> position{},speed{},current{};
+  std::array<uint16_t,20> status{};
+  std::array<int16_t,20> torque_raw{};uint32_t current_valid_mask=0,torque_raw_valid_mask=0;
+--- a/servo_control/include/servo_control/position_watchdog.h
++++ b/servo_control/include/servo_control/position_watchdog.h
+@@ -2,6 +2,7 @@
+ #include "servo_control/position_observation.h"
+ namespace position_session {
+ struct Output {
++ CycleFault cycle_fault{};
+  std::array<float,joint_count> q{},v{},kp{},kd{},torque{};
+  uint64_t session=0,sequence=0;int64_t deadline=0;uint8_t operation=0,policy=0,failure_reason=0;
+  bool impedance_mode=false,trajectory=false,nominal_hold=false;uint8_t reference_mode=0;uint64_t admission_generation=0;uint8_t trajectory_phase=0;uint64_t segment_id=0;
+@@ -18,6 +19,7 @@
+ };
+ enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5,CONTROL_SOURCE_CONFLICT=6,CYCLE_OR_TRACKING_ERROR=7};
+ struct Watchdog {
++ CycleFault first_cycle_fault{};
+  Output output{};uint8_t reason=OK;bool disabled=false,captured=false;
+  uint64_t session=0,sequence=0,hold_sample=0,seen_admission=0;
+  uint8_t latched_failure=OK;bool nominal_pause=false;
+@@ -37,6 +39,7 @@
+   return output.selected && (controlled_mask&(1u<<slot)) ? !disabled : legacy_global;
+  }
+  void report_hold(Observation& obs,uint32_t written)const{
++  obs.cycle_fault=first_cycle_fault;
+   obs.hold_position=hold;obs.hold_sample=hold_sample;obs.hold_basis=0;
+   for(unsigned i=14;i<joint_count;++i)obs.hold_position[i]=float(csp_radians(csp_counts(hold[i])));
+   obs.hold_valid=output.selected && !disabled && captured && (reason==PAUSED || reason==EXPIRED) &&
+@@ -49,7 +52,7 @@
+   const bool takeover=input.selected && input.operation==1 && input.admission_generation>seen_admission &&
+    input.deadline>now && input.policy!=0 && input.failure_reason==0 && healthy &&
+    (!input.trajectory || input.rt_deadline>now);
+-  if(takeover){latched_failure=OK;reason=OK;disabled=false;captured=false;nominal_pause=false;}
++  if(takeover){first_cycle_fault={};latched_failure=OK;reason=OK;disabled=false;captured=false;nominal_pause=false;}
+   if(input.selected)seen_admission=std::max(seen_admission,input.admission_generation);
+   if(!input.selected){
+    if(latched_failure){reason=latched_failure;disabled=true;output.selected=true;return;}
+@@ -69,7 +72,15 @@
+   else if(fault_mask(obs)&controlled_mask)failure=DRIVE_FAULT;
+   else if(input.trajectory && (input.rt_deadline<=0 || now>=input.rt_deadline) &&
+           (local || now<input.deadline || input.rt_deadline<input.deadline))failure=CYCLE_OR_TRACKING_ERROR;
+-  if(failure && !latched_failure)latched_failure=failure;
++  if(failure && !latched_failure){
++   latched_failure=failure;
++   if(failure==CYCLE_OR_TRACKING_ERROR){
++    first_cycle_fault=input.cycle_fault;
++    first_cycle_fault.origin=input.failure_reason==CYCLE_OR_TRACKING_ERROR?1:2;
++    first_cycle_fault.detected_ns=now;first_cycle_fault.rt_deadline_ns=input.rt_deadline;
++    first_cycle_fault.session=input.session;first_cycle_fault.sequence=input.sequence;first_cycle_fault.pdo_sample=obs.sample;
++   }
++  }
+   if(latched_failure){reason=latched_failure;disabled=true;captured=false;return;}
+   if(!nominal_pause && input.nominal_hold && input.trajectory && input.operation==2 && input.trajectory_phase==4 &&
+      input.admission_generation && input.deadline>now && input.rt_deadline>now){
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -165,6 +165,7 @@
+         uint64_t position_instance_id_=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+         std::string position_init_error_="initializing",position_last_report_,position_wait_reason_;
+         int64_t position_last_report_ns_=0;
++        int64_t position_last_cycle_check_ns_=0,position_last_rt_cycle_fault_ns_=0;
+         std::string position_feedback_gid_;
+         bool position_endpoint();
+         bool position_ready();
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -169,6 +169,21 @@
+         if(report!=position_last_report_ || now-position_last_report_ns_>=5000000000LL){
+             if(!report.empty())RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
+             position_last_report_=report;position_last_report_ns_=now;
++        }
++        // Publish diagnostics from the existing ROS timer, never from the RT cycle.
++        const auto& check=position_output_.cycle_fault;
++        if(check.detected_ns && check.detected_ns!=position_last_cycle_check_ns_){
++            RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_CHECK steady_ns=%lld session=%llu seq=%llu pdo=%llu checks=0x%x dt_ms=%.6f axis=%d reference=%.9f measured=%.9f",
++                (long long)check.detected_ns,(unsigned long long)check.session,(unsigned long long)check.sequence,(unsigned long long)check.pdo_sample,
++                unsigned(check.checks),check.dt_s*1000.,int(check.axis),check.reference,check.measured);
++            position_last_cycle_check_ns_=check.detected_ns;
++        }
++        const auto fault=EtherCAT_positionObservation().cycle_fault;
++        if(fault.detected_ns && fault.detected_ns!=position_last_rt_cycle_fault_ns_){
++            RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_FIRST_FAULT steady_ns=%lld session=%llu seq=%llu pdo=%llu origin=%s deadline_late_ms=%.6f checks=0x%x dt_ms=%.6f",
++                (long long)fault.detected_ns,(unsigned long long)fault.session,(unsigned long long)fault.sequence,(unsigned long long)fault.pdo_sample,
++                fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
++            position_last_rt_cycle_fault_ns_=fault.detected_ns;
+         }
+         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+     });
+@@ -2484,6 +2499,7 @@
+    if(position_reference_mode_==2&&source.operation==1)position_target_takeover_valid_=false;
+    if(source.operation==1)for(unsigned i=0;i<position_session::joint_count;++i)EtherCAT_setSingleMotorEnable(position_session::position_slot(i),true);
+   }
++  if(source.operation==1)position_output_.cycle_fault={};
+   position_rejected_session_=position_rejected_sequence_=0;position_cycle_reason_=nullptr;
+
+  }
+@@ -2503,8 +2519,10 @@
+  // Fresh sampling, feedback and all tracking limits remain required.
+  if((position_gate_.live(now)||local_hold) && position_feedback_.fresh(this->now().nanoseconds(),now)){
+   bool valid=std::isfinite(dt)&&dt>0&&dt<=.01;
++  uint8_t checks=valid?0:1;int16_t failed_axis=-1;
+   if(position_reference_mode_){
+-   valid=position_trajectory_.sample(now)&&valid;
++   const bool sampled=position_trajectory_.sample(now);if(!sampled)checks|=2;
++   valid=sampled&&valid;
+    if(valid){const auto& source=position_trajectory_.source();
+     position_output_.session=source.session;position_output_.sequence=source.sequence;position_output_.operation=source.operation;
+     position_output_.deadline=position_trajectory_.deadline();position_output_.source_stamp_ns=source.stamp;position_output_.expires_at_ns=source.expires;
+@@ -2514,11 +2532,22 @@
+     for(unsigned i=0;i<position_session::joint_count;++i){position_output_.q[i]=position_trajectory_.q[i];position_output_.v[i]=position_trajectory_.v[i];}
+    }
+   }else{
+-   valid=position_follower_.step(dt)&&valid;
++   const bool sampled=position_follower_.step(dt);if(!sampled)checks|=2;valid=sampled&&valid;
+    for(unsigned i=0;i<position_session::joint_count;++i){position_output_.q[i]=position_follower_.q[i];position_output_.v[i]=position_follower_.v[i];}
+   }
+   const auto& reference=position_reference_mode_?position_trajectory_.q:position_follower_.q;
+-  for(unsigned i=0;i<position_session::joint_count;++i)if(!std::isfinite(reference[i])||reference[i]<position_session::lower[i]||reference[i]>position_session::upper[i]||std::abs(reference[i]-position_feedback_.q[i])>.25)valid=false;
++  for(unsigned i=0;i<position_session::joint_count;++i){
++   uint8_t axis_checks=0;
++   if(!std::isfinite(reference[i]))axis_checks|=4;
++   if(reference[i]<position_session::lower[i]||reference[i]>position_session::upper[i])axis_checks|=8;
++   if(std::abs(reference[i]-position_feedback_.q[i])>.25)axis_checks|=16;
++   if(axis_checks){valid=false;checks|=axis_checks;if(failed_axis<0)failed_axis=int16_t(i);}
++  }
++  if(!valid && position_output_.failure_reason!=position_session::CYCLE_OR_TRACKING_ERROR){
++   auto& fault=position_output_.cycle_fault;fault={};fault.origin=1;fault.checks=checks;fault.axis=failed_axis;
++   fault.detected_ns=now;fault.dt_s=dt;fault.session=position_output_.session;fault.sequence=position_output_.sequence;fault.pdo_sample=position_feedback_.sample;
++   if(failed_axis>=0){fault.reference=reference[failed_axis];fault.measured=position_feedback_.q[failed_axis];}
++  }
+   if(!valid){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;if(position_reference_mode_)position_cycle_reason_="cycle_limit_or_tracking_error";else position_rejection_="cycle_limit_or_tracking_error";}
+  }
+  if(position_reference_mode_==2 && position_output_.operation==2 && position_output_.trajectory_phase==4 &&

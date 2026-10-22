@@ -121,4 +121,75 @@ void check_cycle_powered_retake(){
  assert(h.watchdog.reason==PAUSED&&!h.watchdog.disabled&&snapshot.hold_valid);
  std::cout<<"PASS powered hold -> squeeze retake -> PAUSE: offset measurement never jumps reference, no expiry disable\n";
 }
-int main(){check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();check_cycle_powered_retake();}
+void check_cycle_fault_diagnostics(){
+ using namespace position_session;
+ auto hold=[](CycleHarness& h){
+  h.node.position_submit(h.command(1,0.));h.settle();
+  h.node.position_submit(h.command(2,0.));h.settle();
+  for(unsigned i=0;i<35;++i)h.tick();
+  assert(h.watchdog.reason==PAUSED&&!h.watchdog.disabled&&snapshot.hold_valid);
+ };
+ // A fixed, healthy hold still obeys the unchanged main-loop 10 ms bound.
+ for(int gap_ms:{9,11}){
+  CycleHarness h;hold(h);const auto enables=enable_requests;
+  h.next_cycle+=(gap_ms-1)*1000000LL;h.tick();
+  assert(enable_requests==enables);
+  assert(h.watchdog.disabled==(gap_ms==11));
+  if(gap_ms==11){
+   assert(h.watchdog.reason==CYCLE_OR_TRACKING_ERROR&&!snapshot.hold_valid);
+#ifdef POSITION_CYCLE_DIAGNOSTICS
+   const auto fault=snapshot.cycle_fault;
+   assert(fault.origin==1&&fault.checks==1&&fault.axis==-1&&fault.dt_s>.010&&fault.dt_s<.012);
+   assert(fault.session==h.session&&fault.sequence==h.sequence&&fault.pdo_sample>0);
+   for(unsigned i=0;i<4;++i)h.tick();
+   assert(snapshot.cycle_fault.detected_ns==fault.detected_ns);
+#endif
+  }
+ }
+ // Stop ROS sampling but keep independent PDO/RT progress healthy: the RT
+ // reference deadline can fail first. A later main-loop error must not rewrite it.
+ {
+  CycleHarness h;hold(h);const auto packet=h.cache.read();
+  h.next_cycle+=23000000;cycle_now_ns=h.next_cycle;h.node.feedback();
+  periodic_allocations=periodic_deletions=0;count_periodic_memory=true;
+  h.watchdog.evaluate(packet,snapshot,cycle_clock());h.watchdog.report_hold(snapshot,controlled_mask);
+  count_periodic_memory=false;assert(!periodic_allocations&&!periodic_deletions);
+  assert(packet.failure_reason==0&&h.watchdog.reason==CYCLE_OR_TRACKING_ERROR&&h.watchdog.disabled);
+#ifdef POSITION_CYCLE_DIAGNOSTICS
+  const auto first=snapshot.cycle_fault;
+  assert(first.origin==2&&first.checks==0&&first.detected_ns-first.rt_deadline_ns>=3000000);
+#endif
+  h.tick();assert(h.node.position_output_.failure_reason==CYCLE_OR_TRACKING_ERROR);
+#ifdef POSITION_CYCLE_DIAGNOSTICS
+  assert(h.node.position_output_.cycle_fault.checks==1);
+  assert(snapshot.cycle_fault.origin==2&&snapshot.cycle_fault.detected_ns==first.detected_ns);
+#endif
+  ++h.session;h.sequence=0;h.node.position_submit(h.command(1,0.));h.settle();
+  assert(!h.watchdog.disabled);
+#ifdef POSITION_CYCLE_DIAGNOSTICS
+  assert(!snapshot.cycle_fault.detected_ns&&!h.node.position_output_.cycle_fault.detected_ns);
+#endif
+ }
+ // Record the actual joint and error for the existing .25 rad tracking guard.
+ {
+  CycleHarness h;hold(h);h.measured[0]+=.251;snapshot.position[0]=float(h.measured[0]);h.measured[0]=snapshot.position[0];h.tick();
+  assert(h.watchdog.reason==CYCLE_OR_TRACKING_ERROR&&h.watchdog.disabled);
+#ifdef POSITION_CYCLE_DIAGNOSTICS
+  assert(snapshot.cycle_fault.origin==1&&snapshot.cycle_fault.checks==16&&snapshot.cycle_fault.axis==0);
+  assert(std::abs(snapshot.cycle_fault.reference-snapshot.cycle_fault.measured)>.25);
+#endif
+ }
+ // No active trajectory is a sampling error, not an interval/tracking error.
+ {
+  CycleHarness h;auto p=h.command(1,0.);auto t=cycle_clock();
+  h.node.position_gate_.commit(meta(p->meta),t,t);h.node.position_interval_.reset(t);
+  auto& output=h.node.position_output_;output.selected=true;output.policy=2;output.session=h.session;output.sequence=h.sequence;output.deadline=h.node.position_gate_.deadline();
+  h.tick();assert(h.watchdog.reason==CYCLE_OR_TRACKING_ERROR&&h.watchdog.disabled);
+#ifdef POSITION_CYCLE_DIAGNOSTICS
+  assert(snapshot.cycle_fault.origin==1&&snapshot.cycle_fault.checks==2);
+#endif
+ }
+ std::cout<<"PASS unchanged 9/11ms hold boundary, independent 23ms RT expiry, first-failure latch/recovery, tracking/sampling distinctions and zero periodic allocation\n";
+}
+
+int main(){check_cycle_fault_diagnostics();check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();check_cycle_powered_retake();}
