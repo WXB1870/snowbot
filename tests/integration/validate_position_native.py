@@ -182,6 +182,17 @@ def write_position_cycle_check(source, work, root):
     checks=(root/'test_position_cycle.inc').read_text()
     path=work/'test_production_position_cycle.cpp';path.write_text(preamble+clock+body+methods+checks);return path
 
+def write_legacy_ingress_check(source, work, root):
+    """Run the actual old-channel callback with memory-only command/enable sinks."""
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    start=text.index('void ServoNode::message_callback(')
+    method=text[start:text.index('//函数2',start)]
+    fixture=(root/'test_position_legacy_ingress.cpp').read_text()
+    path=work/'test_production_legacy_ingress.cpp'
+    path.write_text(fixture.replace('// PRODUCTION_LEGACY_CALLBACK',method))
+    return path
+
+
 def write_middle_check(source, work, root):
     text=(source/'dual_arm_control/src/controller/ArmInterface.cpp').read_text()
     start=text.index('std::vector<outpWrap> ArmCtlOptInterface::Traj_temp_outp(')
@@ -233,7 +244,7 @@ def main():
         if 'prepare_target' in trajectory.read_text():
             names.append('test_position_target')
             if 'void ServoNode::position_target_dispatch()' in (args.source/'servo_control/src/ros_controller/rosLoop.cpp').read_text():
-                names.append('test_production_target');sources.append(root/'test_position_target_poll.inc')
+                names.extend(('test_production_target','test_production_legacy_ingress'));sources.extend((root/'test_position_target_poll.inc',root/'test_position_legacy_ingress.cpp'))
                 if 'void ServoNode::position_interrupt()' in (args.source/'servo_control/src/ros_controller/rosLoop.cpp').read_text():
                     names.append('test_production_position_cycle');sources.append(root/'test_position_cycle.inc')
         middle=args.source/'dual_arm_control/src/controller/ArmInterface.cpp'
@@ -253,7 +264,9 @@ def main():
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
         for name in names:
             binary=work/name
-            if name=='test_position_middle':
+            if name=='test_production_legacy_ingress':
+                copied=write_legacy_ingress_check(args.source,work,root)
+            elif name=='test_position_middle':
                 copied=write_middle_check(args.source,work,root)
             elif name=='test_production_position_cycle':
                 copied=write_position_cycle_check(args.source,work,root)

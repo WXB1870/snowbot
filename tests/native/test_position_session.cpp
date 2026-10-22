@@ -60,6 +60,27 @@ void check_latched_failures(){
  std::cout<<"PASS continuous latched sampler/feedback/drive/policy/conflict failures across TTL, replay/deselection rejection and new takeover recovery\n";
 }
 
+// Ordinary target expiry under measured_hold captures once, without upgrading
+// EXPIRED into a successful PAUSE; the local PDO/drive/RT protections remain.
+void check_target_expiry_hold(){
+ for(auto policy:{1,2}){
+  Observation o;o.sample=1;o.valid_mask=0xfffff;o.wkc=o.expected_wkc=67;
+  o.status.fill(0x27);o.position.fill(.12f);o.sampled_ns=o.attempted_ns=1000000000;
+  Output p;p.selected=true;p.policy=policy;p.operation=1;p.admission_generation=1;
+  p.session=7;p.sequence=1;p.deadline=1200000000;p.trajectory=true;p.reference_mode=2;
+  p.rt_deadline=1210000000;p.q.fill(.2f);
+  Watchdog w;w.evaluate(p,o,1000000000);assert(!w.disabled);
+  for(int64_t t=1200000000;t<=3200000000;t+=10000000){
+   ++o.sample;o.sampled_ns=o.attempted_ns=t;
+   w.evaluate(p,o,t);assert(w.reason==EXPIRED);
+   assert(w.disabled==(policy==1));
+   if(policy==2){assert(w.output.q[0]==.12f&&w.output.v[0]==0);o.position[0]=.125f;}
+  }
+  if(policy==2){o.status[0]|=8;w.evaluate(p,o,3200000000);assert(w.disabled&&w.reason==DRIVE_FAULT);}
+ }
+ std::cout<<"PASS target expiry: fixed measured hold versus disable; no fake PAUSE success; drive fault retained\n";
+}
+
 namespace {
 constexpr int64_t tracker_ros=10000000000LL,tracker_steady=1000000000LL,ms=1000000;
 struct TrackerObservation {
@@ -195,6 +216,7 @@ int main(){
  w.evaluate(p,o,1601000000);assert(w.reason==PAUSED&&!w.disabled);
  o.sampled_ns=1602000000;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
  p.policy=0;w.evaluate(p,o,1602000000);assert(w.disabled&&w.reason==EXPIRED);
+ check_target_expiry_hold();
  check_joint_limit_allowance();
  check_latched_failures();
  std::atomic<bool> done{false};std::thread writer([&]{Observation s;for(uint64_t i=1;i<=200000;++i){s.sample=i;s.sampled_ns=i;s.position.fill(float(i));s.speed.fill(-float(i));cache.publish(s);}done=true;});
