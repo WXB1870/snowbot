@@ -5,6 +5,12 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <cstdlib>
+#include <new>
+static bool count_memory=false;
+static unsigned allocations=0,deletions=0;
+void* operator new(std::size_t n){if(count_memory)++allocations;if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+void operator delete(void* p)noexcept{if(count_memory&&p)++deletions;std::free(p);}
 static unsigned checks=0;
 #define CHECK(c) do {++checks;if(!(c))throw std::runtime_error(#c);}while(0)
 struct Observation {
@@ -85,4 +91,43 @@ static void sessions_deadlines() {
     auto update=command(20,3,ros+2000,0);CHECK(!pause.accepts(update,update.stamp,steady+2000));
     update.operation=1;CHECK(pause.accepts(update,update.stamp,steady+2000));
 }
-int main(){try{feedback_sequences();readiness_generation();sessions_deadlines();std::cout<<checks<<" shared-contract assertions passed\n";}catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}
+// Run far beyond the old 33-session failure, including fresh restamped replays.
+static void unlimited_sessions_and_replay() {
+    constexpr int64_t ros=10000000000LL,steady=1000000000LL;
+    position_session::Gate gate,pending;
+    count_memory=true;
+    for(uint64_t id=1;id<=10000;++id){
+        auto m=command(id,1,ros);
+        CHECK(gate.accepts(m,ros,steady));gate.commit(m,ros,steady);
+        // An active following session still excludes another takeover.
+        auto conflict=command(id+1,1,ros);
+        CHECK(!gate.accepts(conflict,ros,steady));
+        auto pause=command(id,2,ros,2);
+        CHECK(gate.accepts(pause,ros,steady));gate.commit(pause,ros,steady);
+        auto duplicate=command(id,2,ros);
+        CHECK(!gate.accepts(duplicate,ros,steady));
+        gate.interrupt();
+        // Cancel before selection: even a fresh/new-sequence retry is retired.
+        auto queued=command(id,1,ros);
+        CHECK(pending.accepts(queued,ros,steady));pending.invalidate_pending(queued);
+        queued.sequence=999;CHECK(!pending.accepts(queued,ros,steady));
+    }
+    const auto generation=gate.generation();
+    for(uint64_t id=1;id<=10000;++id){
+        auto replay=command(id,99999,ros+1000);
+        CHECK(!gate.accepts(replay,replay.stamp,steady+1000));
+        CHECK(!pending.accepts(replay,replay.stamp,steady+1000));
+        CHECK(gate.generation()==generation);
+    }
+    auto next=command(10001,1,ros+1000);
+    CHECK(gate.accepts(next,next.stamp,steady+1000));
+    CHECK(pending.accepts(next,next.stamp,steady+1000));
+    gate.commit(next,next.stamp,steady+1000);gate.interrupt();
+    // Never wrap a saturated uint64 identity and accidentally accept old IDs.
+    next.session=std::numeric_limits<uint64_t>::max();
+    CHECK(gate.accepts(next,next.stamp,steady+1000));gate.commit(next,next.stamp,steady+1000);gate.interrupt();
+    next.session=1;CHECK(!gate.accepts(next,next.stamp,steady+1000));
+    count_memory=false;CHECK(allocations==0&&deletions==0);
+    std::cout<<"PASS 10000 takeovers and pending cancellations; original/fresh restamped replay blocked; zero allocation/deletion\n";
+}
+int main(){try{feedback_sequences();readiness_generation();sessions_deadlines();unlimited_sessions_and_replay();std::cout<<checks<<" shared-contract assertions passed\n";}catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}

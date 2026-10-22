@@ -34,7 +34,7 @@
 +            for(unsigned i=0;i<7 && position_receipts_.pop(receipt);++i){
 +                snowbot_ctl_msgs::msg::PositionSessionState m;
 +                m.header.stamp=rclcpp::Time(receipt.decided_ros);m.layer="servo";
-+                m.instance_id=position_instance_id_;m.wire_version=2;m.reference_mode=1;
++                m.instance_id=position_instance_id_;m.wire_version=3;m.reference_mode=1;
 +                m.feedback_boot_id=receipt.boot;m.feedback_sample=receipt.sample;
 +                m.state=receipt.accepted?"accepted":"rejected";
 +                if(receipt.accepted){m.session=receipt.session;m.sequence=receipt.sequence;}

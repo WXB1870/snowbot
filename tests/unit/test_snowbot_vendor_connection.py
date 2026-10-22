@@ -20,7 +20,7 @@ class PositionReleaseTests(unittest.TestCase):
     def tearDownClass(cls):cls.tmp.cleanup()
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),set(vendor.COMPONENTS))
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertFalse(m['latest_colleague_source_verified']);self.assertEqual(m['stop_policy'],'unconfirmed')
         for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
@@ -42,7 +42,8 @@ class PositionReleaseTests(unittest.TestCase):
         default=json.loads((self.release/'position_release.json').read_text())
         self.assertFalse(default['impedance_available'])
         self.assertTrue(default['target_stream_available'])
-        self.assertEqual((default['target_wire_version'],default['target_reference_mode']),(3,2))
+        self.assertEqual((default['target_wire_version'],default['target_reference_mode']),(5,2))
+        self.assertEqual(default['session_wire_version'],3)
         self.assertEqual(default['target_prepare_ms'],10.)
         self.assertEqual((self.release/'src/servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes(),
                          (self.baseline/'servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes())

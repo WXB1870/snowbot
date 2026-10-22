@@ -24,16 +24,16 @@ struct Meta {
 template<class M> Meta meta(const M& m){return {m.session,m.sequence,m.source_stamp_ns,m.expires_at_ns,m.operation};}
 inline bool fresh(const Meta& m,int64_t now,int64_t pause_limit=maximum_ttl){return m.session && m.sequence && m.stamp>0 && m.expires>m.stamp && m.expires-m.stamp<=(m.operation==2?pause_limit:maximum_ttl) && now>=m.stamp && now<m.expires && m.operation<=2;}
 class Gate {
- bool interrupted_=false;uint64_t generation_=0;Meta last_{};int64_t deadline_=0;std::array<uint64_t,32> retired_{};unsigned count_=0;
+ bool interrupted_=false;uint64_t generation_=0;Meta last_{};int64_t deadline_=0;uint64_t session_watermark_=0;
 public:
  const char* rejection="";
  void interrupt(){if(selected()){if(!interrupted_)++generation_;interrupted_=true;deadline_=0;}}
- // Explicit target-stream cancellation also invalidates work before selection.
- // Retire an unadopted takeover identity so a queued duplicate cannot reactivate it.
+ // Session identities increase at the source (wire 3 / target wire 5).
+ // A constant-size watermark also retires cancelled, unadopted takeovers.
+ // Never evict old identities: restamping or resequencing cannot revive them.
  void invalidate_pending(const Meta& pending){
   ++generation_;interrupted_=true;deadline_=0;
-  if(pending.session&&pending.session!=last_.session&&
-     std::find(retired_.begin(),retired_.end(),pending.session)==retired_.end()&&count_<retired_.size())retired_[count_++]=pending.session;
+  session_watermark_=std::max(session_watermark_,pending.session);
  }
  uint64_t generation()const{return generation_;}
  const Meta& last()const{return last_;}
@@ -46,14 +46,15 @@ public:
   if(interrupted_ && m.session==last_.session){rejection="new_session_required";return false;}
   if(!fresh(m,ros,pause_limit) || steady<=0){rejection="expired_or_invalid";return false;}
   if(m.session!=last_.session){
-   if(m.operation!=1 || (following(steady)) || count_==retired_.size() || std::find(retired_.begin(),retired_.end(),m.session)!=retired_.end()){
+   if(m.operation!=1 || following(steady)){
     rejection="session_conflict_or_retired";return false;}
+   if(m.session<=session_watermark_){rejection="session_replayed_or_out_of_order";return false;}
   }else if(m.sequence<=last_.sequence || m.stamp<last_.stamp){rejection="duplicate_or_out_of_order";return false;}
   else if(m.operation==0 && (!live(steady) || last_.operation==2)){rejection="takeover_required";return false;}
   return true;
  }
  void commit(const Meta& m,int64_t ros,int64_t steady){
-  if(last_.session && m.session!=last_.session)retired_[count_++]=last_.session;
+  session_watermark_=std::max(session_watermark_,m.session);
   interrupted_=false;last_=m;deadline_=steady+(m.expires-ros);++generation_;
  }
 };
