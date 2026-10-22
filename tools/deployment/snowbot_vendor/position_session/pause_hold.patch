@@ -68,3 +68,21 @@
 +            if(enable_step[m]>=EN_STEP*6)position_written|=1u<<m;
          }
      }
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -1785,6 +1785,15 @@
+ //传输信息回调函数 -- 接收消息并执行插补任务
+ void ServoNode::message_callback(const snowbot_ctl_msgs::msg::CtlInformation::SharedPtr msg){
+
++    // Target-stream mode is session-only, including before the first takeover.
++    // Startup can queue legacy messages while homing; neither old nor fresh
++    // legacy traffic may change enable masks, targets, gains or interpolation.
++    // Internal startup/shutdown homing does not enter this callback.
++    if (position_reference_mode_ == 2) {
++        position_rejection_ = "legacy_source_disabled_for_target_stream";
++        return;
++    }
++
+     if(position_gate_.selected() && !shutdown_mode_){position_rejection_="legacy_source_conflict";return;}
+     // 关机回零独占目标、插补和使能控制，不能被排队的上位机消息重新覆盖。
+     if (shutdown_mode_) {
