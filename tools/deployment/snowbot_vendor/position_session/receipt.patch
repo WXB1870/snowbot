@@ -1,0 +1,55 @@
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -2,4 +2,5 @@
+ #include "position_session_contract.h"
+ #include "position_trajectory.h"
++#include "position_receipt.h"
+ #include "rcl_interfaces/msg/parameter_descriptor.hpp"
+ #include "snowbot_ctl_msgs/msg/position_observation.hpp"
+@@ -188,6 +189,10 @@
+         void position_submit(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr msg);
+         position_session::Meta position_admission_source_{};
+         uint64_t position_rejected_session_=0,position_rejected_sequence_=0;
++        bool position_receipts_enabled_=false;
++        position_session::ReceiptQueue position_receipts_;
++        rclcpp::Publisher<snowbot_ctl_msgs::msg::PositionSessionState>::SharedPtr position_receipt_pub_;
++        rclcpp::TimerBase::SharedPtr position_receipt_timer_;
+         void position_poll();
+         uint8_t position_reference_mode_=0;
+         double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -146,6 +146,27 @@
+         }
+         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+     });
++    const auto receipt_ms=declare_parameter<double>("position_receipt_poll_ms",2.,reference_descriptor);
++    if(!std::isfinite(receipt_ms) || (receipt_ms!=0. && (receipt_ms<1. || receipt_ms>50.)))throw std::invalid_argument("position_receipt_poll_ms");
++    position_receipts_enabled_=position_reference_mode_ && receipt_ms>0.;
++    if(position_receipts_enabled_){
++        position_receipt_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_receipt",1);
++        position_receipt_timer_=create_wall_timer(std::chrono::nanoseconds(int64_t(receipt_ms*1000000.)),[this]{
++            position_session::AdmissionReceipt receipt;
++            // Bounded drain; overflow retains the existing periodic-state fallback.
++            for(unsigned i=0;i<7 && position_receipts_.pop(receipt);++i){
++                snowbot_ctl_msgs::msg::PositionSessionState m;
++                m.header.stamp=rclcpp::Time(receipt.decided_ros);m.layer="servo";
++                m.instance_id=position_instance_id_;m.wire_version=2;m.reference_mode=1;
++                m.feedback_boot_id=receipt.boot;m.feedback_sample=receipt.sample;
++                m.state=receipt.accepted?"accepted":"rejected";
++                if(receipt.accepted){m.session=receipt.session;m.sequence=receipt.sequence;}
++                else{m.rejected_session=receipt.session;m.rejected_sequence=receipt.sequence;}
++                m.reason=receipt.reason.data();m.physical_stop_confirmed=false;
++                position_receipt_pub_->publish(m);
++            }
++        });
++    }
+     //上位机接收器初始化
+     CtlData = this->create_subscription<snowbot_ctl_msgs::msg::CtlInformation>(
+         "ctl_data_pub",
+@@ -2349,3 +2373,5 @@
+  }
++ if(position_receipts_enabled_ && !result->command.derived)position_receipts_.push(source.session,source.sequence,
++   position_feedback_.boot,position_feedback_.sample,this->now().nanoseconds(),!error,error);
+  position_admission_->release(result);
+ }

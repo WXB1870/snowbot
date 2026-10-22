@@ -81,6 +81,38 @@ void check_position_pdo_output(){
 '''
     path=work/'position_pdo_check.cpp';path.write_text(preamble+block+tests);return path
 
+
+def write_receipt_poll_check(source, work, root):
+    """Reuse the existing poll fixture without its unrelated Eigen controller."""
+    fixture=(root/'test_session_impedance.cpp').read_text()
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
+    preamble='\n'.join(line for line in preamble.splitlines() if
+        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
+    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body='\n'.join(line for line in body.splitlines() if
+        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
+    body=body[:body.index(' void start(')]+'};\n'
+    start=text.index('void ServoNode::position_poll()')
+    poll=text[start:text.index('void ServoNode::position_step()',start)]
+    ready=''
+    if 'bool ServoNode::session_impedance_ready() const' in text:
+        start=text.index('bool ServoNode::session_impedance_ready() const')
+        ready=text[start:text.index('\n}',start)+2]+'\n'
+    described=fixture[fixture.index('TrajectoryWire described('):fixture.index('void check_adapter_memory')]
+    checks=fixture[fixture.index('void check_production_poll()'):fixture.index('void check_trajectory_impedance')]
+    if not ready:
+        checks=checks.replace('invalid<5','invalid<1')
+        checks=checks.replace('initialized/calibration/sensor admission gates','initialized admission gate (position-only candidate)')
+        body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
+        checks=checks.replace('if(sensor_age)snapshot.sensor_sampled_ns.fill(steady_ns()-sensor_age);','(void)sensor_age;')
+        checks=checks.replace('snapshot.sensor_valid_mask=invalid==3?1:3;','').replace('snapshot.sensor_valid_mask=3;','')
+    main='\nint main(){\n snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.sensor_valid_mask=3;\n snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;\n check_production_poll();\n}\n'
+    if not ready:main=main.replace('snapshot.sensor_valid_mask=3;','')
+    path=work/'test_production_receipt.cpp'
+    path.write_text(preamble+body+poll+ready+described+checks+main)
+    return path
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',type=Path,required=True,help='Unified vendor src root')
@@ -95,6 +127,10 @@ def main():
                 ('position_watchdog.h','position_observation.h','position_follower.h')]
     sources.append(args.source/'servo_control/src/servo_control/ethercat_driver.cpp')
     names=['test_snowbot_reconnect_tracker','test_snowbot_connection_contract','test_position_connection_diagnostics','test_position_initialization','test_position_session']
+    if (args.source/'servo_control/include/position_receipt.h').is_file():
+        sources.append(args.source/'servo_control/include/position_receipt.h')
+        names.extend(('test_position_receipt','test_production_receipt'))
+        sources.extend((args.source/'servo_control/src/ros_controller/rosLoop.cpp',root/'test_session_impedance.cpp'))
     native_include=args.source/'servo_control/include/bindu_execution_native'
     native_sources=[args.source/'servo_control/src/bindu_execution_native'/name
                     for name in ('interpolation.cpp','adaptive_stream.cpp')]
@@ -120,14 +156,17 @@ def main():
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
         for name in names:
             binary=work/name
-            copied=work/(name+'.cpp');copied.write_bytes((root/(name+'.cpp')).read_bytes())
+            if name=='test_production_receipt':
+                copied=write_receipt_poll_check(args.source,work,root)
+            else:
+                copied=work/(name+'.cpp');copied.write_bytes((root/(name+'.cpp')).read_bytes())
             command=[compiler,'-std=c++17','-Wall','-Wextra','-Werror','-pthread',
                 '-I'+str(args.source/'robot_control/include'),'-I'+str(args.source/'servo_control/include'),'-I'+str(native_include),'-I'+str(work),'-I'+str(root),
                 str(copied),'-o',str(binary)]
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
-            elif name=='test_position_trajectory':
+            elif name in ('test_position_trajectory','test_production_receipt'):
                 command.extend(map(str,native_sources))
             compiled=subprocess.run(command,capture_output=True,text=True)
             if compiled.returncode:raise RuntimeError(compiled.stdout+compiled.stderr)

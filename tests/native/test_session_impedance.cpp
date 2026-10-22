@@ -1,3 +1,4 @@
+#include "position_receipt.h"
 #define EIGEN_RUNTIME_NO_MALLOC
 
 #include "impedance/cartesian_impedance_controller.h"
@@ -65,6 +66,7 @@ struct ServoNode {
  const char*position_cycle_reason_=nullptr;uint8_t position_policy_=2;
  Packet::SharedPtr position_origin_packet_;
  std::unique_ptr<position_session::TrajectoryAdmission<Packet>> position_admission_;
+ bool position_receipts_enabled_=true;position_session::ReceiptQueue position_receipts_;
  snowbot_impedance::VectorXd session_q_,session_dq_,session_efforts_,session_nominal_,session_velocity_;
  uint8_t position_reference_mode_=0;position_session::TrajectoryQueue position_trajectory_;
  struct Time {int64_t nanoseconds()const{return position_session::steady_ns();}};Time now()const{return {};}
@@ -144,18 +146,24 @@ void check_production_poll(){
  auto p=make_packet(61);inspect_hold=true;submit(p);
  while(!inspect_entered.load())std::this_thread::yield();
  node.position_poll();assert(!node.position_gate_.selected()); // Imported work has not been committed/ACKed.
+ AdmissionReceipt receipt;assert(!node.position_receipts_.pop(receipt));
  inspect_hold=false;finish();assert(node.position_gate_.selected()&&node.position_gate_.last().session==61&&node.position_origin_packet_==p);
  assert(!node.position_cycle_reason_&&node.position_output_.selected&&node.position_v2_.frame==1);
+ assert(node.position_receipts_.pop(receipt)&&receipt.accepted&&receipt.session==61&&receipt.sequence==1&&receipt.boot==9);
  auto derived=std::make_shared<Packet>(*p);derived->frame_sequence=2;submit(derived);finish();assert(node.position_v2_.frame==2&&node.position_gate_.generation()==1);
+ assert(!node.position_receipts_.pop(receipt));
  // In-flight work cannot survive revocation, then cannot survive instance change.
  auto next=make_packet(62);inspect_hold=true;submit(next);while(!inspect_entered.load())std::this_thread::yield();
  node.position_gate_.interrupt();inspect_hold=false;finish();assert(node.position_gate_.last().session==61);
  assert(std::string(node.position_cycle_reason_)=="admission_generation_changed");
+ assert(node.position_receipts_.pop(receipt)&&!receipt.accepted&&receipt.session==next->meta.session);
  next=make_packet(63);inspect_hold=true;submit(next);while(!inspect_entered.load())std::this_thread::yield();
  ++node.position_instance_id_;inspect_hold=false;finish();assert(node.position_gate_.last().session==61);
  assert(std::string(node.position_cycle_reason_)=="admission_generation_changed");
+ assert(node.position_receipts_.pop(receipt)&&!receipt.accepted&&receipt.session==next->meta.session);
  next=make_packet(64);next->command.l_position[0]=NAN;submit(next);finish();
  assert(node.position_gate_.last().session==61&&std::string(node.position_cycle_reason_)=="joint_limit");
+ assert(node.position_receipts_.pop(receipt)&&!receipt.accepted&&receipt.session==64);
  const auto admission=node.position_gate_.generation();const auto enables=enable_requests;
  node.session_execution_mode_="impedance";
  for(unsigned invalid=0;invalid<5;++invalid){
@@ -164,6 +172,7 @@ void check_production_poll(){
   next=make_packet(65+invalid);submit(next);finish(invalid==4?21000000:0);
   assert(node.position_gate_.generation()==admission&&node.position_gate_.last().session==61&&enable_requests==enables);
   assert(std::string(node.position_cycle_reason_)=="startup_shutdown_or_mode_conflict");
+  assert(node.position_receipts_.pop(receipt)&&!receipt.accepted&&receipt.session==65+invalid);
  }
  snapshot.sensor_valid_mask=3;
  std::cout<<"PASS actual production position_poll: import/derived/error paths, ACK after commit, generation/restart rejection, initialized/calibration/sensor admission gates, no rejected enable requests, zero periodic new/delete\n";
