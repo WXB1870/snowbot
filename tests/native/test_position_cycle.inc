@@ -5,7 +5,7 @@ struct CycleHarness {
  int64_t next_cycle=1000000000LL;uint64_t sequence=0,session=801;
  std::array<double,16> measured{};
  CycleHarness(){
-  using namespace position_session;cycle_now_ns=next_cycle;active_cycle_cache=&cache;
+  using namespace position_session;cycle_ros_offset_ns=0;cycle_now_ns=next_cycle;active_cycle_cache=&cache;
   snapshot=Observation{};snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);
   snapshot.position[0]=.015;snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;
   for(unsigned i=0;i<16;++i)measured[i]=snapshot.position[position_slot(i)];
@@ -15,7 +15,7 @@ struct CycleHarness {
   });node.feedback();
  }
  Packet::SharedPtr command(uint8_t operation=0,double displacement=.1){
-  node.feedback();auto p=std::make_shared<Packet>();const auto now=cycle_clock();
+  node.feedback();auto p=std::make_shared<Packet>();const auto now=node.now().nanoseconds();
   p->meta.session=session;p->meta.sequence=++sequence;p->meta.operation=operation;p->meta.reference_mode=2;
   p->meta.source_stamp_ns=now;p->meta.expires_at_ns=now+(operation==2?2000000000LL:200000000LL);
   p->meta.feedback_boot_id=node.position_feedback_.boot;p->meta.feedback_sample=node.position_feedback_.sample;p->meta.middle_instance_id=32;
@@ -36,19 +36,19 @@ struct CycleHarness {
  void settle(){const auto limit=next_cycle+150000000;do{tick();assert(next_cycle<limit);}while(node.position_admission_->busy()||node.position_target_pending_);}
  void interrupt(){node.position_interrupt();}
 };
-void check_cycle_stream(int period,uint8_t policy){
+void check_cycle_stream(int period,uint8_t policy,int64_t ros_offset=0){
  using namespace position_session;CycleHarness h;h.node.position_policy_=policy;auto take=h.command(1);h.node.position_submit(take);h.settle();assert(h.node.position_gate_.last().sequence==1);
  bool moved=false;double largest_speed=0;
  for(int tick=0;tick<400;++tick){
   if(tick%period==0){auto target=h.command(0);h.node.position_submit(target);}
   const auto packet=h.tick();assert(!h.watchdog.disabled);moved|=std::abs(packet.reference_position[0]-h.measured[0])>1e-5;largest_speed=std::max(largest_speed,std::abs(packet.reference_speed[0]));
  }
- assert(moved&&largest_speed>.03);auto pause=h.command(2);h.node.position_submit(pause);
+ assert(moved&&largest_speed>.03);cycle_ros_offset_ns=ros_offset;auto pause=h.command(2);h.node.position_submit(pause);
  const auto expiry=pause->meta.expires_at_ns;bool braking=false,held=false;std::array<double,16> fixed{};bool have_fixed=false;int64_t stop_deadline=0;
  for(int tick=0;tick<2200;++tick){
   const auto packet=h.tick();assert(!h.watchdog.disabled);
   if(packet.sequence==pause->meta.sequence){assert(packet.source_stamp_ns==pause->meta.source_stamp_ns&&packet.expires_at_ns==expiry);if(!stop_deadline)stop_deadline=packet.deadline;assert(packet.deadline==stop_deadline);braking|=packet.trajectory_phase==3;
-   if(packet.trajectory_phase==4){held=true;if(!have_fixed){fixed=packet.reference_position;have_fixed=true;}assert(packet.reference_position==fixed);}
+   if(packet.trajectory_phase==4){if(ros_offset)assert(h.node.position_gate_.deadline()!=packet.deadline);held=true;if(!have_fixed){fixed=packet.reference_position;have_fixed=true;}assert(packet.reference_position==fixed);}
   }
   if(cycle_now_ns<expiry&&held)assert(h.watchdog.reason==PAUSED);
  }
@@ -73,7 +73,7 @@ void check_cycle_stream(int period,uint8_t policy){
  assert(h.watchdog.disabled&&h.watchdog.reason==CONTROL_SOURCE_CONFLICT);
  ++h.session;h.sequence=0;auto retake=h.command(1,0.);h.node.position_submit(retake);h.settle();
  assert(h.node.position_gate_.last().session==h.session&&!h.watchdog.disabled&&!h.watchdog.nominal_pause);
- std::cout<<"PASS actual position step/cache/watchdog "<<1000/period<<"Hz: coupled nominal output, fixed 2s PAUSE source, local powered hold after expiry, independent measured feedback, zero counted periodic new/delete\n";
+ std::cout<<"PASS actual position step/cache/watchdog "<<1000/period<<"Hz clock offset "<<ros_offset<<"ns: coupled nominal output, fixed 2s PAUSE source, local powered hold after expiry, independent measured feedback, zero counted periodic new/delete\n";
 }
 void check_cycle_expiry_fault_revoke(){
  using namespace position_session;
@@ -97,4 +97,4 @@ void check_cycle_expiry_fault_revoke(){
  }
  std::cout<<"PASS actual step/cache/watchdog source expiry captures measured pose; fault/revocation plus late worker/replay cannot reactivate output; fault/cycle reasons remain latched\n";
 }
-int main(){check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_expiry_fault_revoke();}
+int main(){check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();}

@@ -158,12 +158,15 @@ def write_position_cycle_check(source, work, root):
     preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
     preamble='\n'.join(line for line in preamble.splitlines() if
         'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
-    clock='int64_t cycle_now_ns=1000000000;int64_t cycle_clock(){cycle_now_ns+=100;return cycle_now_ns;}\nposition_session::OutputCache* active_cycle_cache=nullptr;\n'
+    clock='int64_t cycle_ros_offset_ns=0;int64_t cycle_now_ns=1000000000;int64_t cycle_clock(){cycle_now_ns+=100;return cycle_now_ns;}\nposition_session::OutputCache* active_cycle_cache=nullptr;\n'
     body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
     body='\n'.join(line for line in body.splitlines() if
         'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
     body=body[:body.index(' void start(')]+TARGET_FIELDS+'};\n'
     body=body.replace('snapshot.sensor_sampled_ns.fill(t);','').replace('position_session::steady_ns()','cycle_clock()')
+    body=body.replace('nanoseconds()const{return cycle_clock();}', 'nanoseconds()const{return cycle_clock()+cycle_ros_offset_ns;}')
+    body=body.replace('position_feedback_.ready_ros=t;', 'position_feedback_.ready_ros=t+cycle_ros_offset_ns;')
+    body=body.replace('position_feedback_.progress=position_feedback_.source=t;', 'position_feedback_.progress=t;position_feedback_.source=t+cycle_ros_offset_ns;')
     body=body.replace('void EtherCAT_positionOutput(const position_session::Output& p){applied=p;++writes;}',
         'void EtherCAT_positionOutput(const position_session::Output& p){active_cycle_cache->publish(p);applied=p;++writes;}')
     start=text.index('void ServoNode::position_interrupt()')
