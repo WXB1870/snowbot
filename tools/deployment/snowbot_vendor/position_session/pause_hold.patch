@@ -1,0 +1,38 @@
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -140,5 +140,5 @@
+         snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?4:2;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
+         m.startup_complete=position_startup_complete_ && !shutdown_mode_;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
+-        m.state=!m.selected?"idle":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
++        m.state=!m.selected?"idle":position_local_hold_&&position_gate_.deadline()==position_output_.deadline?"paused_nominal_hold":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
+         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+         if(!position_initialized_)m.state="initialization_failed";
+@@ -2359,4 +2359,6 @@
+      (position_target_pending_&&source==position_session::meta(position_target_pending_->meta)))return;
+   const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
++  // Completed PAUSE owns a local fixed hold; expired relay copies cannot renew it.
++  if(position_local_hold_ && source==position_gate_.last() && !position_gate_.live(steady))return;
+   auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
+   const bool cancel_takeover=source.operation==2&&position_target_takeover_valid_&&
+@@ -2456,6 +2458,11 @@
+  const auto now=position_session::steady_ns();const auto dt=position_interval_.tick(now);
+  if(impedance_enable_){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CONTROL_SOURCE_CONFLICT;if(position_reference_mode_)position_cycle_reason_="control_source_conflict";else position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}
+- // Never let a local ROS loop stall extend the source's monotonic deadline.
+- if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
++ const bool local_hold=position_local_hold_ && position_reference_mode_==2 &&
++  position_output_.operation==2 && position_output_.trajectory_phase==4 && position_output_.failure_reason==0 &&
++  position_gate_.last().session==position_output_.session && position_gate_.last().sequence==position_output_.sequence &&
++  position_gate_.deadline()==position_output_.deadline;
++ // PAUSE completion may keep one fixed reference, never extend the motion source.
++ // Fresh sampling, feedback and all tracking limits remain required.
++ if((position_gate_.live(now)||local_hold) && position_feedback_.fresh(this->now().nanoseconds(),now)){
+   bool valid=std::isfinite(dt)&&dt>0&&dt<=.01;
+   if(position_reference_mode_){
+@@ -2477,4 +2484,7 @@
+   if(!valid){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;if(position_reference_mode_)position_cycle_reason_="cycle_limit_or_tracking_error";else position_rejection_="cycle_limit_or_tracking_error";}
+  }
++ if(position_reference_mode_==2 && position_output_.operation==2 && position_output_.trajectory_phase==4 &&
++    position_output_.failure_reason==0 && position_gate_.live(now))position_local_hold_=true;
++ position_output_.nominal_hold=position_local_hold_ && position_gate_.deadline()==position_output_.deadline && position_output_.failure_reason==0;
+  EtherCAT_positionOutput(position_output_);
+ }

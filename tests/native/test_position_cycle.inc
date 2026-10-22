@@ -36,8 +36,8 @@ struct CycleHarness {
  void settle(){const auto limit=next_cycle+150000000;do{tick();assert(next_cycle<limit);}while(node.position_admission_->busy()||node.position_target_pending_);}
  void interrupt(){node.position_interrupt();}
 };
-void check_cycle_stream(int period){
- using namespace position_session;CycleHarness h;auto take=h.command(1);h.node.position_submit(take);h.settle();assert(h.node.position_gate_.last().sequence==1);
+void check_cycle_stream(int period,uint8_t policy){
+ using namespace position_session;CycleHarness h;h.node.position_policy_=policy;auto take=h.command(1);h.node.position_submit(take);h.settle();assert(h.node.position_gate_.last().sequence==1);
  bool moved=false;double largest_speed=0;
  for(int tick=0;tick<400;++tick){
   if(tick%period==0){auto target=h.command(0);h.node.position_submit(target);}
@@ -52,18 +52,37 @@ void check_cycle_stream(int period){
   }
   if(cycle_now_ns<expiry&&held)assert(h.watchdog.reason==PAUSED);
  }
- assert(braking&&held&&h.watchdog.reason==EXPIRED&&h.watchdog.captured);
+ assert(braking&&held&&h.watchdog.reason==PAUSED&&h.watchdog.captured);
+ assert(h.node.position_local_hold_&&h.watchdog.nominal_pause&&h.watchdog.output.nominal_hold);
+ auto expired_copy=pause;h.node.position_submit(expired_copy);h.tick();
+ assert(!h.node.position_cycle_reason_&&h.watchdog.reason==PAUSED);
  assert(snapshot.hold_valid);assert(std::abs(h.watchdog.hold[0]-h.measured[0])>1e-5); // Reference hold acknowledgement is not physical arrival.
- std::cout<<"PASS actual position step/cache/watchdog "<<1000/period<<"Hz: coupled nominal output, fixed 2s PAUSE source/hold, expiry reason, independent measured feedback, zero counted periodic new/delete\n";
+ for(auto cause:{FEEDBACK_INVALID,DRIVE_FAULT,CONTROL_SOURCE_CONFLICT,CYCLE_OR_TRACKING_ERROR}){
+  auto guard=h.watchdog;auto input=guard.output;auto feedback=snapshot;auto now=cycle_clock();
+  feedback.sampled_ns=feedback.attempted_ns=now;input.rt_deadline=now+20000000;
+  if(cause==FEEDBACK_INVALID)feedback.wkc=61;
+  else if(cause==DRIVE_FAULT)feedback.status[0]|=8;
+  else if(cause==CONTROL_SOURCE_CONFLICT)input.failure_reason=cause;
+  else input.rt_deadline=now;
+  guard.evaluate(input,feedback,now);guard.report_hold(feedback,controlled_mask);
+  assert(guard.disabled&&guard.reason==cause&&!feedback.hold_valid);
+  feedback=snapshot;feedback.sampled_ns=feedback.attempted_ns=now+1000000;input=h.watchdog.output;input.rt_deadline=now+20000000;
+  guard.evaluate(input,feedback,now+1000000);assert(guard.disabled&&guard.reason==cause);
+ }
+ h.interrupt();for(unsigned i=0;i<25;++i)h.tick();
+ assert(h.watchdog.disabled&&h.watchdog.reason==CONTROL_SOURCE_CONFLICT);
+ ++h.session;h.sequence=0;auto retake=h.command(1,0.);h.node.position_submit(retake);h.settle();
+ assert(h.node.position_gate_.last().session==h.session&&!h.watchdog.disabled&&!h.watchdog.nominal_pause);
+ std::cout<<"PASS actual position step/cache/watchdog "<<1000/period<<"Hz: coupled nominal output, fixed 2s PAUSE source, local powered hold after expiry, independent measured feedback, zero counted periodic new/delete\n";
 }
 void check_cycle_expiry_fault_revoke(){
  using namespace position_session;
- {CycleHarness h;h.node.position_submit(h.command(1));h.settle();
+ for(uint8_t policy:{1,2}){CycleHarness h;h.node.position_policy_=policy;h.node.position_submit(h.command(1));h.settle();
   for(unsigned i=0;i<40;++i)h.tick();
   const auto deadline=h.node.position_gate_.deadline();
   while(cycle_now_ns<deadline+30000000)h.tick();
-  assert(h.watchdog.reason==EXPIRED&&!h.watchdog.disabled&&h.watchdog.captured);
-  for(unsigned i=0;i<16;++i)assert(std::abs(h.watchdog.output.q[i]-h.measured[i])<1e-6);
+  assert(h.watchdog.reason==EXPIRED&&h.watchdog.disabled==(policy==1));
+  if(policy==2){assert(h.watchdog.captured);for(unsigned i=0;i<16;++i)assert(std::abs(h.watchdog.output.q[i]-h.measured[i])<1e-6);}
  }
  for(const bool fault:{false,true}){CycleHarness h;h.node.position_submit(h.command(1));h.settle();for(unsigned i=0;i<25;++i)h.tick();
   auto old=h.command(0);inspect_hold=true;inspect_entered=false;h.node.position_submit(old);while(!inspect_entered.load())std::this_thread::yield();
@@ -78,4 +97,4 @@ void check_cycle_expiry_fault_revoke(){
  }
  std::cout<<"PASS actual step/cache/watchdog source expiry captures measured pose; fault/revocation plus late worker/replay cannot reactivate output; fault/cycle reasons remain latched\n";
 }
-int main(){check_cycle_stream(20);check_cycle_stream(10);check_cycle_expiry_fault_revoke();}
+int main(){check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_expiry_fault_revoke();}
