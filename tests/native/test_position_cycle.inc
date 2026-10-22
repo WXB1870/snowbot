@@ -97,4 +97,28 @@ void check_cycle_expiry_fault_revoke(){
  }
  std::cout<<"PASS actual step/cache/watchdog source expiry captures measured pose; fault/revocation plus late worker/replay cannot reactivate output; fault/cycle reasons remain latched\n";
 }
-int main(){check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();}
+void check_cycle_powered_retake(){
+ using namespace position_session;CycleHarness h;h.node.position_policy_=1;
+ h.node.position_submit(h.command(1));h.settle();
+ for(unsigned i=0;i<400;++i){if(i%20==0)h.node.position_submit(h.command(0));h.tick();}
+ h.node.position_submit(h.command(2));for(unsigned i=0;i<2300;++i)h.tick();
+ assert(h.watchdog.reason==PAUSED&&!h.watchdog.disabled&&snapshot.hold_valid);
+ const auto held=h.watchdog.output.reference_position;
+ assert(std::abs(held[0]-h.measured[0])>.002);
+ // New ownership may change the goal, never jump the already-powered reference
+ // back to a displaced measurement. Compare the old measured-seed behavior too.
+ TargetSnapshot old_seed;assert(h.node.position_trajectory_.snapshot(cycle_now_ns,cycle_now_ns,1,10000000,h.measured,old_seed));
+ assert(std::abs(old_seed.q[0]-held[0])>.002);
+ ++h.session;h.sequence=0;h.node.position_submit(h.command(1,0.));
+ auto previous=held;bool adopted=false;
+ for(unsigned i=0;i<100;++i){
+  const auto output=h.tick();assert(!h.watchdog.disabled);
+  for(unsigned j=0;j<16;++j)assert(std::abs(output.reference_position[j]-previous[j])<.0003);
+  previous=output.reference_position;adopted|=output.session==h.session;
+ }
+ assert(adopted);h.node.position_submit(h.command(2));
+ for(unsigned i=0;i<2300;++i)h.tick();
+ assert(h.watchdog.reason==PAUSED&&!h.watchdog.disabled&&snapshot.hold_valid);
+ std::cout<<"PASS powered hold -> squeeze retake -> PAUSE: offset measurement never jumps reference, no expiry disable\n";
+}
+int main(){check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();check_cycle_powered_retake();}

@@ -73,7 +73,7 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
 // pointer escapes; background generation cannot race timeline reclamation.
 struct TargetSnapshot {
  std::array<double,joint_count> q{},v{},a{};
- int64_t effective_ros=0,effective_steady=0;uint64_t version=0;bool valid=false;
+ int64_t effective_ros=0,effective_steady=0;uint64_t version=0;bool valid=false,held_takeover=false;
 };
 // The original servo thread owns the bounded timeline and samples it. A separate
 // admission worker imports/certifies immutable segments and reclaims old ones.
@@ -92,7 +92,7 @@ class TrajectoryQueue {
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
 public:
  struct Prepared {
-  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false;
+  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
  std::array<double,joint_count> q{},v{},a{},j{};
@@ -134,10 +134,18 @@ public:
  // The worker uses a dated q/v/a seed, never a moving measured seed. Ordinary
  // targets cannot invalidate this snapshot; only a committed switch changes it.
  bool snapshot(int64_t ros,int64_t steady,uint8_t operation,int64_t budget,
-   const std::array<double,joint_count>& measured,TargetSnapshot& out)const noexcept {
+   const std::array<double,joint_count>& measured,TargetSnapshot& out,bool held_takeover=false)const noexcept {
   out={};if(budget<2000000||budget>50000000)return false;
   out.effective_ros=ros+budget;out.effective_steady=steady+budget;out.version=version_;
-  if(operation==1){out.q=measured;out.valid=true;return true;}
+  if(operation==1){
+   if(!held_takeover){out.q=measured;out.valid=true;return true;}
+   const auto* entry=at(out.effective_steady);
+   if(!entry||entry->source.operation!=2||(out.effective_steady-entry->start)*1e-9<entry->segment->end())return false;
+   std::array<double,joint_count> j{};
+   out.valid=entry->segment->sample_into((out.effective_steady-entry->start)*1e-9,
+     out.q.data(),out.v.data(),out.a.data(),j.data(),joint_count);
+   out.held_takeover=out.valid;return out.valid;
+  }
   out.effective_ros=out.effective_steady-clock_offset_;
   const auto* entry=at(out.effective_steady);if(!entry||out.effective_steady>=entry->deadline)return false;
   std::array<double,joint_count> j{};
@@ -163,7 +171,7 @@ public:
    Segment::target(limits,seed,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
   result->segment=std::make_unique<const Segment>(segment);result->source=source;result->id=source.sequence;
   result->effective=snapshot.effective_ros;result->q=snapshot.q;result->v=snapshot.v;result->a=snapshot.a;
-  result->target_stream=true;result->version=snapshot.version;return result;
+  result->target_stream=true;result->version=snapshot.version;result->held_takeover=snapshot.held_takeover;return result;
  }
  // Bounded, allocation-free commit on the original servo thread. Ownership is
  // transferred only after every check; retired segments are deleted by worker.
@@ -178,7 +186,17 @@ public:
   const int64_t start=input.effective+offset,deadline=source.expires+offset;
   if(source.operation==2 && !(input.segment->end()*1e9<double(deadline-start)))return "trajectory_stop_exceeds_deadline";
   if(source.operation==1){
-   for(unsigned i=0;i<joint_count;++i)if(std::abs(measured_v[i])>.01||std::abs(input.q[i]-measured_q[i])>.002||std::abs(input.v[i])>=1e-8||std::abs(input.a[i])>=1e-8)return "trajectory_takeover_seed";
+   std::array<double,joint_count> held{},hv{},ha{},hj{};
+   if(input.held_takeover){
+    const auto* old=at(start);
+    if(!old||old->source.operation!=2||(start-old->start)*1e-9<old->segment->end()||
+       !old->segment->sample_into((start-old->start)*1e-9,held.data(),hv.data(),ha.data(),hj.data(),joint_count))return "trajectory_hold_takeover";
+   }
+   for(unsigned i=0;i<joint_count;++i){
+    if(std::abs(measured_v[i])>.01||std::abs(input.q[i]-measured_q[i])>(input.held_takeover?.25:.002)||
+       std::abs(input.v[i])>=1e-8||std::abs(input.a[i])>=1e-8)return "trajectory_takeover_seed";
+    if(input.held_takeover&&std::abs(input.q[i]-held[i])>=1e-6)return "trajectory_hold_discontinuous";
+   }
   }else{
    if(!count_ || start<=entries_[count_-1].start || start>=entries_[count_-1].deadline)return "trajectory_order_or_takeover";
    for(unsigned i=0;i<joint_count;++i)if(input.velocity[i]!=velocity_[i]||input.acceleration[i]!=acceleration_[i]||input.jerk[i]!=jerk_[i])return "trajectory_limits_changed";

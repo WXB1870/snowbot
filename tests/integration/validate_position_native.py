@@ -64,7 +64,14 @@ void check_position_pdo_output(){
  auto disable_csp=[&](){for(int m=0;m<20;++m){if(!csp_rx_[m])continue;
 '''+guard+r'''
  }};
- auto written=apply();assert(written==controlled_mask);
+ // The exact final-write block must replace stale legacy caches during enable,
+ // while withholding the output/hold acknowledgement until all axes are enabled.
+ enable_step.fill(0);session_watchdog_.output.kp.fill(123);session_watchdog_.output.kd.fill(45);session_watchdog_.output.torque.fill(6);
+ auto written=apply();assert(written==0);
+ assert(pt[0].target_position==session_watchdog_.output.q[0]&&pt[0].KP==123&&pt[0].KD==45&&pt[0].target_torque==6);
+ assert(csp[18].position==csp_counts(.12f)&&csp[19].position==csp_counts(-.08f));
+ session_watchdog_.report_hold(obs,written);assert(!obs.hold_valid);
+ enable_step.fill(EN_STEP*6);written=apply();assert(written==controlled_mask);
  assert(csp[18].position==csp_counts(.12f)&&csp[19].position==csp_counts(-.08f));
  assert(csp[18].velocity==csp_counts(.03f));
  assert(pt[7].target_position==99&&pt[15].target_position==99&&csp[16].position==99&&csp[17].position==99);

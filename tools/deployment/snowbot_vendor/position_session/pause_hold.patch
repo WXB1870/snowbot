@@ -36,3 +36,81 @@
 + position_output_.nominal_hold=position_local_hold_ && position_gate_.generation()==position_output_.admission_generation && position_output_.failure_reason==0;
   EtherCAT_positionOutput(position_output_);
  }
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -1004,5 +1004,10 @@
+     //-----------------------------------------------
+-    // 初始使能: 跑 200 个空指令周期让 CiA402 使能序列完成 (200ms)
++    // Target-stream startup must not home or briefly enable a stale zero target.
++    // The write-enabled adapter performs the measured-position startup hold.
++    if(position_reference_mode_==2){
++        bool off[TOTAL_SLAVES]={};EtherCAT_setPerMotorEnable(off);EtherCAT_setMotorEnable(false);
++    }
++    // Collect initial PDO feedback before any target-stream enable request.
+     {
+         auto zero_cmd = JntDesMsg_inContainer_Outp_v1();
+         for(int i = 0; i < 200; i++){
+@@ -1033,7 +1038,7 @@
+     // at its mechanical zero. EtherCAT OP state is the hardware-ready check.
+     bool arm_startup_ready = EtherCAT_isOperational();
+     bool needRetZero = false;
+-    if(hasFeedback){
++    if(hasFeedback && position_reference_mode_!=2){
+         for(int i = 0; i < LARMDOF; i++){
+             if(std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_zeroPos[i]) > ZERO_POS_THRESHOLD){
+                 needRetZero = true;
+@@ -1222,7 +1227,7 @@
+     //-----------------------------------------------
+     // 头部与腰部 CSP 模式启动回零 (Alias 17~18: 头部, 19~20: 躯干)
+     bool head_torso_startup_ready = true;
+-    if (!sigInterrupt.load()) {
++    if (!sigInterrupt.load() && position_reference_mode_!=2) {
+         bool head_torso_need_homing = false;
+         float h_fb[HEAD_MOTORS] = {0}, t_fb[TORSO_MOTORS] = {0};
+         float cur_p, cur_s, cur_c; uint16_t cur_st;
+@@ -1298,13 +1303,13 @@
+         } else {
+             std::cout << "头/腰电机已在零位附近，跳过 CSP 回零。" << std::endl;
+         }
+-    } else {
++    } else if (sigInterrupt.load()) {
+         head_torso_startup_ready = false;
+         std::cout << "检测到退出请求，跳过头/腰启动回零，直接进入关机回零。" << std::endl;
+     }
+
+     if (arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load()) {
+-        notify_systemd("READY=1\nSTATUS=Startup homing complete; arm brakes engaged");
++        notify_systemd(position_reference_mode_==2?"READY=1\nSTATUS=PDO ready; awaiting write-enabled in-place hold":"READY=1\nSTATUS=Startup homing complete; arm brakes engaged");
+         std::cout << "[systemd] Servo startup ready; downstream services may start." << std::endl;
+     } else {
+         notify_systemd("STATUS=Startup homing failed; downstream services blocked");
+@@ -2416,7 +2421,8 @@
+  const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
+  const auto source=position_session::meta(position_target_pending_->meta);
+  position_session::TargetSnapshot snapshot;
+- if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
++ if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot,
++   position_local_hold_ && position_gate_.generation()==position_output_.admission_generation && !position_output_.failure_reason))){
+   if(source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
+   position_v2_.rejected.reject(source,"target_snapshot_or_expired");position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
+   position_cycle_reason_=position_v2_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -791,7 +791,8 @@
+     if(session_packet.selected && !session_watchdog_.disabled){
+         const auto& cmd=session_watchdog_.output;
+         for(unsigned i=0;i<position_session::joint_count;++i){const unsigned m=position_session::position_slot(i);
+-            if(enable_step[m]<EN_STEP*6)continue;
++            // Never expose legacy targets/gains between enable and session control.
++            // Startup's session target is the captured measured pose, with v=0.
+             if(is_csp_motor_[m]){
+                 if(!csp_rx_[m])continue;
+                 csp_rx_[m]->position=position_session::csp_counts(cmd.q[i]);
+@@ -801,6 +802,6 @@
+                 m_rx_[m]->target_position=cmd.q[i];m_rx_[m]->target_speed=cmd.v[i];
+                 m_rx_[m]->KP=cmd.kp[i];m_rx_[m]->KD=cmd.kd[i];m_rx_[m]->target_torque=cmd.torque[i];
+             }
+-            position_written|=1u<<m;
++            if(enable_step[m]>=EN_STEP*6)position_written|=1u<<m;
+         }
+     }
