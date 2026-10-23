@@ -127,4 +127,32 @@ void allowed_limit_seeds(){
  }
  std::cout<<"PASS all 16 expanded boundary seeds; beyond 0.1 degree rejected; actual R2 measurement retained; 0.03/0.3 limits\n";
 }
-int main(){allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+void adaptive_target_generation(){
+ using namespace bindu::execution;
+ TrajectoryQueue queue;auto measured=seed(),goal=measured;goal[0]+=.12;
+ std::array<double,16> speed{};Wire w;w.segment_id=1;
+ int64_t now=1000000000;Meta source{808,1,now,now+200000000,1};TargetSnapshot snapshot;
+ assert(queue.snapshot(now,now,1,10000000,measured,snapshot));
+ auto p=TrajectoryQueue::prepare_target(w,source,snapshot,goal);
+ assert(p->segment->pieces()>2);
+ JointLimits limits;for(unsigned i=0;i<16;++i)limits.push_back({lower[i],upper[i],.25,.5,162.});
+ JointState initial;initial.q.assign(measured.begin(),measured.end());initial.v.resize(16);initial.a.resize(16);
+ const auto baseline=PreparedSegment::target(limits,initial,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
+ assert(p->segment->sample(.02).q[0]>baseline.sample(.02).q[0]+1e-7);
+ assert(!queue.commit(*p,now+1000000,now+1000000,measured,speed));queue.reclaim();
+ for(int tick=0;tick<=5000;++tick){
+  now=1000000000LL+tick*1000000LL;
+  if(tick&&tick%20==0){
+   source={808,++w.segment_id,now,now+200000000,0};
+   assert(queue.snapshot(now,now,0,10000000,measured,snapshot));
+   auto next=TrajectoryQueue::prepare_target(w,source,snapshot,goal);
+   assert(!queue.commit(*next,now+1000000,now+1000000,measured,speed));queue.reclaim();
+  }
+  periodic=true;assert(queue.sample(now));periodic=false;bounded(queue);
+ }
+ assert(std::abs(queue.q[0]-goal[0])<1e-5);
+ assert(std::abs(queue.v[0])<1e-5&&std::abs(queue.a[0])<1e-5);
+ assert(!allocated&&!deleted);
+ std::cout<<"PASS adaptive target prefix is active; faster initial response; repeated fixed target converges; shared queue sampling allocates/frees zero memory\n";
+}
+int main(){adaptive_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}

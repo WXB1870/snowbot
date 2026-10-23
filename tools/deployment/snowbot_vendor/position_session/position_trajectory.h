@@ -168,7 +168,7 @@ public:
   }
   JointState seed;seed.q.assign(snapshot.q.begin(),snapshot.q.end());seed.v.assign(snapshot.v.begin(),snapshot.v.end());seed.a.assign(snapshot.a.begin(),snapshot.a.end());seed.j.assign(joint_count,0.);
   const auto segment=source.operation==2?Segment::stop(limits,seed,0.,(source.expires-snapshot.effective_ros)*1e-9):
-   Segment::target(limits,seed,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
+   Segment::stream_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
   result->segment=std::make_unique<const Segment>(segment);result->source=source;result->id=source.sequence;
   result->effective=snapshot.effective_ros;result->q=snapshot.q;result->v=snapshot.v;result->a=snapshot.a;
   result->target_stream=true;result->version=snapshot.version;result->held_takeover=snapshot.held_takeover;return result;
