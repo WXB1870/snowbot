@@ -138,12 +138,17 @@ void target_trend_history(){
  auto update=[&](int64_t now){source={707,++wire.segment_id,now,now+200000000,0};assert(queue.snapshot(now,now,0,10000000,measured,snapshot));return TrajectoryQueue::prepare_target(wire,source,snapshot,goal);};
  goal[0]+=.003;auto moving=update(base+20000000);
  assert(moving->trend.velocity[0]>0&&moving->trend.velocity[0]<.2);
+ // The takeover segment is at rest, so a longer switch budget has the same
+ // q/v/a seed. Delivery timing must not alter the source target derivative.
+ auto delayed_snapshot=snapshot;delayed_snapshot.effective_ros+=7000000;delayed_snapshot.effective_steady+=7000000;
+ auto delayed=TrajectoryQueue::prepare_target(wire,source,delayed_snapshot,goal);
+ assert(delayed->trend.velocity==moving->trend.velocity);
  for(unsigned i=1;i<16;++i)assert(moving->trend.velocity[i]==0.);
  assert(!queue.commit(*moving,base+21000000,base+21000000,measured,speed));queue.reclaim();
  goal[0]+=.003;auto late=update(base+40000000);const auto committed=snapshot.trend;
  assert(std::string(queue.commit(*late,base+52000000,base+52000000,measured,speed))=="target_generation_late");
  assert(queue.snapshot(base+60000000,base+60000000,0,10000000,measured,snapshot));
- assert(snapshot.trend.effective==committed.effective&&snapshot.trend.goal==committed.goal&&snapshot.trend.velocity==committed.velocity);
+ assert(snapshot.trend.stamp==committed.stamp&&snapshot.trend.goal==committed.goal&&snapshot.trend.velocity==committed.velocity);
  goal=committed.goal;auto fixed=update(base+60000000);assert(fixed->trend.velocity==speed);
  assert(!queue.commit(*fixed,base+61000000,base+61000000,measured,speed));queue.reclaim();
  goal[0]+=.003;auto gap=update(base+180000000);assert(gap->trend.velocity==speed);

@@ -72,7 +72,7 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
 // Fixed-size history travels with the committed segment, never pending input.
 struct TargetTrend {
  std::array<double,joint_count> goal{},velocity{};
- int64_t effective=0;uint64_t session=0;
+ int64_t stamp=0;uint64_t session=0;
 };
 // Snapshot at one future switch instant, taken by the sampling owner. No segment
 // pointer escapes; background generation cannot race timeline reclamation.
@@ -177,10 +177,10 @@ public:
   JointState seed;seed.q.assign(snapshot.q.begin(),snapshot.q.end());seed.v.assign(snapshot.v.begin(),snapshot.v.end());seed.a.assign(snapshot.a.begin(),snapshot.a.end());seed.j.assign(joint_count,0.);
   std::vector<double> hint(joint_count,0.);
   if(source.operation!=2){
-   result->trend.goal=goal;result->trend.effective=snapshot.effective_ros;result->trend.session=source.session;
-   const double dt=(snapshot.effective_ros-snapshot.trend.effective)*1e-9;
+   result->trend.goal=goal;result->trend.stamp=source.stamp;result->trend.session=source.session;
+   const double dt=(source.stamp-snapshot.trend.stamp)*1e-9;
    if(source.operation==0&&snapshot.trend.session==source.session&&dt>=.005&&dt<=.1){
-    // Derive only from committed goals at their switch instants. Reserve speed
+    // Derive only from committed goals at their original source times. Reserve speed
     // headroom for catch-up; suppress timing noise in the derivative, not q.
     for(unsigned i=0;i<joint_count;++i){
      const double raw=std::clamp((goal[i]-snapshot.trend.goal[i])/dt,-.8*limits[i].velocity,.8*limits[i].velocity);
