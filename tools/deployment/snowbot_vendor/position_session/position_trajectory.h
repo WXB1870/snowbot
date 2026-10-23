@@ -69,9 +69,15 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
  return nullptr;
 }
 
+// Fixed-size history travels with the committed segment, never pending input.
+struct TargetTrend {
+ std::array<double,joint_count> goal{},velocity{};
+ int64_t effective=0;uint64_t session=0;
+};
 // Snapshot at one future switch instant, taken by the sampling owner. No segment
 // pointer escapes; background generation cannot race timeline reclamation.
 struct TargetSnapshot {
+ TargetTrend trend{};
  std::array<double,joint_count> q{},v{},a{};
  int64_t effective_ros=0,effective_steady=0;uint64_t version=0;bool valid=false,held_takeover=false;
 };
@@ -80,7 +86,7 @@ struct TargetSnapshot {
 // Sampling/commit do not plan, allocate, free trajectories, log or renew TTL.
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
- struct Entry {std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false;};
+ struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false;};
  std::array<Entry,8> entries_{};unsigned count_=0;const Entry* selected_=nullptr;int64_t clock_offset_=0;uint64_t version_=0;
  static_assert(std::atomic<const Segment*>::is_always_lock_free,"lock-free retirement required");
  std::array<std::atomic<const Segment*>,8> retired_{};
@@ -92,6 +98,7 @@ class TrajectoryQueue {
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
 public:
  struct Prepared {
+  TargetTrend trend{};
   std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
@@ -148,6 +155,7 @@ public:
   }
   out.effective_ros=out.effective_steady-clock_offset_;
   const auto* entry=at(out.effective_steady);if(!entry||out.effective_steady>=entry->deadline)return false;
+  if(entry->target_stream&&entry->source.operation!=2)out.trend=entry->trend;
   std::array<double,joint_count> j{};
   out.valid=entry->segment->sample_into((out.effective_steady-entry->start)*1e-9,
     out.q.data(),out.v.data(),out.a.data(),j.data(),joint_count);return out.valid;
@@ -167,8 +175,22 @@ public:
    limits.push_back({lower[i],upper[i],v,a,j});result->velocity[i]=v;result->acceleration[i]=a;result->jerk[i]=j;
   }
   JointState seed;seed.q.assign(snapshot.q.begin(),snapshot.q.end());seed.v.assign(snapshot.v.begin(),snapshot.v.end());seed.a.assign(snapshot.a.begin(),snapshot.a.end());seed.j.assign(joint_count,0.);
+  std::vector<double> hint(joint_count,0.);
+  if(source.operation!=2){
+   result->trend.goal=goal;result->trend.effective=snapshot.effective_ros;result->trend.session=source.session;
+   const double dt=(snapshot.effective_ros-snapshot.trend.effective)*1e-9;
+   if(source.operation==0&&snapshot.trend.session==source.session&&dt>=.005&&dt<=.1){
+    // Derive only from committed goals at their switch instants. Reserve speed
+    // headroom for catch-up; suppress timing noise in the derivative, not q.
+    for(unsigned i=0;i<joint_count;++i){
+     const double raw=std::clamp((goal[i]-snapshot.trend.goal[i])/dt,-.8*limits[i].velocity,.8*limits[i].velocity);
+     hint[i]=goal[i]==snapshot.trend.goal[i]?0.:snapshot.trend.velocity[i]+dt/(dt+.04)*(raw-snapshot.trend.velocity[i]);
+    }
+   }
+   std::copy(hint.begin(),hint.end(),result->trend.velocity.begin());
+  }
   const auto segment=source.operation==2?Segment::stop(limits,seed,0.,(source.expires-snapshot.effective_ros)*1e-9):
-   Segment::stream_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
+   Segment::tracking_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),hint,0.,30.,5.);
   result->segment=std::make_unique<const Segment>(segment);result->source=source;result->id=source.sequence;
   result->effective=snapshot.effective_ros;result->q=snapshot.q;result->v=snapshot.v;result->a=snapshot.a;
   result->target_stream=true;result->version=snapshot.version;result->held_takeover=snapshot.held_takeover;return result;
@@ -213,7 +235,7 @@ public:
    if(slot.compare_exchange_strong(empty,entries_[i].segment.get(),std::memory_order_release,std::memory_order_relaxed)){entries_[i].segment.release();break;}}
   for(unsigned i=0;i<kept;++i)if(remove)entries_[i]=std::move(entries_[i+remove]);
   count_=kept;auto& entry=entries_[count_++];entry.segment=std::move(input.segment);entry.source=source;
-  entry.target_stream=input.target_stream;entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
+  entry.trend=input.trend;entry.target_stream=input.target_stream;entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
   velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;++version_;return nullptr;
  }
  // Non-periodic convenience for native fixtures and offline callers.

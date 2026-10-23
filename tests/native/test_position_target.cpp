@@ -127,18 +127,47 @@ void allowed_limit_seeds(){
  }
  std::cout<<"PASS all 16 expanded boundary seeds; beyond 0.1 degree rejected; actual R2 measurement retained; 0.03/0.3 limits\n";
 }
-void adaptive_target_generation(){
+void target_trend_history(){
+ TrajectoryQueue queue;auto measured=seed(),goal=measured;std::array<double,16> speed{};
+ Wire wire;wire.segment_id=1;const int64_t base=1000000000;
+ Meta source{707,1,base,base+200000000,1};TargetSnapshot snapshot;
+ assert(queue.snapshot(base,base,1,10000000,measured,snapshot));
+ auto first=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
+ assert(first->trend.velocity==speed);
+ assert(!queue.commit(*first,base+1000000,base+1000000,measured,speed));
+ auto update=[&](int64_t now){source={707,++wire.segment_id,now,now+200000000,0};assert(queue.snapshot(now,now,0,10000000,measured,snapshot));return TrajectoryQueue::prepare_target(wire,source,snapshot,goal);};
+ goal[0]+=.003;auto moving=update(base+20000000);
+ assert(moving->trend.velocity[0]>0&&moving->trend.velocity[0]<.2);
+ for(unsigned i=1;i<16;++i)assert(moving->trend.velocity[i]==0.);
+ assert(!queue.commit(*moving,base+21000000,base+21000000,measured,speed));queue.reclaim();
+ goal[0]+=.003;auto late=update(base+40000000);const auto committed=snapshot.trend;
+ assert(std::string(queue.commit(*late,base+52000000,base+52000000,measured,speed))=="target_generation_late");
+ assert(queue.snapshot(base+60000000,base+60000000,0,10000000,measured,snapshot));
+ assert(snapshot.trend.effective==committed.effective&&snapshot.trend.goal==committed.goal&&snapshot.trend.velocity==committed.velocity);
+ goal=committed.goal;auto fixed=update(base+60000000);assert(fixed->trend.velocity==speed);
+ assert(!queue.commit(*fixed,base+61000000,base+61000000,measured,speed));queue.reclaim();
+ goal[0]+=.003;auto gap=update(base+180000000);assert(gap->trend.velocity==speed);
+ assert(!queue.commit(*gap,base+181000000,base+181000000,measured,speed));queue.reclaim();
+ source={707,++wire.segment_id,base+200000000,base+2200000000LL,2};
+ assert(queue.snapshot(source.stamp,source.stamp,2,10000000,measured,snapshot));
+ auto pause=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);assert(pause->trend.session==0);
+ assert(!queue.commit(*pause,source.stamp+1000000,source.stamp+1000000,measured,speed));queue.reclaim();
+ assert(queue.snapshot(base+220000000,base+220000000,0,10000000,measured,snapshot));assert(snapshot.trend.session==0);
+ assert(queue.snapshot(base+230000000,base+230000000,1,10000000,measured,snapshot));assert(snapshot.trend.session==0);
+ std::cout<<"PASS committed target trend only; first/fixed/gap/PAUSE/takeover reset; late result cannot contaminate history\n";
+}
+void velocity_target_generation(){
  using namespace bindu::execution;
  TrajectoryQueue queue;auto measured=seed(),goal=measured;goal[0]+=.12;
  std::array<double,16> speed{};Wire w;w.segment_id=1;
  int64_t now=1000000000;Meta source{808,1,now,now+200000000,1};TargetSnapshot snapshot;
  assert(queue.snapshot(now,now,1,10000000,measured,snapshot));
  auto p=TrajectoryQueue::prepare_target(w,source,snapshot,goal);
- assert(p->segment->pieces()>2);
+ assert(p->segment->pieces()==1);
  JointLimits limits;for(unsigned i=0;i<16;++i)limits.push_back({lower[i],upper[i],.25,.5,162.});
  JointState initial;initial.q.assign(measured.begin(),measured.end());initial.v.resize(16);initial.a.resize(16);
  const auto baseline=PreparedSegment::target(limits,initial,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
- assert(p->segment->sample(.02).q[0]>baseline.sample(.02).q[0]+1e-7);
+ assert(std::abs(p->segment->sample(.02).q[0]-baseline.sample(.02).q[0])<1e-12);
  assert(!queue.commit(*p,now+1000000,now+1000000,measured,speed));queue.reclaim();
  for(int tick=0;tick<=5000;++tick){
   now=1000000000LL+tick*1000000LL;
@@ -153,6 +182,6 @@ void adaptive_target_generation(){
  assert(std::abs(queue.q[0]-goal[0])<1e-5);
  assert(std::abs(queue.v[0])<1e-5&&std::abs(queue.a[0])<1e-5);
  assert(!allocated&&!deleted);
- std::cout<<"PASS adaptive target prefix is active; faster initial response; repeated fixed target converges; shared queue sampling allocates/frees zero memory\n";
+ std::cout<<"PASS first target uses certified position curve; repeated fixed target converges; shared queue sampling allocates/frees zero memory\n";
 }
-int main(){adaptive_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+int main(){target_trend_history();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
