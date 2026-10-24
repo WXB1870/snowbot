@@ -140,7 +140,7 @@
   if(!packet->command.if_streaming_joint_position || packet->command.ctl_trans_mod!=3){position_rejection_="position_mode_required";return;}
   for(double q:packet->waist_position)if(!std::isfinite(q)){position_rejection_="nonfinite_waist_target";return;}
 - if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
-+ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
++ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl,packet->meta.reference_mode==2?position_session::maximum_target_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
   auto native=std::make_shared<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(packet->command);
   position_dispatch_=true;upperMonitor_msg_callback(native);position_dispatch_=false;
 - if(m.operation!=0){
@@ -173,7 +173,7 @@
   for(unsigned i=0;i<7;++i)if(!std::isfinite(packet->command.l_arm_position[i])||!std::isfinite(packet->command.r_arm_position[i])){position_rejection_="nonfinite_target";return;}
   for(double q:packet->waist_position)if(!std::isfinite(q)){position_rejection_="nonfinite_waist_target";return;}
 - if(!position_gate_.accepts(m,now,steady)){position_rejection_=position_gate_.rejection;return;}
-+ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
++ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl,packet->meta.reference_mode==2?position_session::maximum_target_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
   auto native=std::make_shared<snowbot_ctl_msgs::msg::JointPositionCommand>(packet->command);
 - if(m.operation==2)for(unsigned i=0;i<7;++i){native->l_arm_position[i]=position_feedback_.q[i];native->r_arm_position[i]=position_feedback_.q[i+7];}
 - for(unsigned i=0;i<2;++i)position_waist_target_[i]=m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
@@ -294,9 +294,9 @@
 +  position_session::ServoCommand checked;
 +  const auto error=position_session::inspect_servo_command(*packet,position_origin_packet_.get(),context,checked);
 +  if(error||packet->meta.reference_mode!=2||
-+     (!checked.derived&&!cancel_takeover&&!position_gate_.accepts(source,ros,steady,position_session::maximum_target_pause_ttl))||
-+     (cancel_takeover&&!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl))||
-+     (checked.derived&&(!position_gate_.live(steady)||!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||packet->frame_sequence<=position_v2_.frame))){
++     (!checked.derived&&!cancel_takeover&&!position_gate_.accepts(source,ros,steady,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl))||
++     (cancel_takeover&&!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl))||
++     (checked.derived&&(!position_gate_.live(steady)||!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl)||packet->frame_sequence<=position_v2_.frame))){
 +   position_target_error_.reason(error?error:"target_identity_or_order");position_cycle_reason_=position_target_error_.c_str();return;
 +  }
 +  if(cancel_takeover){
@@ -341,7 +341,7 @@
 + const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
 + const auto source=position_session::meta(position_target_pending_->meta);
 + position_session::TargetSnapshot snapshot;
-+ if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
++ if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
 +  if(source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
 +  position_v2_.rejected.reject(source,"target_snapshot_or_expired");position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
 +  position_cycle_reason_=position_v2_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
@@ -359,7 +359,7 @@
     position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load(),!impedance_enable_,position_policy_,
     position_feedback_,this->now().nanoseconds(),position_session::steady_ns(),position_gate_,position_trajectory_,position_output_,position_interval_):result->error.c_str();
 - if(error){
-+ if(error&&position_reference_mode_==2&&((std::strcmp(error,"target_generation_late")==0&&position_session::fresh(source,this->now().nanoseconds(),position_session::maximum_target_pause_ttl))||std::strcmp(error,"target_superseded_by_pause")==0)){
++ if(error&&position_reference_mode_==2&&((std::strcmp(error,"target_generation_late")==0&&position_session::fresh(source,this->now().nanoseconds(),position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl))||std::strcmp(error,"target_superseded_by_pause")==0)){
 +  // A late ordinary result is retried from a new dated snapshot if no newer
 +  // pending target exists. New input never cancels a completed valid result.
 +  if(!position_target_pending_&&result->context.barrier==position_target_barrier_&&std::strcmp(error,"target_generation_late")==0)position_target_pending_=result->packet;

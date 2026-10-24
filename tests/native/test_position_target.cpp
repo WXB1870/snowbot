@@ -80,9 +80,20 @@ void stale_and_invalid(){
 }
 void target_pause_window(){
  using namespace bindu::execution;
- static_assert(maximum_ttl==200000000&&maximum_target_pause_ttl==2000000000LL);
+ static_assert(maximum_ttl==200000000&&maximum_target_ttl==300000000&&maximum_target_pause_ttl==2000000000LL);
  const int64_t now=1000000000;Meta take{44,1,now,now+200000000,1};assert(fresh(take,now));
  auto over=take;++over.expires;assert(!fresh(over,now,maximum_target_pause_ttl));
+ auto target=take;target.expires=target.stamp+maximum_target_ttl;
+ assert(!fresh(target,now,maximum_target_pause_ttl));
+ assert(fresh(target,target.expires-1,maximum_target_pause_ttl,maximum_target_ttl));
+ assert(!fresh(target,target.expires,maximum_target_pause_ttl,maximum_target_ttl));
+ auto target_over=target;++target_over.expires;assert(!fresh(target_over,now,maximum_target_pause_ttl,maximum_target_ttl));
+ Gate target_gate;assert(!target_gate.accepts(target,now,now,maximum_target_pause_ttl));
+ assert(target_gate.accepts(target,now,now,maximum_target_pause_ttl,maximum_target_ttl));target_gate.commit(target,now,now);
+ const auto target_deadline=target_gate.deadline();
+ for(unsigned i=0;i<300;++i){assert(target_gate.live(now+i*1000000));assert(target_gate.deadline()==target_deadline);}
+ assert(!target_gate.live(target_deadline));assert(!target_gate.accepts(target,now+10000000,now+10000000,maximum_target_pause_ttl,maximum_target_ttl));
+ assert(target_gate.deadline()==target_deadline);
  Meta pause{44,2,now+20000000,now+2020000000,2};assert(!fresh(pause,pause.stamp));assert(fresh(pause,pause.stamp,maximum_target_pause_ttl));
  assert(!fresh(pause,pause.expires,maximum_target_pause_ttl));auto too_long=pause;++too_long.expires;assert(!fresh(too_long,too_long.stamp,maximum_target_pause_ttl));
  Gate gate;assert(gate.accepts(take,now,now));gate.commit(take,now,now);
@@ -100,7 +111,7 @@ void target_pause_window(){
  }
  assert(feasible>1000&&impossible>0);
  TargetSnapshot unsafe;unsafe.q=seed();unsafe.q[0]=upper[0]-.0001;unsafe.v[0]=.25;unsafe.valid=true;unsafe.effective_ros=unsafe.effective_steady=pause.stamp+10000000;rejects([&]{TrajectoryQueue::prepare_target(w,pause,unsafe,unsafe.q);});
- std::cout<<"PASS distinct fixed 2s target PAUSE; ordinary/legacy remain 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
+ std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 300ms, legacy 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
 }
 
 void allowed_limit_seeds(){
@@ -237,13 +248,13 @@ int replay_targets(bool rigid){
  TrajectoryQueue queue;unsigned next=0,accepted=0,fallback=0,samples=0;uint64_t sequence=0;bool paused=false;double ratio=0.;
  const auto ns=[](double x){return int64_t(std::llround(x*1e9));};const int64_t base=10000000000LL;
  for(int tick=0;tick<=int(std::ceil((times.back()+1.5)*1000));++tick){const double t=tick*.001;const int64_t now=base+ns(t);
-  while(next<count&&times[next]<=t+1e-9){Meta source{1234,++sequence,base+ns(stamps[next]),base+ns(stamps[next]) +200000000,sequence==1?uint8_t(1):uint8_t(0)};wire.segment_id=sequence;
+  while(next<count&&times[next]<=t+1e-9){Meta source{1234,++sequence,base+ns(stamps[next]),base+ns(stamps[next])+maximum_target_ttl,sequence==1?uint8_t(1):uint8_t(0)};wire.segment_id=sequence;
    TargetSnapshot snapshot;assert(queue.snapshot(now,now,source.operation,10000000,measured,snapshot));
    auto prepared=TrajectoryQueue::prepare_target(wire,source,snapshot,goals[next],maxv,maxa,maxj);
    if(rigid){accepted+=prepared->prediction.accepted;fallback+=!prepared->prediction.accepted;}
    periodic=true;const auto error=queue.commit(*prepared,now+1000000,now+1000000,measured,speed);periodic=false;assert(!error);queue.reclaim();++next;
   }
-  if(sequence&&!paused&&t>=stamps.back()+.14){Meta pause{1234,++sequence,now,now+2000000000,2};wire.version=2;wire.segment_id=sequence;TargetSnapshot snapshot;
+  if(sequence&&!paused&&t>=stamps.back()+maximum_target_ttl*1e-9-.06){Meta pause{1234,++sequence,now,now+2000000000,2};wire.version=2;wire.segment_id=sequence;TargetSnapshot snapshot;
    assert(queue.snapshot(now,now,2,10000000,measured,snapshot));auto stop=TrajectoryQueue::prepare_target(wire,pause,snapshot,measured,maxv,maxa,maxj);
    periodic=true;const auto error=queue.commit(*stop,now+1000000,now+1000000,measured,speed);periodic=false;assert(!error);queue.reclaim();paused=true;
   }

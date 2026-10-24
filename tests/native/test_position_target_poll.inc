@@ -8,7 +8,7 @@ void check_target_production(){
  auto packet=[&](uint64_t sequence,uint8_t operation=0,uint64_t session=71){
   node.feedback();auto p=std::make_shared<Packet>();const auto t=steady_ns();
   p->meta.session=session;p->meta.sequence=sequence;p->meta.operation=operation;p->meta.reference_mode=2;
-  p->meta.source_stamp_ns=t;p->meta.expires_at_ns=t+200000000;p->meta.feedback_boot_id=node.position_feedback_.boot;p->meta.feedback_sample=node.position_feedback_.sample;p->meta.middle_instance_id=32;
+  p->meta.source_stamp_ns=t;p->meta.expires_at_ns=t+(operation==2?maximum_target_pause_ttl:maximum_target_ttl);p->meta.feedback_boot_id=node.position_feedback_.boot;p->meta.feedback_sample=node.position_feedback_.sample;p->meta.middle_instance_id=32;
   for(unsigned i=0;i<7;++i){p->command.l_position[i]=node.position_feedback_.q[i];p->command.r_position[i]=node.position_feedback_.q[i+7];p->command.l_kp[i]=p->command.r_kp[i]=40;p->command.l_kd[i]=p->command.r_kd[i]=2;}
   p->command.l_position[0]+=.002;p->waist_position={node.position_feedback_.q[14],node.position_feedback_.q[15]};
   p->trajectory.version=2;p->trajectory.segment_id=sequence;p->trajectory.max_velocity.fill(.25);p->trajectory.max_acceleration.fill(.5);p->trajectory.max_jerk.fill(162);return p;
@@ -41,7 +41,7 @@ void check_target_production(){
  assert(saw_first&&saw_latest);
  // A single compute tail retries its original source without TTL renewal; next inputs recover.
  uint64_t seq=32;
- for(const int delay:{12,25,100}){
+ for(const int delay:{12,25,100,210}){
   auto delayed=packet(seq++);const auto expires=delayed->meta.expires_at_ns;inspect_hold=true;inspect_entered=false;node.position_submit(delayed);while(!inspect_entered.load())std::this_thread::yield();
   std::this_thread::sleep_for(std::chrono::milliseconds(delay));tick();inspect_hold=false;drain();
   assert(node.position_gate_.last().sequence==delayed->meta.sequence&&node.position_gate_.last().expires==expires);
@@ -76,7 +76,7 @@ void check_target_production(){
  assert(merged_count>=63&&!node.position_gate_.live(steady_ns())&&std::string(node.position_cycle_reason_)=="target_retirement_full");
  inspect_hold=false;drain();assert(!node.position_gate_.live(steady_ns()));
  assert(!periodic_allocations&&!periodic_deletions);
- std::cout<<"PASS actual target submit/dispatch/poll: derived auxiliary updates without replan/TTL renewal, bounded latest merge, no ordinary starvation, 12/25/100ms single-tail retry, PAUSE priority including late PAUSE, original expiry, revocation, fixed-capacity/error handling, zero periodic new/delete\n";
+ std::cout<<"PASS actual target submit/dispatch/poll: derived auxiliary updates without replan/TTL renewal, bounded latest merge, no ordinary starvation, 12/25/100/210ms single-tail retry, PAUSE priority including late PAUSE, original expiry, revocation, fixed-capacity/error handling, zero periodic new/delete\n";
 }
 
 void check_bootstrap_interrupts(){

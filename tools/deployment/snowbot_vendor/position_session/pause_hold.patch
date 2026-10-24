@@ -42,8 +42,8 @@
   const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
   const auto source=position_session::meta(position_target_pending_->meta);
   position_session::TargetSnapshot snapshot;
-- if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
-+ if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot,
+- if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot))){
++ if(!position_session::fresh(source,ros,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl)||( !(source==position_gate_.last())&&!position_trajectory_.snapshot(ros,steady,source.operation,position_target_prepare_ns_,position_feedback_.q,snapshot,
 +   position_local_hold_ && position_gate_.generation()==position_output_.admission_generation && !position_output_.failure_reason))){
    if(source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
    position_v2_.rejected.reject(source,"target_snapshot_or_expired");position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;

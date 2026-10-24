@@ -302,10 +302,10 @@ struct ServoAdmissionState {
   const bool derived=source==gate.last();
   if(derived!=command.derived)return "admission_source_changed";
   if(derived){
-   if(!gate.live(steady)||!fresh(source,ros,command.target_stream?maximum_target_pause_ttl:maximum_ttl)||command.frame<=frame)return "duplicate_or_expired_frame";
+   if(!gate.live(steady)||!fresh(source,ros,command.target_stream?maximum_target_pause_ttl:maximum_ttl,command.target_stream?maximum_target_ttl:maximum_ttl)||command.frame<=frame)return "duplicate_or_expired_frame";
   }else{
    if(source.operation!=1 && !command.identity.authority(identity))return "source_authority_changed";
-   if(!gate.accepts(source,ros,steady,command.target_stream?maximum_target_pause_ttl:maximum_ttl))return gate.rejection;
+   if(!gate.accepts(source,ros,steady,command.target_stream?maximum_target_pause_ttl:maximum_ttl,command.target_stream?maximum_target_ttl:maximum_ttl))return gate.rejection;
    if(!prepared || !(prepared->source==source))return "prepared_source_mismatch";
    prepared->admission=gate.generation()+1;
    if(const auto error=trajectory.commit(*prepared,ros,steady,feedback.q,feedback.v))return error;
