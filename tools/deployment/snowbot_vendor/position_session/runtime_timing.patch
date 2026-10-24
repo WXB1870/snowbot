@@ -1,14 +1,12 @@
 --- a/servo_control/include/servo_control/position_clock.h
 +++ b/servo_control/include/servo_control/position_clock.h
-@@ -1,5 +1,6 @@
+@@ -1,4 +1,5 @@
  #pragma once
  #include <cstdint>
 +#include <array>
  namespace position_session {
  // New position session only. Startup/exit and legacy timing remain untouched.
- class Interval {
-@@ -10,4 +11,26 @@
-  void admit(int64_t now,bool takeover){if(takeover)reset(now);}
+@@ -11,3 +12,25 @@
   double tick(int64_t now){const auto old=last_;last_=now;return old>0 && now>old ? (now-old)*1e-9 : -1.;}
  };
 +// Diagnostic bookkeeping belongs to the single ROS/main thread only.
@@ -36,30 +34,25 @@
  } // namespace position_session
 --- a/servo_control/include/ros_controller/rosLoop.h
 +++ b/servo_control/include/ros_controller/rosLoop.h
-@@ -25,6 +25,7 @@
- #include <thread>
+@@ -26,4 +26,5 @@
  #include <chrono>
  #include "rclcpp/rclcpp.hpp"
 +#include "rclcpp/executors/single_threaded_executor.hpp"
  #include "std_msgs/msg/float64_multi_array.hpp"
  #include "geometry_msgs/msg/wrench_stamped.hpp"
- #include "geometry_msgs/msg/pose_stamped.hpp"
-@@ -204,6 +205,11 @@
-         void position_target_dispatch();void position_interrupt();
+@@ -205,4 +206,9 @@
          position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
          double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
 +        // One executor owns the callback groups throughout run(); both original
 +        // callback pumps remain on the main thread, in their original order.
 +        rclcpp::executors::SingleThreadedExecutor ros_executor_;
 +        bool ros_executor_added_=false;
-+        position_session::LoopTiming position_loop_timing_;
++        position_session::LoopTiming position_loop_timing_,position_feedback_timing_;
          position_session::Interval position_interval_;
          position_session::Output position_output_;
-         uint64_t position_frame_=0;
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -194,6 +194,20 @@
-             RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_FIRST_FAULT steady_ns=%lld session=%llu seq=%llu pdo=%llu origin=%s deadline_late_ms=%.6f checks=0x%x dt_ms=%.6f",
+@@ -184,4 +184,27 @@
                  (long long)fault.detected_ns,(unsigned long long)fault.session,(unsigned long long)fault.sequence,(unsigned long long)fault.pdo_sample,
                  fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
 +            // One bounded diagnostic batch from the existing non-RT timer.
@@ -76,10 +69,41 @@
 +            RCLCPP_WARN(this->get_logger(),"POSITION_REFERENCE_PATH fault_ns=%lld rt_seen_deadline_ns=%lld main_deadline_ns=%lld main_sample_ros_ns=%lld feedback_pdo=%llu feedback_progress_ns=%lld feedback_received_ns=%lld feedback_source_ros_ns=%lld feedback_advances=%u",
 +                (long long)fault.detected_ns,(long long)fault.rt_deadline_ns,(long long)position_output_.rt_deadline,(long long)position_output_.sample_time_ns,
 +                (unsigned long long)position_feedback_.sample,(long long)position_feedback_.progress,(long long)position_feedback_.received,(long long)position_feedback_.source,position_feedback_.advances);
++            const auto feedback_spans=position_feedback_timing_.snapshot(position_session::steady_ns());
++            constexpr const char* feedback_names[]={"build","left_gripper","right_gripper","pack","ros_publish"};
++            if(feedback_spans.session==fault.session)for(unsigned i=0;i<5;++i){
++                const auto& last=feedback_spans.last[i];const auto& longest=feedback_spans.longest[i];
++                if(!last.begin)continue;
++                RCLCPP_WARN(this->get_logger(),"POSITION_FEEDBACK_TIMING fault_ns=%lld session=%llu phase=%s last_begin_ns=%lld last_end_ns=%lld max_begin_ns=%lld max_end_ns=%lld max_ms=%.6f",
++                    (long long)fault.detected_ns,(unsigned long long)feedback_spans.session,feedback_names[i],
++                    (long long)last.begin,(long long)last.end,(long long)longest.begin,(long long)longest.end,(longest.end-longest.begin)*1e-6);
++            }
              position_last_rt_cycle_fault_ns_=fault.detected_ns;
          }
-         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
-@@ -1008,7 +1022,11 @@
+@@ -958,4 +981,6 @@
+ //ros消息参量发送模块 -- 反馈值发送函数
+ void ServoNode::msg_publish(){
++    position_feedback_timing_.bind(position_gate_.last().session);
++    position_feedback_timing_.mark(position_session::LoopTiming::Prepare,position_session::steady_ns());
+     auto tempRetData_pub = snowbot_ctl_msgs::msg::RetInformation();
+     tempRetData_pub.header.stamp = this->now();  // 添加当前时间戳
+@@ -975,6 +1000,9 @@
+     float right_gripper_pos = 0.0f, right_gripper_spd = 0.0f, right_gripper_cur = 0.0f;
+     uint16_t left_gripper_status = 0, right_gripper_status = 0;
++    position_feedback_timing_.mark(position_session::LoopTiming::FeedbackPublish,position_session::steady_ns());
+     getGripperFb(0, left_gripper_pos, left_gripper_spd, left_gripper_cur, left_gripper_status);
++    position_feedback_timing_.mark(position_session::LoopTiming::SpinHead,position_session::steady_ns());
+     getGripperFb(1, right_gripper_pos, right_gripper_spd, right_gripper_cur, right_gripper_status);
++    position_feedback_timing_.mark(position_session::LoopTiming::Compute,position_session::steady_ns());
+     tempRetData_pub.l_position[7] = left_gripper_pos;
+     tempRetData_pub.l_speed[7] = left_gripper_spd;
+@@ -991,10 +1019,16 @@
+     }
+
++    position_feedback_timing_.mark(position_session::LoopTiming::Admission,position_session::steady_ns());
+     RetData_pub->publish(tempRetData_pub);
++    position_feedback_timing_.mark(position_session::LoopTiming::Count,position_session::steady_ns());
+ }
 
  //ros消息参量发送模块 -- 反馈值发送函数
  void ServoNode::ctlmsg_get(){
@@ -91,18 +115,14 @@
 +    ros_executor_.spin_some();
  }
 
- //消息传输辅助函数 -- 仅仅进行一次消息的接收(与底层关节的通讯)
-@@ -1371,6 +1389,8 @@
-     drive_startup_finished_=!sigInterrupt.load();
+@@ -1359,4 +1393,6 @@
      //开启ros2循环
      while (rclcpp::ok()){
 +        position_loop_timing_.bind(position_gate_.last().session);
 +        position_loop_timing_.mark(position_session::LoopTiming::Prepare,position_session::steady_ns());
          //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
          if (sigInterrupt.load() && !shutdown_mode_) {
-             shutdown_mode_ = true;
-@@ -1468,10 +1488,13 @@
-         }
+@@ -1456,8 +1492,11 @@
 
          //发送一轮反馈值
 +        position_loop_timing_.mark(position_session::LoopTiming::FeedbackPublish,position_session::steady_ns());
@@ -114,9 +134,7 @@
 +        position_loop_timing_.mark(position_session::LoopTiming::Compute,position_session::steady_ns());
 
          //----- 关机回零: 覆盖上位机目标, 走同一套插补链路 (像上位机下发一样) -----
-         if (shutdown_mode_) {
-@@ -1763,7 +1786,13 @@
-
+@@ -1751,5 +1790,11 @@
          //----------------------
          //进行一轮EtherCAT发送
 -        if(!shutdown_mode_ && !sigInterrupt.load()){position_poll();position_step();}
@@ -129,9 +147,7 @@
 +        position_loop_timing_.mark(position_session::LoopTiming::LegacyIO,position_session::steady_ns());
          EtherCATrun();
          if(shutdown_mode_)EtherCAT_positionBypass(); // Hand back only after original exit target cache is written.
-         if (arm_shutdown_handoff_pending && shutdown_mode_) {
-@@ -1773,9 +1802,12 @@
-         }
+@@ -1761,8 +1806,11 @@
 
          //发布六维力传感器数据
 +        position_loop_timing_.mark(position_session::LoopTiming::WrenchPublish,position_session::steady_ns());

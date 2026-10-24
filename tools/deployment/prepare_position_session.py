@@ -42,6 +42,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             raise ValueError('POSITION_BASELINE_MISMATCH:'+rel)
     # Preserve unlisted colleague assets too. Only reviewed patches may modify files.
     output.parent.mkdir(parents=True,exist_ok=True)
+    arm_reference_margin=0.
     stage=Path(tempfile.mkdtemp(prefix='.position-',dir=output.parent))
     try:
         shutil.copytree(source,stage/'src')
@@ -84,7 +85,11 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
                     model_tool=json.loads(Path(prediction_tool).read_text())
                     model_names=[f'arm_{side}_joint_{i}' for side in ('l','r') for i in range(1,8)]+['body_joint_1','body_joint_2']
+                    arm_reference_margin=model_tool.get('posture_reference_margin_rad',0.)
+                    if (type(arm_reference_margin) not in (int,float) or not math.isfinite(arm_reference_margin)
+                            or not 0 <= arm_reference_margin < .2):raise ValueError('ARM_REFERENCE_MARGIN_INVALID')
                     header=module.model_header(prediction_urdf,model_names,model_tool['left_frame'],model_tool['right_frame'])
+                    header+='\n#define SNOWBOT_ARM_REFERENCE_MARGIN '+repr(float(arm_reference_margin))+'\n'
                     (stage/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').write_text(header)
                     subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'prediction.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
                     patches=(*patches,'prediction')
@@ -112,7 +117,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
             rel='ctl_msgs/msg/'+name+'.msg'
             if digest(stage/'src'/rel)!=digest(source/rel):raise ValueError('LEGACY_MESSAGE_CHANGED:'+name)
-        manifest=dict(schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
+        manifest=dict(arm_reference_margin_rad=arm_reference_margin,schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
             rigid_prediction=(dict(enabled=True,recipe_version=3,urdf_sha256=digest(Path(prediction_urdf)),tool_sha256=digest(Path(prediction_tool)),generator_sha256=digest(generator),names=model_names,left_frame=model_tool['left_frame'],right_frame=model_tool['right_frame']) if prediction_urdf else dict(enabled=False)),

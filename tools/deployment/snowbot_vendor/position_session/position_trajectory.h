@@ -5,6 +5,9 @@
 #include "bindu_execution_native/prediction_model.hpp"
 #define SNOWBOT_RIGID_PREDICTION 1
 #endif
+#ifndef SNOWBOT_ARM_REFERENCE_MARGIN
+#define SNOWBOT_ARM_REFERENCE_MARGIN 0.0
+#endif
 #include <memory>
 #include <stdexcept>
 #include <atomic>
@@ -83,7 +86,7 @@ struct TargetTrend {
 struct TargetSnapshot {
  TargetTrend trend{};
  std::array<double,joint_count> q{},v{},a{};
- int64_t effective_ros=0,effective_steady=0;uint64_t version=0;bool valid=false,held_takeover=false;
+ int64_t effective_ros=0,effective_steady=0;uint64_t version=0;bool valid=false,held_takeover=false,inner_reference=false;
 };
 // The original servo thread owns the bounded timeline and samples it. A separate
 // admission worker imports/certifies immutable segments and reclaims old ones.
@@ -94,7 +97,7 @@ struct PredictionTrace {
 };
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
- struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false;};
+ struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false,inner_reference=false;};
  std::array<Entry,8> entries_{};unsigned count_=0;const Entry* selected_=nullptr;int64_t clock_offset_=0;uint64_t version_=0;
  static_assert(std::atomic<const Segment*>::is_always_lock_free,"lock-free retirement required");
  std::array<std::atomic<const Segment*>,8> retired_{};
@@ -107,7 +110,7 @@ class TrajectoryQueue {
 public:
  struct Prepared {
   PredictionTrace prediction{};TargetTrend trend{};
-  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false;
+  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false,inner_reference=false;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
  std::array<double,joint_count> q{},v{},a{},j{};
@@ -159,11 +162,15 @@ public:
    std::array<double,joint_count> j{};
    out.valid=entry->segment->sample_into((out.effective_steady-entry->start)*1e-9,
      out.q.data(),out.v.data(),out.a.data(),j.data(),joint_count);
+   out.inner_reference=entry->inner_reference;
+   if(out.inner_reference)out.trend.grasp=entry->trend.grasp;
    out.held_takeover=out.valid;return out.valid;
   }
   out.effective_ros=out.effective_steady-clock_offset_;
   const auto* entry=at(out.effective_steady);if(!entry||out.effective_steady>=entry->deadline)return false;
+  out.inner_reference=entry->inner_reference;
   if(entry->target_stream&&entry->source.operation!=2)out.trend=entry->trend;
+  if(out.inner_reference)out.trend.grasp=entry->trend.grasp;
   std::array<double,joint_count> j{};
   out.valid=entry->segment->sample_into((out.effective_steady-entry->start)*1e-9,
     out.q.data(),out.v.data(),out.a.data(),j.data(),joint_count);return out.valid;
@@ -178,10 +185,16 @@ public:
     wire.control_count.empty()&&wire.controls.empty(),"target_contains_curve");
   require(snapshot.valid&&snapshot.effective_ros<source.expires,"target_snapshot_or_expired");
   auto result=std::make_unique<Prepared>();JointLimits limits;limits.reserve(joint_count);
+  // A new ordinary takeover (explicit preparation/recovery) can leave the
+  // tool scope. Continuations and PAUSE inherit its exact reference reserve.
+  result->inner_reference=wire.version==3 || (source.operation!=1&&snapshot.inner_reference);
+  if(result->inner_reference)result->trend.grasp=snapshot.inner_reference?snapshot.trend.grasp:snapshot.q;
   for(unsigned i=0;i<joint_count;++i){
    const double v=wire.max_velocity[i],a=wire.max_acceleration[i],j=wire.max_jerk[i];
    require(std::isfinite(v)&&std::isfinite(a)&&std::isfinite(j)&&v>0&&a>0&&j>0&&v<=max_v&&a<=max_a&&j<=max_j,"trajectory_dynamic_limits");
-   limits.push_back({lower[i],upper[i],v,a,j});result->velocity[i]=v;result->acceleration[i]=a;result->jerk[i]=j;
+   const double margin=result->inner_reference&&i<14 ? SNOWBOT_ARM_REFERENCE_MARGIN : 0.;
+   require(std::isfinite(margin)&&margin>=0.&&lower[i]+margin<upper[i]-margin,"reference_reserve_invalid");
+   limits.push_back({lower[i]+margin,upper[i]-margin,v,a,j});result->velocity[i]=v;result->acceleration[i]=a;result->jerk[i]=j;
   }
   JointState seed;seed.q.assign(snapshot.q.begin(),snapshot.q.end());seed.v.assign(snapshot.v.begin(),snapshot.v.end());seed.a.assign(snapshot.a.begin(),snapshot.a.end());seed.j.assign(joint_count,0.);
   std::vector<double> hint(joint_count,0.);
@@ -203,7 +216,8 @@ public:
   else if(wire.version==3){
 #ifdef SNOWBOT_RIGID_PREDICTION
    result->trend.rigid=true;
-   result->trend.grasp=(source.operation==0&&snapshot.trend.session==source.session&&snapshot.trend.rigid)?snapshot.trend.grasp:snapshot.q;
+   // A PAUSE/new lease refreshes time and input origins, not the held relation.
+   // Only a new ordinary takeover explicitly leaves this tool scope.
    rigid::Model model(prediction_model::nodes,prediction_model::left,prediction_model::right,prediction_model::dofs);
    require(model.dofs==int(joint_count),"rigid_model_joint_layout");rigid::Decision decision;
    const std::vector<double> grasp(result->trend.grasp.begin(),result->trend.grasp.end());
@@ -257,7 +271,7 @@ public:
    if(slot.compare_exchange_strong(empty,entries_[i].segment.get(),std::memory_order_release,std::memory_order_relaxed)){entries_[i].segment.release();break;}}
   for(unsigned i=0;i<kept;++i)if(remove)entries_[i]=std::move(entries_[i+remove]);
   count_=kept;auto& entry=entries_[count_++];entry.segment=std::move(input.segment);entry.source=source;
-  entry.trend=input.trend;entry.target_stream=input.target_stream;entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
+  entry.inner_reference=input.inner_reference;entry.trend=input.trend;entry.target_stream=input.target_stream;entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
   velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;++version_;return nullptr;
  }
  // Non-periodic convenience for native fixtures and offline callers.

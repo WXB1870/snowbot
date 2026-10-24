@@ -224,7 +224,14 @@ def write_loop_runtime_check(source, work, root):
     end=text.index('\n}',begin)+2
     fixture=(root/'test_position_loop_runtime.cpp').read_text()
     path=work/'test_position_loop_runtime.cpp'
-    path.write_text(fixture.replace('// @ACTUAL_CALLBACK_PUMP@',text[begin:end]))
+    fixture=fixture.replace('// @ACTUAL_CALLBACK_PUMP@',text[begin:end])
+    if 'position_feedback_timing_' in text:
+        fixture='#define POSITION_FEEDBACK_SUBPHASES 1\n'+fixture
+        begin=text.index('void ServoNode::msg_publish()')
+        end=text.index('\n}',begin)+2
+        fixture=fixture.replace('// @ACTUAL_FEEDBACK_PUBLISH@',text[begin:end].replace(
+            'position_session::steady_ns()','feedback_clock()'))
+    path.write_text(fixture)
     return path
 
 

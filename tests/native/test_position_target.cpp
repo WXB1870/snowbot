@@ -201,6 +201,38 @@ void velocity_target_generation(){
  std::cout<<"PASS first target uses certified position curve; repeated fixed target converges; shared queue sampling allocates/frees zero memory\n";
 }
 
+void tool_reference_reserve(){
+ if(SNOWBOT_ARM_REFERENCE_MARGIN==0.)return;
+ constexpr double margin=SNOWBOT_ARM_REFERENCE_MARGIN;
+ auto measured=seed(),goal=measured;
+ measured[9]=lower[9]+margin+.01;goal=measured;goal[9]=lower[9]+margin;
+ TargetSnapshot snapshot;snapshot.q=measured;snapshot.v[9]=-.05;
+ snapshot.valid=true;snapshot.inner_reference=true;snapshot.effective_ros=snapshot.effective_steady=1010000000;
+ Meta source{920,2,1000000000,1300000000,0};Wire wire;wire.segment_id=2;
+ auto path=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
+ assert(path->inner_reference);
+ auto check=[&](const bindu::execution::PreparedSegment& segment){
+  for(double t=0.;t<=segment.end()+.001;t+=.001){const auto state=segment.sample(t);
+   for(unsigned i=0;i<14;++i)assert(state.q[i]>=lower[i]+margin-1e-9&&state.q[i]<=upper[i]-margin+1e-9);
+  }
+ };
+ check(*path->segment);
+ auto outside=goal;outside[9]-=.001;rejects([&]{TrajectoryQueue::prepare_target(wire,source,snapshot,outside);});
+ const int64_t stop_at=1020000000;
+ snapshot.effective_ros=snapshot.effective_steady=stop_at+10000000;
+ Meta pause{920,3,stop_at,stop_at+2000000000,2};wire.segment_id=3;
+ auto stop=TrajectoryQueue::prepare_target(wire,pause,snapshot,goal);
+ assert(stop->inner_reference);check(*stop->segment);
+ // Recorded old reference is inside the hard bound but outside the reserve.
+ snapshot.q[9]=-.5945798405189285;snapshot.v.fill(0.);snapshot.a.fill(0.);
+ rejects([&]{TrajectoryQueue::prepare_target(wire,pause,snapshot,snapshot.q);});
+ // An explicit new ordinary takeover keeps the existing inward A recovery path.
+ Meta recovery{921,1,stop_at,stop_at+300000000,1};wire.segment_id=1;
+ auto inward=TrajectoryQueue::prepare_target(wire,recovery,snapshot,measured);
+ assert(!inward->inner_reference);
+ std::cout<<"PASS tool arm reserve: goal, continuation and PAUSE share inner bounds; old out-of-reserve seed refuses; explicit ordinary recovery remains available\n";
+}
+
 void rigid_reference_recipe(){
  TrajectoryQueue queue;auto measured=seed(),goal=measured;
  const int64_t base=1000000000;Meta source{919,1,base,base+200000000,1};Wire wire;wire.version=3;wire.segment_id=1;
@@ -211,7 +243,7 @@ void rigid_reference_recipe(){
 #else
  std::array<double,16> speed{};
  auto first=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
- assert(first->prediction.rigid&&first->trend.rigid&&first->trend.grasp==snapshot.q);
+ assert(first->inner_reference&&first->prediction.rigid&&first->trend.rigid&&first->trend.grasp==snapshot.q);
  const auto capture=first->trend.grasp;
  periodic=true;assert(!queue.commit(*first,base+1000000,base+1000000,measured,speed));periodic=false;queue.reclaim();
  assert(queue.sample(base+20000000));
@@ -230,10 +262,21 @@ void rigid_reference_recipe(){
  assert(queue.snapshot(stop_at,stop_at,2,10000000,measured,snapshot));
  rejects([&]{TrajectoryQueue::prepare_target(wire,source,snapshot,goal);});
  wire.version=2;auto stop=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
- assert(!stop->trend.rigid&&!stop->prediction.rigid);
+ assert(stop->inner_reference&&!stop->trend.rigid&&!stop->prediction.rigid);
+ assert(stop->trend.grasp==capture);
  periodic=true;assert(!queue.commit(*stop,stop_at+1000000,stop_at+1000000,measured,speed));periodic=false;queue.reclaim();
  for(int tick=0;tick<500;++tick){periodic=true;assert(queue.sample(stop_at+tick*1000000));periodic=false;bounded(queue);}
  assert(queue.phase(stop_at+499000000)==4);assert(!allocated&&!deleted);
+ const int64_t restart=stop_at+600000000;
+ assert(queue.snapshot(restart,restart,1,10000000,measured,snapshot,true));
+ assert(snapshot.held_takeover&&snapshot.inner_reference&&snapshot.trend.grasp==capture);
+ source={920,1,restart,restart+300000000,1};wire.version=3;wire.segment_id=1;
+ auto recapture=TrajectoryQueue::prepare_target(wire,source,snapshot,snapshot.q);
+ assert(recapture->inner_reference&&recapture->trend.grasp==capture);
+ // New ordinary-arm/preparation takeover is the explicit scope boundary.
+ wire.version=2;auto ordinary=TrajectoryQueue::prepare_target(wire,source,snapshot,snapshot.q);
+ assert(!ordinary->inner_reference);
+
  std::cout<<"PASS explicit rigid recipe: common waist motion, committed grasp/trend, C2 adoption, original PAUSE, zero periodic allocation\n";
 #endif
 }
@@ -266,4 +309,4 @@ int replay_targets(bool rigid){
  if(rigid)assert(accepted>0&&accepted+fallback==count);
  std::cout<<"REPLAY_OK goals="<<count<<" rigid="<<rigid<<" geometric="<<accepted<<" fallback="<<fallback<<" samples="<<samples<<" maximum_dynamic_ratio="<<ratio<<" periodic_allocations="<<allocated<<" periodic_deletions="<<deleted<<" original_pause=1\n";return 0;
 }
-int main(int argc,char**){if(argc>1)return replay_targets(argc==2);rigid_reference_recipe();target_trend_history();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+int main(int argc,char**){if(argc>1)return replay_targets(argc==2);tool_reference_reserve();rigid_reference_recipe();target_trend_history();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
