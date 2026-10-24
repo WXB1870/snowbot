@@ -17,5 +17,6 @@
   "driver_watchdog_s": null,
   "require_driver_watchdog": false,
   "receiver_node": "/car_control",
-  "feedback_node": "/car_control"
+  "feedback_node": "/car_control",
+  "require_feedback": false
 }
