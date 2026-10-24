@@ -39,7 +39,8 @@ def write_drive_cycle_check(source, work, root):
     cycle=text[text.index('void EtherCATDriver::cycle() {'):text.index('    // --- PDO 收发 ---')]+'\n    (void)position_written;\n}\n'
     diag=text[text.index('std::string EtherCATDriver::driveDiagnostics() {'):text.index('void EtherCATDriver::cycle() {')]
     output=work/'test_drive_cycle.cpp'
-    output.write_text((root/'test_drive_cycle.inc').read_text().replace('// @ACTUAL_CYCLE@',cycle).replace('// @ACTUAL_DIAGNOSTICS@',diag))
+    extra='#include "position_waist_units.h"\n' if (driver/'include/position_waist_units.h').is_file() else ''
+    output.write_text(extra+(root/'test_drive_cycle.inc').read_text().replace('// @ACTUAL_CYCLE@',cycle).replace('// @ACTUAL_DIAGNOSTICS@',diag))
     return output
 
 def write_pdo_check(source, work):
@@ -53,6 +54,9 @@ def write_pdo_check(source, work):
 #include <cassert>
 #include <array>
 #include <iostream>
+#if __has_include("position_waist_units.h")
+#include "position_waist_units.h"
+#endif
 using namespace position_session;
 struct PT {float target_position=99,target_speed=99,KP=99,KD=99,target_torque=99;};
 struct CSP {int32_t position=99,velocity=99;int16_t torque=99;uint16_t controlword=99;int ModeOp=99;};
@@ -85,7 +89,16 @@ void check_position_pdo_output(){
  session_watchdog_.report_hold(obs,written);assert(!obs.hold_valid);
  enable_step.fill(EN_STEP*6);written=apply();assert(written==controlled_mask);
  assert(csp[18].position==csp_counts(.12f)&&csp[19].position==csp_counts(-.08f));
+#if __has_include("position_waist_units.h")
+ const double multiplier=waist_units::feedforward_gain>0 ? waist_units::motor_per_position[0]*waist_units::feedforward_gain : 1.;
+ assert(csp[18].velocity==int32_t(std::round(double(.03f)*multiplier*65536./6.28318530717958647692)));
+ assert(std::abs(waist_units::feedback_speed(18,25.25)-25.25/waist_units::motor_per_position[0])<1e-10);
+ assert(waist_units::feedback_speed(16,25.25)==25.25);
+ assert(waist_units::velocity_object(17)==0x60ff);
+ assert(waist_units::velocity_object(19)==(waist_units::feedforward_gain>0?0x60b1:0x60ff));
+#else
  assert(csp[18].velocity==csp_counts(.03f));
+#endif
  assert(pt[7].target_position==99&&pt[15].target_position==99&&csp[16].position==99&&csp[17].position==99);
  session_packet.operation=2;++session_packet.sequence;session_watchdog_.evaluate(session_packet,obs,1000000000);
  written=apply();++obs.sample;session_watchdog_.report_hold(obs,written);

@@ -1,0 +1,24 @@
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -7,0 +8 @@
++#include "position_waist_units.h"
+@@ -171 +172 @@
+-    entry = ((uint32_t)0x60FF << 16) | (0x00 << 8) | 0x20;  // Target Velocity
++    entry = (uint32_t(position_session::waist_units::velocity_object(ec_slave[s].aliasadr)) << 16) | (0x00 << 8) | 0x20;  // Target Velocity
+@@ -732 +733,3 @@
+-                csp_rx_[m]->velocity = (int32_t)std::round((double)motor_cmd_spd_[m].load() * (65536.0 / (2.0 * M_PI)));
++                // External CSP feedforward is only driven by the owned session below.
++                csp_rx_[m]->velocity = position_session::waist_units::selected(m) && position_session::waist_units::feedforward_gain > 0 ? 0 :
++                    (int32_t)std::round((double)motor_cmd_spd_[m].load() * (65536.0 / (2.0 * M_PI)));
+@@ -832 +835 @@
+-                csp_rx_[m]->velocity=position_session::csp_counts(cmd.v[i]);csp_rx_[m]->torque=0;
++                csp_rx_[m]->velocity=position_session::waist_units::command_speed(m,cmd.v[i]);csp_rx_[m]->torque=0;
+@@ -884 +887 @@
+-                static_cast<float>(csp_tx_[m]->velocity * (2.0 * M_PI / 65536.0)));
++                static_cast<float>(position_session::waist_units::feedback_speed(m,csp_tx_[m]->velocity * (2.0 * M_PI / 65536.0))));
+@@ -915 +918 @@
+-            obs.speed[m]=float(csp_tx_[m]->velocity*(2.0*M_PI/65536.0));
++            obs.speed[m]=float(position_session::waist_units::feedback_speed(m,csp_tx_[m]->velocity*(2.0*M_PI/65536.0)));
+@@ -935 +938 @@
+-    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::csp_radians(position_session::csp_counts(applied.v[i])));}
++    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::waist_units::written_speed(position_session::position_slot(i),applied.v[i]));}

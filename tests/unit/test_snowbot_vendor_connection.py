@@ -75,6 +75,62 @@ class PositionReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
             vendor.prepare(self.baseline,self.work/'bad-model',prediction_urdf=urdf)
 
+    def test_waist_units_are_explicit_preserve_positions_and_use_actual_pdo_writer(self):
+        from tests.integration.validate_position_native import write_pdo_check, write_drive_cycle_check
+        compiler=shutil.which('c++')
+        if not compiler:self.skipTest('C++ compiler unavailable')
+        for index,gain in enumerate((0.,.05)):
+            output=vendor.prepare(self.baseline,self.work/f'waist-{index}',
+                waist_velocity_ratio=(25.25,25.25),waist_feedforward_gain=gain)
+            manifest=json.loads((output/'position_release.json').read_text())
+            self.assertIn('waist_units',manifest['components'])
+            self.assertFalse(manifest['waist_units']['position_scale_changed'])
+            self.assertFalse(manifest['waist_units']['physical_units_verified'])
+            self.assertEqual(manifest['waist_units']['motor_per_position_velocity'],[25.25,25.25])
+            cpp=write_pdo_check(output/'src',output)
+            driver=(output/'src/servo_control/src/servo_control/ethercat_driver.cpp').read_text()
+            mapping=driver[driver.index('void EtherCATDriver::cspPDOConfig('):driver.index('// ========== 传感器 EEPROM')]
+            mapping=mapping.replace('EtherCATDriver::cspPDOConfig','MappingProbe::cspPDOConfig')
+            mock=r'''
+#include <cstdio>
+#include <cstring>
+constexpr bool FALSE=false; constexpr int EC_TIMEOUTSAFE=1;
+struct Slave {uint16_t aliasadr=0;}; Slave ec_slave[32];
+uint32_t velocity_mapping[32]{};
+int ec_SDOwrite(int slave,unsigned index,unsigned sub,bool,int size,void* value,int){
+ if(index==0x1600 && sub==3){assert(size==4);std::memcpy(&velocity_mapping[slave],value,4);}return 1;
+}
+struct MappingProbe {void cspPDOConfig(int);};
+'''
+            main=r'''
+int main(){check_position_pdo_output();MappingProbe probe;
+ for(unsigned alias=17;alias<=20;++alias){ec_slave[alias].aliasadr=alias;probe.cspPDOConfig(alias);
+  const unsigned expected=alias>=19 && position_session::waist_units::feedforward_gain>0 ? 0x60b1 : 0x60ff;
+  assert(velocity_mapping[alias]==(expected<<16|0x20));}
+}
+'''
+            cpp.write_text(cpp.read_text()+mock+mapping+main)
+            include=output/'src/servo_control/include'
+            binary=output/'pdo-memory-check'
+            subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I',str(include),
+                str(cpp),'-o',str(binary)],check=True,capture_output=True,text=True)
+            subprocess.run([str(binary)],check=True,capture_output=True,text=True)
+            cpp=write_drive_cycle_check(output/'src',output,ROOT/'tests/native')
+            binary=output/'drive-memory-check'
+            subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-variable','-I',str(include),
+                '-I',str(output),str(cpp),'-o',str(binary)],check=True,capture_output=True,text=True)
+            subprocess.run([str(binary)],check=True,capture_output=True,text=True)
+
+    def test_waist_units_reject_unknown_ratios_or_incompatible_modes(self):
+        invalid=({'waist_feedforward_gain':.05}, {'waist_velocity_ratio':(25.25,)},
+            {'waist_velocity_ratio':(float('nan'),25.25)},
+            {'waist_velocity_ratio':(25.25,25.25),'waist_feedforward_gain':.2},
+            {'waist_velocity_ratio':(25.25,25.25),'observation_only':True},
+            {'waist_velocity_ratio':(25.25,25.25),'with_impedance':True})
+        for options in invalid:
+            with self.subTest(options=options),self.assertRaisesRegex(ValueError,'WAIST_'):
+                vendor.prepare(self.baseline,self.work/'invalid-waist',**options)
+
     def test_output_overlap_existing_and_missing_rejected(self):
         for source,output,error in ((self.baseline,self.baseline/'bad','OVERLAP'),(self.baseline,self.release,'EXISTS'),(self.work/'absent',self.work/'bad','MISSING')):
             with self.assertRaisesRegex(ValueError,error):vendor.prepare(source,output)

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -15,7 +16,15 @@ NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','ada
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None,prediction_urdf=None,prediction_tool=None):
+def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None,prediction_urdf=None,prediction_tool=None,waist_velocity_ratio=None,waist_feedforward_gain=0.):
+    if (type(waist_feedforward_gain) not in (int,float) or not math.isfinite(waist_feedforward_gain)
+            or not 0 <= waist_feedforward_gain <= .1):raise ValueError('WAIST_FEEDFORWARD_GAIN_INVALID')
+    if waist_velocity_ratio is None:
+        if waist_feedforward_gain:raise ValueError('WAIST_VELOCITY_RATIO_REQUIRED')
+    else:
+        if (not isinstance(waist_velocity_ratio,(tuple,list)) or len(waist_velocity_ratio)!=2 or any(type(x) not in (int,float) or not math.isfinite(x)
+                or not 1 <= x <= 200 for x in waist_velocity_ratio)):raise ValueError('WAIST_VELOCITY_RATIO_INVALID')
+        if observation_only or with_impedance:raise ValueError('WAIST_UNITS_REQUIRES_POSITION_SESSION')
     if bool(prediction_urdf)!=bool(prediction_tool):raise ValueError('RIGID_PREDICTION_MODEL_AND_TOOL_REQUIRED')
     if prediction_urdf and (observation_only or with_impedance):raise ValueError('RIGID_PREDICTION_REQUIRES_TARGET_STREAM')
     if observation_only and with_impedance:raise ValueError("IMPEDANCE_REQUIRES_FULL_SESSION")
@@ -82,6 +91,13 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         if not observation_only and not with_impedance:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'runtime_timing.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'runtime_timing')
+        if waist_velocity_ratio is not None:
+            header=(ASSETS/'position_waist_units.h').read_text()
+            header=header.replace('{1.0, 1.0}', '{'+', '.join(repr(float(x)) for x in waist_velocity_ratio)+'}')
+            header=header.replace('feedforward_gain = 0.0', 'feedforward_gain = '+repr(float(waist_feedforward_gain)))
+            (stage/'src/servo_control/include/position_waist_units.h').write_text(header)
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'waist_units.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'waist_units')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
@@ -101,6 +117,10 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
             rigid_prediction=(dict(enabled=True,recipe_version=3,urdf_sha256=digest(Path(prediction_urdf)),tool_sha256=digest(Path(prediction_tool)),generator_sha256=digest(generator),names=model_names,left_frame=model_tool['left_frame'],right_frame=model_tool['right_frame']) if prediction_urdf else dict(enabled=False)),
             driver_started=False,hardware_commands_sent=False,full_build_verified=False,
+            waist_units=dict(enabled=waist_velocity_ratio is not None,position_scale_changed=False,
+                physical_units_verified=False,motor_per_position_velocity=waist_velocity_ratio,
+                feedforward_gain=waist_feedforward_gain,
+                helper_sha256=digest(stage/'src/servo_control/include/position_waist_units.h') if waist_velocity_ratio is not None else None),
             stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only and not with_impedance,
             session_wire_version=3,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=300,target_pause_ttl_ms=2000,
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
@@ -121,5 +141,7 @@ if __name__=='__main__':
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
     p.add_argument('--prediction-urdf',type=Path,help='Reviewed actual kinematic URDF for rigid prediction; local generation only')
     p.add_argument('--prediction-tool',type=Path,help='Reviewed tool config selecting the two end frames; must accompany prediction-urdf')
+    p.add_argument('--waist-velocity-ratio',type=float,nargs=2,metavar=('WAIST1','WAIST2'),help='Explicit motor-speed/current-position-speed ratios; positions and limits remain unchanged')
+    p.add_argument('--waist-feedforward-gain',type=float,default=0.,help='Optional waist CSP 0x60B1 gain, 0..0.1; requires explicit velocity ratios; default preserves 0x60FF')
     a=p.parse_args()
-    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool))
+    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))
