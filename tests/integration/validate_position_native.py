@@ -90,10 +90,19 @@ void check_position_pdo_output(){
  enable_step.fill(EN_STEP*6);written=apply();assert(written==controlled_mask);
  assert(csp[18].position==csp_counts(.12f)&&csp[19].position==csp_counts(-.08f));
 #if __has_include("position_waist_units.h")
- const double multiplier=waist_units::feedforward_gain>0 ? waist_units::motor_per_position[0]*waist_units::feedforward_gain : 1.;
+ const double multiplier=waist_units::motor_per_position[0]*(waist_units::feedforward_gain>0 ? waist_units::feedforward_gain : 1.);
  assert(csp[18].velocity==int32_t(std::round(double(.03f)*multiplier*65536./6.28318530717958647692)));
  assert(std::abs(waist_units::feedback_speed(18,25.25)-25.25/waist_units::motor_per_position[0])<1e-10);
  assert(waist_units::feedback_speed(16,25.25)==25.25);
+ // Check both waist axes and signs at the motor/position coordinate boundary.
+ for(unsigned slot: {18u,19u})for(double v: {-.02,0.,.02}){
+  const double gain=waist_units::feedforward_gain>0?waist_units::feedforward_gain:1.;
+  const auto counts=waist_units::command_speed(slot,v);
+  assert(counts==csp_counts(v*waist_units::motor_per_position[slot-18]*gain));
+  assert(std::abs(waist_units::written_speed(slot,v)-v*gain)<=
+      3.141592653589793/65536./waist_units::motor_per_position[slot-18]+1e-12);
+ }
+ assert(waist_units::command_speed(16,.02)==csp_counts(.02));
  assert(waist_units::velocity_object(17)==0x60ff);
  assert(waist_units::velocity_object(19)==(waist_units::feedforward_gain>0?0x60b1:0x60ff));
 #else

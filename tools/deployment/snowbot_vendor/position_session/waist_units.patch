@@ -9,7 +9,7 @@
 -                csp_rx_[m]->velocity = (int32_t)std::round((double)motor_cmd_spd_[m].load() * (65536.0 / (2.0 * M_PI)));
 +                // External CSP feedforward is only driven by the owned session below.
 +                csp_rx_[m]->velocity = position_session::waist_units::selected(m) && position_session::waist_units::feedforward_gain > 0 ? 0 :
-+                    (int32_t)std::round((double)motor_cmd_spd_[m].load() * (65536.0 / (2.0 * M_PI)));
++                    position_session::waist_units::command_speed(m,motor_cmd_spd_[m].load());
 @@ -832 +835 @@
 -                csp_rx_[m]->velocity=position_session::csp_counts(cmd.v[i]);csp_rx_[m]->torque=0;
 +                csp_rx_[m]->velocity=position_session::waist_units::command_speed(m,cmd.v[i]);csp_rx_[m]->torque=0;

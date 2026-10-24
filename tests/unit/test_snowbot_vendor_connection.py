@@ -87,6 +87,8 @@ class PositionReleaseTests(unittest.TestCase):
             self.assertFalse(manifest['waist_units']['position_scale_changed'])
             self.assertFalse(manifest['waist_units']['physical_units_verified'])
             self.assertEqual(manifest['waist_units']['motor_per_position_velocity'],[25.25,25.25])
+            self.assertTrue(manifest['waist_units']['velocity_command_scaled'])
+            self.assertEqual(manifest['waist_units']['velocity_object'],'0x60B1' if gain else '0x60FF')
             cpp=write_pdo_check(output/'src',output)
             driver=(output/'src/servo_control/src/servo_control/ethercat_driver.cpp').read_text()
             mapping=driver[driver.index('void EtherCATDriver::cspPDOConfig('):driver.index('// ========== 传感器 EEPROM')]

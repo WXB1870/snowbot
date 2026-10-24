@@ -119,6 +119,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             driver_started=False,hardware_commands_sent=False,full_build_verified=False,
             waist_units=dict(enabled=waist_velocity_ratio is not None,position_scale_changed=False,
                 physical_units_verified=False,motor_per_position_velocity=waist_velocity_ratio,
+                velocity_command_scaled=waist_velocity_ratio is not None,
+                velocity_object='0x60B1' if waist_feedforward_gain else '0x60FF',
                 feedforward_gain=waist_feedforward_gain,
                 helper_sha256=digest(stage/'src/servo_control/include/position_waist_units.h') if waist_velocity_ratio is not None else None),
             stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only and not with_impedance,
@@ -141,7 +143,7 @@ if __name__=='__main__':
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
     p.add_argument('--prediction-urdf',type=Path,help='Reviewed actual kinematic URDF for rigid prediction; local generation only')
     p.add_argument('--prediction-tool',type=Path,help='Reviewed tool config selecting the two end frames; must accompany prediction-urdf')
-    p.add_argument('--waist-velocity-ratio',type=float,nargs=2,metavar=('WAIST1','WAIST2'),help='Explicit motor-speed/current-position-speed ratios; positions and limits remain unchanged')
+    p.add_argument('--waist-velocity-ratio',type=float,nargs=2,metavar=('WAIST1','WAIST2'),help='Explicit motor/current-position velocity ratios for feedback division AND command multiplication; positions and limits remain unchanged')
     p.add_argument('--waist-feedforward-gain',type=float,default=0.,help='Optional waist CSP 0x60B1 gain, 0..0.1; requires explicit velocity ratios; default preserves 0x60FF')
     a=p.parse_args()
     print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))

@@ -42,5 +42,25 @@ int main(){
  d.observation_cache_.publish(obs);const auto report=d.driveDiagnostics();
  assert(report.find("manufacturer_error_code=unavailable_not_mapped")!=std::string::npos);
  for(const char* label:{"L1 slot=0","L8 slot=7","R1 slot=8","R8 slot=15","Head1 slot=16","Waist2 slot=19"})assert(report.find(label)!=std::string::npos);
+#if __has_include("position_waist_units.h")
+ // Exercise the actual legacy writer in memory as well as the owned-session writer.
+ EtherCATDriver legacy;legacy.motor_enable_.store(true);
+ for(unsigned slot=16;slot<20;++slot){
+  const unsigned k=slot-16;
+  legacy.is_csp_motor_[slot]=true;legacy.csp_rx_[slot]=&crx[k];legacy.csp_tx_[slot]=&ctx[k];
+  ctx[k].statusword=0x27;legacy.motor_enable_mask_[slot].store(true);
+  legacy.motor_cmd_pos_[slot].store(.01f);legacy.motor_cmd_spd_[slot].store(slot%2?-.02f:.02f);
+ }
+ for(unsigned tick=0;tick<35;++tick)legacy.cycle();
+ for(unsigned slot=16;slot<20;++slot){
+  const double v=slot%2?double(-.02f):double(.02f);
+  const bool waist=slot>=18;
+  const double multiplier=waist?position_session::waist_units::motor_per_position[slot-18]:1.;
+  const auto expected=waist&&position_session::waist_units::feedforward_gain>0?0:
+      position_session::csp_counts(v*multiplier);
+  assert(crx[slot-16].velocity==expected);
+  assert(crx[slot-16].position==position_session::csp_counts(.01f));
+ }
+#endif
  std::cout<<"actual PDO writer: reset never enables or changes targets/gains/torques; 20-axis diagnostics passed\n";
 }
