@@ -3,7 +3,7 @@
 @@ -1,5 +1,7 @@
  # Certified Bindu curve description; order L1..7,R1..7,waist1..2, rad.
 -# Version 0 selects the unchanged Follower path; version 1 requires session_v2.
-+# Version 0: Follower; version 1: session_v2 curve; version 2: session_v3 target.
++# Version 0: Follower; 1: session_v2 curve; 2: ordinary target; 3: rigid target.
 +# V2 target: segment_id=source sequence, effective_at_ns=0, all curve arrays empty.
 +# Original positions live in command/waist_position; limits are profile-clamped.
  uint8 version

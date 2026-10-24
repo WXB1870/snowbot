@@ -1,6 +1,10 @@
 #pragma once
 #include "servo_control/position_follower.h"
 #include "bindu_execution_native/interpolation.hpp"
+#if __has_include("bindu_execution_native/prediction_model.hpp")
+#include "bindu_execution_native/prediction_model.hpp"
+#define SNOWBOT_RIGID_PREDICTION 1
+#endif
 #include <memory>
 #include <stdexcept>
 #include <atomic>
@@ -50,7 +54,7 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
  result.source=meta(packet.meta);result.frame=packet.frame_sequence;result.target_stream=packet.meta.reference_mode==2;
  result.feedback_boot=packet.meta.feedback_boot_id;result.feedback_sample=packet.meta.feedback_sample;
  result.middle_instance=packet.meta.middle_instance_id;result.identity.epoch=packet.meta.epoch;
- if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&packet.trajectory.version==2))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
+ if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&(packet.trajectory.version==2||packet.trajectory.version==3)))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
  if(!result.identity.command.assign(packet.meta.source_command_id)||!result.identity.lease.assign(packet.meta.lease_id)||
     !result.identity.profile.assign(packet.meta.profile_hash)||!result.identity.command.size||!result.identity.lease.size||!result.identity.profile.size)return "source_identity_layout";
  for(unsigned i=0;i<7;++i){
@@ -72,7 +76,7 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
 // Fixed-size history travels with the committed segment, never pending input.
 struct TargetTrend {
  std::array<double,joint_count> goal{},velocity{};
- int64_t stamp=0;uint64_t session=0;
+ int64_t stamp=0;uint64_t session=0;bool rigid=false;std::array<double,joint_count> grasp{};
 };
 // Snapshot at one future switch instant, taken by the sampling owner. No segment
 // pointer escapes; background generation cannot race timeline reclamation.
@@ -84,6 +88,10 @@ struct TargetSnapshot {
 // The original servo thread owns the bounded timeline and samples it. A separate
 // admission worker imports/certifies immutable segments and reclaims old ones.
 // Sampling/commit do not plan, allocate, free trajectories, log or renew TTL.
+struct PredictionTrace {
+ bool rigid=false,accepted=false;double gain=0.;int attempts=0,projection_failures=0,geometry_rejections=0;
+ const char* reason="ordinary_trend";
+};
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
  struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false;};
@@ -98,7 +106,7 @@ class TrajectoryQueue {
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
 public:
  struct Prepared {
-  TargetTrend trend{};
+  PredictionTrace prediction{};TargetTrend trend{};
   std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
@@ -164,7 +172,8 @@ public:
    const TargetSnapshot& snapshot,const std::array<double,joint_count>& goal,
    double max_v=.25,double max_a=.5,double max_j=162.) {
   using namespace bindu::execution;
-  require(wire.version==2&&wire.segment_id==source.sequence&&wire.effective_at_ns==0,"target_version_or_identity");
+  require((wire.version==2||wire.version==3)&&wire.segment_id==source.sequence&&wire.effective_at_ns==0,"target_version_or_identity");
+  require(source.operation!=2||wire.version==2,"rigid_pause_requires_original_stop_recipe");
   require(wire.duration.empty()&&wire.piece_start.empty()&&wire.source_duration.empty()&&wire.source_elapsed.empty()&&
     wire.control_count.empty()&&wire.controls.empty(),"target_contains_curve");
   require(snapshot.valid&&snapshot.effective_ros<source.expires,"target_snapshot_or_expired");
@@ -179,7 +188,7 @@ public:
   if(source.operation!=2){
    result->trend.goal=goal;result->trend.stamp=source.stamp;result->trend.session=source.session;
    const double dt=(source.stamp-snapshot.trend.stamp)*1e-9;
-   if(source.operation==0&&snapshot.trend.session==source.session&&dt>=.005&&dt<=.1){
+   if(source.operation==0&&snapshot.trend.session==source.session&&snapshot.trend.rigid==(wire.version==3)&&dt>=.005&&dt<=.1){
     // Derive only from committed goals at their original source times. Reserve speed
     // headroom for catch-up; suppress timing noise in the derivative, not q.
     for(unsigned i=0;i<joint_count;++i){
@@ -189,8 +198,21 @@ public:
    }
    std::copy(hint.begin(),hint.end(),result->trend.velocity.begin());
   }
-  const auto segment=source.operation==2?Segment::stop(limits,seed,0.,(source.expires-snapshot.effective_ros)*1e-9):
-   Segment::tracking_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),hint,0.,30.,5.);
+  Segment segment;
+  if(source.operation==2){segment=Segment::stop(limits,seed,0.,(source.expires-snapshot.effective_ros)*1e-9);result->prediction.reason="pause_stop";}
+  else if(wire.version==3){
+#ifdef SNOWBOT_RIGID_PREDICTION
+   result->trend.rigid=true;
+   result->trend.grasp=(source.operation==0&&snapshot.trend.session==source.session&&snapshot.trend.rigid)?snapshot.trend.grasp:snapshot.q;
+   rigid::Model model(prediction_model::nodes,prediction_model::left,prediction_model::right,prediction_model::dofs);
+   require(model.dofs==int(joint_count),"rigid_model_joint_layout");rigid::Decision decision;
+   const std::vector<double> grasp(result->trend.grasp.begin(),result->trend.grasp.end());
+   segment=rigid::constrained(model,limits,seed,std::vector<double>(goal.begin(),goal.end()),hint,model.evaluate(rigid::vec(grasp)),0.,"geometry",1.,decision);
+   result->prediction={true,bool(decision.accepted),decision.gain,decision.attempts,decision.projection_failures,decision.guard_rejections,decision.reason};
+#else
+   throw std::invalid_argument("rigid_prediction_model_not_built");
+#endif
+  }else segment=Segment::tracking_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),hint,0.,30.,5.);
   result->segment=std::make_unique<const Segment>(segment);result->source=source;result->id=source.sequence;
   result->effective=snapshot.effective_ros;result->q=snapshot.q;result->v=snapshot.v;result->a=snapshot.a;
   result->target_stream=true;result->version=snapshot.version;result->held_takeover=snapshot.held_takeover;return result;
@@ -299,9 +321,9 @@ struct ServoAdmissionState {
 // The original servo thread never locks or waits for import/reclamation.
 template<class Packet> class TrajectoryAdmission {
 public:
- struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;};
+ struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;double prepare_us=0.;};
 private:
- TrajectoryQueue& queue_;typename Packet::SharedPtr input_,origin_;AdmissionContext context_{};std::array<double,3> limits_{};std::function<void(Result&)> inspect_;TargetSnapshot snapshot_{};
+ TrajectoryQueue& queue_;typename Packet::SharedPtr input_,origin_;AdmissionContext context_{};std::array<double,3> limits_{};std::function<void(Result&)> inspect_;std::function<void(const Result&)> report_;TargetSnapshot snapshot_{};
  std::atomic<bool> stopping_{false},ready_{false},busy_{false};
  static_assert(std::atomic<Result*>::is_always_lock_free,"lock-free admission handoff required");
  std::atomic<Result*> completed_{nullptr},returned_{nullptr};
@@ -320,14 +342,18 @@ private:
     std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;
    }
    auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
+   const auto began=std::chrono::steady_clock::now();
    try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2]);else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
+   result->prepare_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-began).count();
+   // Observation-only callback; its failure cannot alter control acceptance.
+   if(report_)try{report_(*result);}catch(...){}
    completed_.store(result,std::memory_order_release);
   }
   delete completed_.exchange(nullptr);delete returned_.exchange(nullptr);reclaim_packets();queue_.reclaim();
  }
 public:
- explicit TrajectoryAdmission(TrajectoryQueue& queue,std::function<void(Result&)> inspect={}):queue_(queue),inspect_(std::move(inspect)),worker_([this]{run();}){}
+ explicit TrajectoryAdmission(TrajectoryQueue& queue,std::function<void(Result&)> inspect={},std::function<void(const Result&)> report={}):queue_(queue),inspect_(std::move(inspect)),report_(std::move(report)),worker_([this]{run();}){}
  ~TrajectoryAdmission(){stopping_.store(true,std::memory_order_release);worker_.join();}
  bool submit(typename Packet::SharedPtr packet,double velocity,double acceleration,double jerk,const AdmissionContext& context={},typename Packet::SharedPtr origin={},const TargetSnapshot& snapshot={})noexcept{
   if(busy_.exchange(true,std::memory_order_acq_rel))return false;

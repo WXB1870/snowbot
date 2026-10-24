@@ -189,4 +189,70 @@ void velocity_target_generation(){
  assert(!allocated&&!deleted);
  std::cout<<"PASS first target uses certified position curve; repeated fixed target converges; shared queue sampling allocates/frees zero memory\n";
 }
-int main(){target_trend_history();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+
+void rigid_reference_recipe(){
+ TrajectoryQueue queue;auto measured=seed(),goal=measured;
+ const int64_t base=1000000000;Meta source{919,1,base,base+200000000,1};Wire wire;wire.version=3;wire.segment_id=1;
+ TargetSnapshot snapshot;assert(queue.snapshot(base,base,1,10000000,measured,snapshot));
+#ifndef SNOWBOT_RIGID_PREDICTION
+ rejects([&]{TrajectoryQueue::prepare_target(wire,source,snapshot,goal);});
+ std::cout<<"PASS rigid recipe rejects missing compiled model without substituting ordinary prediction\n";
+#else
+ std::array<double,16> speed{};
+ auto first=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
+ assert(first->prediction.rigid&&first->trend.rigid&&first->trend.grasp==snapshot.q);
+ const auto capture=first->trend.grasp;
+ periodic=true;assert(!queue.commit(*first,base+1000000,base+1000000,measured,speed));periodic=false;queue.reclaim();
+ assert(queue.sample(base+20000000));
+ source={919,2,base+20000000,base+220000000,0};wire.segment_id=2;goal[14]+=.001;
+ assert(queue.snapshot(source.stamp,source.stamp,0,10000000,measured,snapshot));
+ auto next=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
+ assert(next->prediction.rigid&&next->trend.grasp==capture);
+ assert(next->prediction.accepted||std::string(next->prediction.reason)=="prediction_error");
+ assert(next->segment->sample(.02).q[14]>snapshot.q[14]);
+ assert(next->trend.velocity[14]>0.);
+ const auto state=next->segment->sample(0.);
+ for(unsigned i=0;i<16;++i){assert(std::abs(state.q[i]-snapshot.q[i])<1e-10);assert(std::abs(state.v[i]-snapshot.v[i])<1e-10);assert(std::abs(state.a[i]-snapshot.a[i])<1e-9);}
+ periodic=true;assert(!queue.commit(*next,source.stamp+1000000,source.stamp+1000000,measured,speed));periodic=false;queue.reclaim();
+ for(int tick=0;tick<30;++tick){periodic=true;assert(queue.sample(source.stamp+tick*1000000));periodic=false;bounded(queue);}
+ const int64_t stop_at=base+50000000;source={919,3,stop_at,stop_at+2000000000,2};wire.segment_id=3;
+ assert(queue.snapshot(stop_at,stop_at,2,10000000,measured,snapshot));
+ rejects([&]{TrajectoryQueue::prepare_target(wire,source,snapshot,goal);});
+ wire.version=2;auto stop=TrajectoryQueue::prepare_target(wire,source,snapshot,goal);
+ assert(!stop->trend.rigid&&!stop->prediction.rigid);
+ periodic=true;assert(!queue.commit(*stop,stop_at+1000000,stop_at+1000000,measured,speed));periodic=false;queue.reclaim();
+ for(int tick=0;tick<500;++tick){periodic=true;assert(queue.sample(stop_at+tick*1000000));periodic=false;bounded(queue);}
+ assert(queue.phase(stop_at+499000000)==4);assert(!allocated&&!deleted);
+ std::cout<<"PASS explicit rigid recipe: common waist motion, committed grasp/trend, C2 adoption, original PAUSE, zero periodic allocation\n";
+#endif
+}
+
+int replay_targets(bool rigid){
+ unsigned axes,count;std::cin>>axes>>count;assert(axes==16&&count);Wire wire;wire.version=rigid?3:2;
+ double low,high,maxv=0,maxa=0,maxj=0;
+ for(unsigned i=0;i<16;++i){std::cin>>low>>high>>wire.max_velocity[i]>>wire.max_acceleration[i]>>wire.max_jerk[i];maxv=std::max(maxv,wire.max_velocity[i]);maxa=std::max(maxa,wire.max_acceleration[i]);maxj=std::max(maxj,wire.max_jerk[i]);}
+ std::array<double,16> measured{},speed{};for(auto& x:measured)std::cin>>x;
+ std::vector<double> times(count),stamps(count);std::vector<std::array<double,16>> goals(count);
+ for(unsigned i=0;i<count;++i){std::cin>>times[i]>>stamps[i];for(auto& x:goals[i])std::cin>>x;}assert(std::cin.good());
+ TrajectoryQueue queue;unsigned next=0,accepted=0,fallback=0,samples=0;uint64_t sequence=0;bool paused=false;double ratio=0.;
+ const auto ns=[](double x){return int64_t(std::llround(x*1e9));};const int64_t base=10000000000LL;
+ for(int tick=0;tick<=int(std::ceil((times.back()+1.5)*1000));++tick){const double t=tick*.001;const int64_t now=base+ns(t);
+  while(next<count&&times[next]<=t+1e-9){Meta source{1234,++sequence,base+ns(stamps[next]),base+ns(stamps[next]) +200000000,sequence==1?uint8_t(1):uint8_t(0)};wire.segment_id=sequence;
+   TargetSnapshot snapshot;assert(queue.snapshot(now,now,source.operation,10000000,measured,snapshot));
+   auto prepared=TrajectoryQueue::prepare_target(wire,source,snapshot,goals[next],maxv,maxa,maxj);
+   if(rigid){accepted+=prepared->prediction.accepted;fallback+=!prepared->prediction.accepted;}
+   periodic=true;const auto error=queue.commit(*prepared,now+1000000,now+1000000,measured,speed);periodic=false;assert(!error);queue.reclaim();++next;
+  }
+  if(sequence&&!paused&&t>=stamps.back()+.14){Meta pause{1234,++sequence,now,now+2000000000,2};wire.version=2;wire.segment_id=sequence;TargetSnapshot snapshot;
+   assert(queue.snapshot(now,now,2,10000000,measured,snapshot));auto stop=TrajectoryQueue::prepare_target(wire,pause,snapshot,measured,maxv,maxa,maxj);
+   periodic=true;const auto error=queue.commit(*stop,now+1000000,now+1000000,measured,speed);periodic=false;assert(!error);queue.reclaim();paused=true;
+  }
+  if(!sequence)continue;
+  periodic=true;const bool valid=queue.sample(now);periodic=false;assert(valid);++samples;
+  for(unsigned i=0;i<16;++i){assert(std::isfinite(queue.q[i])&&queue.q[i]>=lower[i]-1e-8&&queue.q[i]<=upper[i]+1e-8);ratio=std::max({ratio,std::abs(queue.v[i])/wire.max_velocity[i],std::abs(queue.a[i])/wire.max_acceleration[i],std::abs(queue.j[i])/wire.max_jerk[i]});}
+ }
+ assert(ratio<=1.00001&&paused&&queue.phase(base+ns(times.back()+1.5))==4&&!allocated&&!deleted);
+ if(rigid)assert(accepted>0&&accepted+fallback==count);
+ std::cout<<"REPLAY_OK goals="<<count<<" rigid="<<rigid<<" geometric="<<accepted<<" fallback="<<fallback<<" samples="<<samples<<" maximum_dynamic_ratio="<<ratio<<" periodic_allocations="<<allocated<<" periodic_deletions="<<deleted<<" original_pause=1\n";return 0;
+}
+int main(int argc,char**){if(argc>1)return replay_targets(argc==2);rigid_reference_recipe();target_trend_history();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}

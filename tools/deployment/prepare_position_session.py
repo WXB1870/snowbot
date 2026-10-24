@@ -10,12 +10,14 @@ import tempfile
 
 ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
 COMPONENTS=('observation','takeover','timing','session','receipt','target')
-NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp')
+NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp','rigid_prediction.hpp')
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None):
+def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None,prediction_urdf=None,prediction_tool=None):
+    if bool(prediction_urdf)!=bool(prediction_tool):raise ValueError('RIGID_PREDICTION_MODEL_AND_TOOL_REQUIRED')
+    if prediction_urdf and (observation_only or with_impedance):raise ValueError('RIGID_PREDICTION_REQUIRES_TARGET_STREAM')
     if observation_only and with_impedance:raise ValueError("IMPEDANCE_REQUIRES_FULL_SESSION")
     source,output=Path(source).resolve(),Path(output).absolute()
     if not source.is_dir() or source==output or source in output.parents or output in source.parents:
@@ -66,6 +68,21 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 patches=(*patches,'pause_hold')
                 subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
                 patches=(*patches,'drive_maintenance')
+                if prediction_urdf:
+                    import importlib.util
+                    generator=native.parents[3]/'tools/analysis/replay_geometric_prediction.py'
+                    spec=importlib.util.spec_from_file_location('rigid_generator',generator)
+                    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+                    model_tool=json.loads(Path(prediction_tool).read_text())
+                    model_names=[f'arm_{side}_joint_{i}' for side in ('l','r') for i in range(1,8)]+['body_joint_1','body_joint_2']
+                    header=module.model_header(prediction_urdf,model_names,model_tool['left_frame'],model_tool['right_frame'])
+                    (stage/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').write_text(header)
+                    subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'prediction.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                    patches=(*patches,'prediction')
+        # Remove only patch-generated backups, retaining any pre-existing assets.
+        for p in (stage/'src').rglob('*.orig'):
+            if not (source/p.relative_to(stage/'src')).exists():p.unlink()
+
         changed={}
         for p in (stage/'src').rglob('*'):
             if not p.is_file():continue
@@ -79,6 +96,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         manifest=dict(schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
+            rigid_prediction=(dict(enabled=True,recipe_version=3,urdf_sha256=digest(Path(prediction_urdf)),tool_sha256=digest(Path(prediction_tool)),generator_sha256=digest(generator),names=model_names,left_frame=model_tool['left_frame'],right_frame=model_tool['right_frame']) if prediction_urdf else dict(enabled=False)),
             driver_started=False,hardware_commands_sent=False,full_build_verified=False,
             stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only and not with_impedance,
             session_wire_version=3,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_pause_ttl_ms=2000,
@@ -98,5 +116,7 @@ if __name__=='__main__':
     p.add_argument('--observation-only',action='store_true')
     p.add_argument('--with-impedance',action='store_true',help='Include optional backend; default execution mode remains position')
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
+    p.add_argument('--prediction-urdf',type=Path,help='Reviewed actual kinematic URDF for rigid prediction; local generation only')
+    p.add_argument('--prediction-tool',type=Path,help='Reviewed tool config selecting the two end frames; must accompany prediction-urdf')
     a=p.parse_args()
-    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source))
+    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool))

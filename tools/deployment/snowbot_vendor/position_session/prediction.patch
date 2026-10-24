@@ -1,0 +1,21 @@
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -149,7 +149,18 @@
+         const auto endpoint=position_connection::check_publisher(*this,position_feedback_sub_,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");
+         if(!endpoint.ready())throw std::invalid_argument(endpoint.reason);
+         position_session::FixedText publisher;if(!publisher.assign(endpoint.publisher_gid)||!(publisher==result.context.publisher))throw std::invalid_argument("feedback_publisher_changed");
++    },[this](const auto& result){
++        if(result.command.derived || result.packet->trajectory.version!=3)return;
++        position_session::PredictionTrace trace;if(result.prepared)trace=result.prepared->prediction;
++        RCLCPP_INFO(this->get_logger(),"TARGET_PREDICTION session=%llu sequence=%llu recipe=3 prepared=%d accepted=%d gain=%.3f prepare_us=%.3f effective_ns=%lld reason=%s error=%s",
++            static_cast<unsigned long long>(result.packet->meta.session),static_cast<unsigned long long>(result.packet->meta.sequence),
++            int(bool(result.prepared)),int(trace.accepted),trace.gain,result.prepare_us,
++            static_cast<long long>(result.snapshot.effective_ros),trace.reason,result.error.c_str());
+     });
++#ifdef SNOWBOT_RIGID_PREDICTION
++    RCLCPP_INFO(this->get_logger(),"TARGET_PREDICTION_MODEL sha256=%s dofs=%d left=%s right=%s",
++        prediction_model::source_sha256,prediction_model::dofs,prediction_model::left_frame,prediction_model::right_frame);
++#endif
+     position_stop_policy_=declare_parameter<std::string>("position_stop_policy","unconfirmed");
+     if(position_stop_policy_!="unconfirmed" && position_stop_policy_!="disable_no_load" && position_stop_policy_!="measured_hold")throw std::invalid_argument("position_stop_policy");
+     position_policy_=position_stop_policy_=="unconfirmed"?0:position_stop_policy_=="disable_no_load"?1:2;

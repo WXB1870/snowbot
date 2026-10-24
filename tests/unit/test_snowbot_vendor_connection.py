@@ -53,6 +53,28 @@ class PositionReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'IMPEDANCE_REQUIRES_FULL_SESSION'):
             vendor.prepare(self.baseline,self.work/'invalid-impedance',with_impedance=True,observation_only=True)
 
+    def test_rigid_model_is_explicit_hashed_and_incompatible_modes_rejected(self):
+        bindu=ROOT.parent/'galbot/bindu'
+        urdf=bindu/'src/hardware/bindu_description/urdf/snowbot_control.urdf'
+        tool=bindu/'src/integration/bindu_runtime/config/robots/snowbot/bimanual_snowbot_real.json'
+        if not urdf.is_file():self.skipTest('Canonical Bindu kinematic model unavailable')
+        output=vendor.prepare(self.baseline,self.work/'rigid',prediction_urdf=urdf,prediction_tool=tool)
+        manifest=json.loads((output/'position_release.json').read_text())
+        self.assertTrue(manifest['rigid_prediction']['enabled'])
+        self.assertEqual(manifest['rigid_prediction']['recipe_version'],3)
+        self.assertEqual(manifest['rigid_prediction']['urdf_sha256'],vendor.digest(urdf))
+        self.assertEqual(len(manifest['rigid_prediction']['names']),16)
+        self.assertIn('prediction',manifest['components'])
+        self.assertTrue((output/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').is_file())
+        self.assertIn('TARGET_PREDICTION ',(output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
+        self.assertFalse(list((output/'src').rglob('*.orig')))
+        self.assertFalse(json.loads((self.release/'position_release.json').read_text())['rigid_prediction']['enabled'])
+        for options in ({'observation_only':True},{'with_impedance':True}):
+            with self.assertRaisesRegex(ValueError,'REQUIRES_TARGET_STREAM'):
+                vendor.prepare(self.baseline,self.work/'bad-rigid',prediction_urdf=urdf,prediction_tool=tool,**options)
+        with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
+            vendor.prepare(self.baseline,self.work/'bad-model',prediction_urdf=urdf)
+
     def test_output_overlap_existing_and_missing_rejected(self):
         for source,output,error in ((self.baseline,self.baseline/'bad','OVERLAP'),(self.baseline,self.release,'EXISTS'),(self.work/'absent',self.work/'bad','MISSING')):
             with self.assertRaisesRegex(ValueError,error):vendor.prepare(source,output)
