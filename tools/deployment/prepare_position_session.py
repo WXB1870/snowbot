@@ -79,6 +79,9 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                     (stage/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').write_text(header)
                     subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'prediction.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
                     patches=(*patches,'prediction')
+        if not observation_only and not with_impedance:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'runtime_timing.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'runtime_timing')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()

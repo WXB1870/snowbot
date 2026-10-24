@@ -1,0 +1,146 @@
+--- a/servo_control/include/servo_control/position_clock.h
++++ b/servo_control/include/servo_control/position_clock.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <cstdint>
++#include <array>
+ namespace position_session {
+ // New position session only. Startup/exit and legacy timing remain untouched.
+ class Interval {
+@@ -10,4 +11,26 @@
+  void admit(int64_t now,bool takeover){if(takeover)reset(now);}
+  double tick(int64_t now){const auto old=last_;last_=now;return old>0 && now>old ? (now-old)*1e-9 : -1.;}
+ };
++// Diagnostic bookkeeping belongs to the single ROS/main thread only.
++// Fixed storage; no RT reader, allocation, logging or control decisions.
++struct LoopSpan { int64_t begin=0,end=0; };
++class LoopTiming {
++public:
++ enum Phase:unsigned {Prepare,FeedbackPublish,SpinHead,Compute,Admission,Sample,LegacyIO,WrenchPublish,SpinTail,Sleep,Count};
++ struct Snapshot { std::array<LoopSpan,Count> last{},longest{};uint64_t session=0; };
++private:
++ Snapshot spans_{};unsigned phase_=Count;int64_t begin_=0;
++ static void finish(Snapshot& s,unsigned phase,int64_t begin,int64_t end){
++  if(phase>=Count || begin<=0 || end<begin)return;
++  s.last[phase]={begin,end};
++  if(end-begin>s.longest[phase].end-s.longest[phase].begin)s.longest[phase]={begin,end};
++ }
++public:
++ void bind(uint64_t session){if(session!=spans_.session){spans_={};spans_.session=session;phase_=Count;begin_=0;}}
++ void mark(Phase phase,int64_t now){
++  if(!spans_.session)return;
++  finish(spans_,phase_,begin_,now);phase_=phase;begin_=now;
++ }
++ Snapshot snapshot(int64_t now)const{auto s=spans_;finish(s,phase_,begin_,now);return s;}
++};
+ } // namespace position_session
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -25,6 +25,7 @@
+ #include <thread>
+ #include <chrono>
+ #include "rclcpp/rclcpp.hpp"
++#include "rclcpp/executors/single_threaded_executor.hpp"
+ #include "std_msgs/msg/float64_multi_array.hpp"
+ #include "geometry_msgs/msg/wrench_stamped.hpp"
+ #include "geometry_msgs/msg/pose_stamped.hpp"
+@@ -204,6 +205,11 @@
+         void position_target_dispatch();void position_interrupt();
+         position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
+         double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
++        // One executor owns the callback groups throughout run(); both original
++        // callback pumps remain on the main thread, in their original order.
++        rclcpp::executors::SingleThreadedExecutor ros_executor_;
++        bool ros_executor_added_=false;
++        position_session::LoopTiming position_loop_timing_;
+         position_session::Interval position_interval_;
+         position_session::Output position_output_;
+         uint64_t position_frame_=0;
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -194,6 +194,20 @@
+             RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_FIRST_FAULT steady_ns=%lld session=%llu seq=%llu pdo=%llu origin=%s deadline_late_ms=%.6f checks=0x%x dt_ms=%.6f",
+                 (long long)fault.detected_ns,(unsigned long long)fault.session,(unsigned long long)fault.sequence,(unsigned long long)fault.pdo_sample,
+                 fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
++            // One bounded diagnostic batch from the existing non-RT timer.
++            // Spans include scheduler descheduling; they do not prove CPU cost.
++            const auto spans=position_loop_timing_.snapshot(position_session::steady_ns());
++            constexpr const char* names[]={"prepare","feedback_publish","spin_head","compute","admission","sample","legacy_io","wrench_publish","spin_tail","sleep"};
++            for(unsigned i=0;i<position_session::LoopTiming::Count;++i){
++                const auto& last=spans.last[i];const auto& longest=spans.longest[i];
++                if(!last.begin)continue;
++                RCLCPP_WARN(this->get_logger(),"POSITION_LOOP_TIMING fault_ns=%lld session=%llu phase=%s last_begin_ns=%lld last_end_ns=%lld max_begin_ns=%lld max_end_ns=%lld max_ms=%.6f",
++                    (long long)fault.detected_ns,(unsigned long long)spans.session,names[i],
++                    (long long)last.begin,(long long)last.end,(long long)longest.begin,(long long)longest.end,(longest.end-longest.begin)*1e-6);
++            }
++            RCLCPP_WARN(this->get_logger(),"POSITION_REFERENCE_PATH fault_ns=%lld rt_seen_deadline_ns=%lld main_deadline_ns=%lld main_sample_ros_ns=%lld feedback_pdo=%llu feedback_progress_ns=%lld feedback_received_ns=%lld feedback_source_ros_ns=%lld feedback_advances=%u",
++                (long long)fault.detected_ns,(long long)fault.rt_deadline_ns,(long long)position_output_.rt_deadline,(long long)position_output_.sample_time_ns,
++                (unsigned long long)position_feedback_.sample,(long long)position_feedback_.progress,(long long)position_feedback_.received,(long long)position_feedback_.source,position_feedback_.advances);
+             position_last_rt_cycle_fault_ns_=fault.detected_ns;
+         }
+         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+@@ -1008,7 +1022,11 @@
+
+ //ros消息参量发送模块 -- 反馈值发送函数
+ void ServoNode::ctlmsg_get(){
+-    rclcpp::spin_some(this->get_node_base_interface());  // 非阻塞检查回调
++    if(!ros_executor_added_){
++        ros_executor_.add_node(this->get_node_base_interface());
++        ros_executor_added_=true;
++    }
++    ros_executor_.spin_some();
+ }
+
+ //消息传输辅助函数 -- 仅仅进行一次消息的接收(与底层关节的通讯)
+@@ -1371,6 +1389,8 @@
+     drive_startup_finished_=!sigInterrupt.load();
+     //开启ros2循环
+     while (rclcpp::ok()){
++        position_loop_timing_.bind(position_gate_.last().session);
++        position_loop_timing_.mark(position_session::LoopTiming::Prepare,position_session::steady_ns());
+         //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
+         if (sigInterrupt.load() && !shutdown_mode_) {
+             shutdown_mode_ = true;
+@@ -1468,10 +1488,13 @@
+         }
+
+         //发送一轮反馈值
++        position_loop_timing_.mark(position_session::LoopTiming::FeedbackPublish,position_session::steady_ns());
+         msg_publish();
+
+         //获取一轮控制量
++        position_loop_timing_.mark(position_session::LoopTiming::SpinHead,position_session::steady_ns());
+         ctlmsg_get();
++        position_loop_timing_.mark(position_session::LoopTiming::Compute,position_session::steady_ns());
+
+         //----- 关机回零: 覆盖上位机目标, 走同一套插补链路 (像上位机下发一样) -----
+         if (shutdown_mode_) {
+@@ -1763,7 +1786,13 @@
+
+         //----------------------
+         //进行一轮EtherCAT发送
+-        if(!shutdown_mode_ && !sigInterrupt.load()){position_poll();position_step();}
++        if(!shutdown_mode_ && !sigInterrupt.load()){
++            position_loop_timing_.mark(position_session::LoopTiming::Admission,position_session::steady_ns());
++            position_poll();
++            position_loop_timing_.mark(position_session::LoopTiming::Sample,position_session::steady_ns());
++            position_step();
++        }
++        position_loop_timing_.mark(position_session::LoopTiming::LegacyIO,position_session::steady_ns());
+         EtherCATrun();
+         if(shutdown_mode_)EtherCAT_positionBypass(); // Hand back only after original exit target cache is written.
+         if (arm_shutdown_handoff_pending && shutdown_mode_) {
+@@ -1773,9 +1802,12 @@
+         }
+
+         //发布六维力传感器数据
++        position_loop_timing_.mark(position_session::LoopTiming::WrenchPublish,position_session::steady_ns());
+         publish_sensor_data();
+
+         //尾处理代码
+-        rclcpp::spin_some(this->get_node_base_interface());
++        position_loop_timing_.mark(position_session::LoopTiming::SpinTail,position_session::steady_ns());
++        ctlmsg_get();
++        position_loop_timing_.mark(position_session::LoopTiming::Sleep,position_session::steady_ns());
+         loop_rate.sleep();
+     }

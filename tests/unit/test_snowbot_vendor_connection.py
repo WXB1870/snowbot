@@ -20,7 +20,7 @@ class PositionReleaseTests(unittest.TestCase):
     def tearDownClass(cls):cls.tmp.cleanup()
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertFalse(m['latest_colleague_source_verified']);self.assertEqual(m['stop_policy'],'unconfirmed')
         for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):

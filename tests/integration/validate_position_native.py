@@ -196,6 +196,16 @@ def write_position_cycle_check(source, work, root):
     checks=(root/'test_position_cycle.inc').read_text()
     path=work/'test_production_position_cycle.cpp';path.write_text(preamble+clock+body+methods+checks);return path
 
+def write_loop_runtime_check(source, work, root):
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    begin=text.index('void ServoNode::ctlmsg_get()')
+    end=text.index('\n}',begin)+2
+    fixture=(root/'test_position_loop_runtime.cpp').read_text()
+    path=work/'test_position_loop_runtime.cpp'
+    path.write_text(fixture.replace('// @ACTUAL_CALLBACK_PUMP@',text[begin:end]))
+    return path
+
+
 def write_legacy_ingress_check(source, work, root):
     """Run the actual old-channel callback with memory-only command/enable sinks."""
     text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
@@ -267,6 +277,9 @@ def main():
     if (args.source/'servo_control/include/servo_control/drive_maintenance.h').is_file():
         names.extend(('test_drive_reset','test_drive_cycle'))
         sources.extend((args.source/'servo_control/include/servo_control/drive_maintenance.h',args.source/'servo_control/include/servo_control/ethercat_driver.h',root/'test_drive_cycle.inc'))
+    if 'LoopTiming' in (args.source/'servo_control/include/servo_control/position_clock.h').read_text():
+        names.append('test_position_loop_runtime')
+        sources.extend((args.source/'servo_control/include/servo_control/position_clock.h',args.source/'servo_control/include/ros_controller/rosLoop.h'))
     sources.append(Path(__file__).resolve())
     if args.baseline:sources.append(args.baseline/'dual_arm_control/src/controller/ArmInterface.cpp')
     sources.extend(root/(name+'.cpp') for name in names if (root/(name+'.cpp')).is_file())
@@ -281,7 +294,9 @@ def main():
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
         for name in names:
             binary=work/name
-            if name=='test_drive_cycle':
+            if name=='test_position_loop_runtime':
+                copied=write_loop_runtime_check(args.source,work,root)
+            elif name=='test_drive_cycle':
                 copied=write_drive_cycle_check(args.source,work,root)
             elif name=='test_production_legacy_ingress':
                 copied=write_legacy_ingress_check(args.source,work,root)
