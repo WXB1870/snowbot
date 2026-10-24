@@ -3,6 +3,6 @@
     position_reference_mode: target_stream
     position_stop_policy: measured_hold
     position_target_prepare_ms: 10.0
-    trajectory_max_velocity: 0.5
-    trajectory_max_acceleration: 1.5
+    trajectory_max_velocity: 1.0
+    trajectory_max_acceleration: 4.5
     trajectory_max_jerk: 162.0
