@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>snowbot_bringup</name>
+  <version>0.1.0</version>
+  <description>Snowbot application assembly and configuration</description>
+  <maintainer email="24S136111@stu.hit.edu.cn">xavier</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>bindu_runtime</exec_depend>
+  <exec_depend>snowbot_description</exec_depend>
+  <exec_depend>snowbot_hardware</exec_depend>
+  <exec_depend>snowbot_teleop</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>bindu_contracts</exec_depend>
+  <exec_depend>bindu_hardware</exec_depend>
+  <exec_depend>bindu_teleoperation</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

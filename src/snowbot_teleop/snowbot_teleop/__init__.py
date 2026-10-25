@@ -1,0 +1,1 @@
+"""Snowbot PICO operation workflow."""

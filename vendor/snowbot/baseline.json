@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "role": "immutable_input",
+  "source": "artifacts/position-session-20261021/baseline",
+  "manifest": "tools/deployment/snowbot_vendor/position_session/baseline_manifest.json",
+  "manifest_sha256": "6299331c0c1eb178244dd1be96a17870ad4deb4b198ea8f4bdfd1541c0ec0d1f"
+}

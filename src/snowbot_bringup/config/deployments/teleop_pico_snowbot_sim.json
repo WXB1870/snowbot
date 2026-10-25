@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "robot_launch": "robot_teleop.launch.py",
+  "arguments": {
+    "runtime_mode": "simulation",
+    "robot_config": "package://snowbot_bringup/config/robots/snowbot/robot_snowbot.json",
+    "namespace": "bindu_teleop",
+    "device_backend": "kinematic",
+    "side": "left",
+    "tool_input_source": "vr",
+    "vr_enabled": false,
+    "description_enabled": false,
+    "tool_display_enabled": true,
+    "recording_mode": "compact",
+    "pico_enabled": true,
+    "pico_config": "package://snowbot_bringup/config/robots/snowbot/pico_snowbot_sim.json"
+  },
+  "robot_package": "snowbot_bringup"
+}

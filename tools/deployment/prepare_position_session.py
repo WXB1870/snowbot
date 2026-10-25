@@ -13,6 +13,19 @@ ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
 COMPONENTS=('observation','takeover','timing','session','receipt','target')
 NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp','rigid_prediction.hpp')
 
+def baseline_source():
+    root=Path(__file__).resolve().parents[2]
+    identity=json.loads((root/'vendor/snowbot/baseline.json').read_text())
+    manifest=root/identity['manifest']
+    if (identity.get('schema')!=1 or identity.get('role')!='immutable_input' or
+            hashlib.sha256(manifest.read_bytes()).hexdigest()!=identity['manifest_sha256']):
+        raise ValueError('POSITION_BASELINE_IDENTITY_MISMATCH')
+    source=(root/identity['source']).resolve()
+    if root not in source.parents or not source.is_dir():
+        raise ValueError('POSITION_BASELINE_SOURCE_MISSING')
+    return source
+
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -32,7 +45,13 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
     if not source.is_dir() or source==output or source in output.parents or output in source.parents:
         raise ValueError('POSITION_SOURCE_OUTPUT_OVERLAP_OR_MISSING')
     if output.exists() or output.is_symlink():raise ValueError('POSITION_OUTPUT_EXISTS')
-    native=Path(execution_source).resolve() if execution_source else Path(__file__).resolve().parents[3]/'galbot/bindu/src/control/bindu_execution/native'
+    if execution_source:
+        native=Path(execution_source).resolve()
+    elif not observation_only:
+        from bindu_contracts.resources import package_share
+        native=package_share('bindu_execution')/'native'
+    else:
+        native=None
     if not observation_only and any(not (native/n).is_file() or (native/n).is_symlink() for n in NATIVE_FILES):
         raise ValueError('POSITION_EXECUTION_SOURCE_REQUIRED')
     baseline=json.loads((ASSETS/'baseline_manifest.json').read_text())
@@ -79,16 +98,14 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
                 patches=(*patches,'drive_maintenance')
                 if prediction_urdf:
-                    import importlib.util
-                    generator=native.parents[3]/'tools/analysis/replay_geometric_prediction.py'
-                    spec=importlib.util.spec_from_file_location('rigid_generator',generator)
-                    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+                    from bindu_kinematics import model_codegen
+                    generator=Path(model_codegen.__file__)
                     model_tool=json.loads(Path(prediction_tool).read_text())
                     model_names=[f'arm_{side}_joint_{i}' for side in ('l','r') for i in range(1,8)]+['body_joint_1','body_joint_2']
                     arm_reference_margin=model_tool.get('posture_reference_margin_rad',0.)
                     if (type(arm_reference_margin) not in (int,float) or not math.isfinite(arm_reference_margin)
                             or not 0 <= arm_reference_margin < .2):raise ValueError('ARM_REFERENCE_MARGIN_INVALID')
-                    header=module.model_header(prediction_urdf,model_names,model_tool['left_frame'],model_tool['right_frame'])
+                    header=model_codegen.model_header(prediction_urdf,model_names,model_tool['left_frame'],model_tool['right_frame'])
                     header+='\n#define SNOWBOT_ARM_REFERENCE_MARGIN '+repr(float(arm_reference_margin))+'\n'
                     (stage/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').write_text(header)
                     subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'prediction.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
@@ -149,7 +166,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('source',type=Path);p.add_argument('--output',type=Path,required=True)
+    p.add_argument('source',type=Path,nargs='?',default=baseline_source());p.add_argument('--output',type=Path,required=True)
     p.add_argument('--observation-only',action='store_true')
     p.add_argument('--with-impedance',action='store_true',help='Include optional backend; default execution mode remains position')
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')

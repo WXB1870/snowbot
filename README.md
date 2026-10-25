@@ -1,6 +1,6 @@
 # Snowbot
 
-Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录维护本轮118现场联调的专属资料：底层源码快照、补丁、现场问题、恢复备份与验证记录；Bindu公共框架和可复用适配接口仍在 `../galbot/bindu/`。
+Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录维护Snowbot应用包、底层准备工具、专属配置和现场记录：源码基线、补丁、问题、恢复备份与验证证据；Bindu公共框架和可复用适配接口仍在 `../galbot/bindu/`。
 
 双臂遥操是本项目的定制场景。实现时允许按需修改Bindu相关代码；可复用的能力和接口改进在Bindu维护，定制操作流程、按键方案、场景参数、现场配方与验证记录在Snowbot维护。现有双臂运行实现仍在Bindu，本轮补充归属和修改规则。
 
@@ -16,6 +16,36 @@ Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录�
 118已完成本轮位置会话软件部署：Bindu `5ee3868`／底层`f02b5de`叠加保留4处同事修改；后续初始化诊断版、现场运行／反馈时效限制及备份配方统一见[当前进度](当前进度.md)。此前原版恢复、JSON、源码归档和bundle保留为历史证据，其中旧绝对路径及当时的Bindu路径只用于溯源。
 
 本目录不自动连接、同步或启动机器人。机器人运动禁令及本机修改后同步的协作边界见[本项目规范](AGENTS.md#3-机器人软件工程约束)。
+
+## 当前工程结构
+
+```text
+snowbot/
+├── src/
+│   ├── snowbot_bringup/       launch、部署配方与机器人配置
+│   ├── snowbot_description/   URDF、CAD及来源声明
+│   ├── snowbot_hardware/      厂商消息、会话、反馈、夹爪及设备节点
+│   └── snowbot_teleop/        PICO准备、装卸、操作状态机及协调节点
+├── vendor/snowbot/            冻结基线的路径与SHA身份，不重复复制原始源码
+├── tools/deployment/         唯一底层源码准备器与补丁维护源
+├── tests/                    底层离线检查；跨框架回归沿用Bindu tests
+└── artifacts/                原始基线、冻结发布和实验数据
+```
+
+配置的唯一维护目录为 `src/snowbot_bringup/config/`：`deployments/` 选择装配，`robots/snowbot/` 保存本体索引、profile、工具、PICO、夹爪及可选底盘参数。沿用已有文件名、字段与数值，避免结构迁移同时改变控制行为。部署配方用 `robot_package=snowbot_bringup` 选择应用 launch，资源通过 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 解析。现场 `site.json` 保存实际选择与网络、设备、标定条件；未知字段及无效组合仍拒绝。
+
+厂商基线保留已发布的 `artifacts/position-session-20261021/baseline/`，由 `vendor/snowbot/baseline.json` 固定其清单身份；日常修改在准备器、补丁与公共头文件维护，生成目录只作输出，不再作为第二个维护源。原始文件与同事资产不改写，`artifacts/COLCON_IGNORE` 与 `vendor/snowbot/COLCON_IGNORE` 防止外层构建误装配历史源码或原始驱动。Bindu原导入入口为兼容转发，新实现只维护一次。
+
+从Bindu执行的x86部署，先加载匹配ROS与厂商消息，再选定本工作区：
+
+```bash
+python3 -m tools.deployment.x86_real prepare \
+  --application-source /绝对路径/snowbot \
+  --vendor-setup /绝对路径/厂商安装/local_setup.bash
+python3 -m tools.deployment.x86_real build
+```
+
+构建不等于启动。环境与源码身份保存在部署清单；有效配置、来源及哈希保存在 `resolved-config.json`。现场启停与物理验收仍由人员执行。
 
 ## 源码与离线检查
 
