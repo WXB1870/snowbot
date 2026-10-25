@@ -13,7 +13,50 @@ EtherCATDriver::EtherCATDriver(){
  inOP_=true;cycle_count_=0;
 }
 EtherCATDriver::~EtherCATDriver(){}
+// Run the actual pre-send copy and post-receive capture with memory PDOs.
+// Deliberately change outgoing buffers after capture: a reconstructed command
+// or a later buffer read must not masquerade as the pre-send sample.
+void check_csp_snapshot(){
+ std::array<csp_rx_t,4> rx{};std::array<csp_tx_t,4> tx{};
+ std::array<csp_rx_t*,20> csp_rx_{};std::array<csp_tx_t*,20> csp_tx_{};
+ std::array<motor_tx_pdo_t*,20> m_tx_{};std::array<bool,20> is_csp_motor_{};
+ position_session::Observation observation_rt_;std::atomic<int> wkc_{67};int expectedWKC_=67;
+ uint64_t timing_over_1ms_=0;
+ for(unsigned i=0;i<4;++i){unsigned m=16+i;is_csp_motor_[m]=true;csp_rx_[m]=&rx[i];csp_tx_[m]=&tx[i];
+  rx[i].position=2147483647-int(i);rx[i].velocity=-2147483647+int(i);rx[i].torque=-32768;
+  rx[i].controlword=0x1f;rx[i].ModeOp=8;
+  tx[i].position=-2147483647+int(i);tx[i].velocity=2147483647-int(i);tx[i].ModeOp=i==2?9:8;
+  tx[i].statusword=0x1237;tx[i].torque=32767;
+ }
+ auto collect=[&]{
+  const auto io_start=std::chrono::steady_clock::now();
+  // @CSP_CAPTURE@
+  for(auto& value:rx)--value.position; // Not the values that were captured.
+  const auto io_end=std::chrono::steady_clock::now();
+  // @CSP_RECEIVE@
+ };
+ collect();const auto first=observation_rt_;
+ assert(first.csp.command_mask==0xf0000&&first.csp.feedback_mask==0xf0000);
+ assert(first.csp.send_attempt_ns>0&&first.csp.send_attempt_ns<=first.attempted_ns);
+ assert(first.csp.target_position[2]==2147483645&&first.csp.target_position[2]!=rx[2].position);
+ assert(first.csp.target_velocity[3]==-2147483644&&first.csp.target_torque[2]==-32768);
+ assert(first.csp.controlword[2]==0x1f&&first.csp.mode_command[2]==8&&first.csp.mode_display[2]==9);
+ assert(first.csp.actual_position[2]==tx[2].position&&first.csp.actual_velocity[2]==tx[2].velocity);
+ assert(first.torque_raw[18]==32767&&first.status[18]==0x1237);
+ // Bad WKC never validates stale incoming mode/encoder data, but still reports
+ // the distinct outgoing attempt. No synthetic mode 8 or zero feedback.
+ wkc_=66;tx[2].ModeOp=-1;collect();
+ assert(observation_rt_.sample==first.sample&&observation_rt_.attempt==first.attempt+1);
+ assert(observation_rt_.csp.command_mask==0xf0000&&observation_rt_.csp.feedback_mask==0);
+ assert(observation_rt_.valid_mask==0&&observation_rt_.csp.mode_display[2]==-1);
+ // A missing PDO pointer and a non-CSP slot must not inherit old availability.
+ wkc_=67;csp_rx_[18]=nullptr;csp_tx_[19]=nullptr;is_csp_motor_[16]=false;collect();
+ assert(observation_rt_.csp.command_mask==0xa0000&&observation_rt_.csp.feedback_mask==0x60000);
+ assert(observation_rt_.csp.mode_command[2]==0&&observation_rt_.csp.mode_display[3]==0);
+ assert(first.csp.mode_display[2]==9); // Previous copies remain detached.
+}
 int main(){
+ check_csp_snapshot();
  EtherCATDriver d;
  std::array<motor_rx_pdo_t,16> rx{};std::array<motor_tx_pdo_t,16> tx{};
  std::array<csp_rx_t,4> crx{};std::array<csp_tx_t,4> ctx{};
@@ -39,7 +82,12 @@ int main(){
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
  }
  assert(pulses>0&&pulses<=10&&d.drive_reset_.state()==drive_maintenance::cleared);
+ obs.csp.command_mask=obs.csp.feedback_mask=0xc0000;obs.csp.mode_command[2]=8;obs.csp.mode_display[2]=9;
+ obs.csp.target_position[2]=123456;obs.csp.actual_position[2]=-765;
  d.observation_cache_.publish(obs);const auto report=d.driveDiagnostics();
+ assert(report.find("mode_command=8 mode_display=9")!=std::string::npos);
+ assert(report.find("target_position_raw=123456")!=std::string::npos);
+ assert(report.find("actual_position_raw=-765")!=std::string::npos);
  assert(report.find("manufacturer_error_code=unavailable_not_mapped")!=std::string::npos);
  for(const char* label:{"L1 slot=0","L8 slot=7","R1 slot=8","R8 slot=15","Head1 slot=16","Waist2 slot=19"})assert(report.find(label)!=std::string::npos);
 #if __has_include("position_waist_units.h")

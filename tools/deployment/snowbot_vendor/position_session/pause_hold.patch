@@ -88,7 +88,7 @@
      if (shutdown_mode_) {
 --- a/servo_control/include/servo_control/position_observation.h
 +++ b/servo_control/include/servo_control/position_observation.h
-@@ -11,7 +11,17 @@
+@@ -11,8 +11,18 @@
  inline int64_t steady_ns() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
  }
@@ -103,6 +103,7 @@
 +};
  struct Observation {
 + CycleFault cycle_fault{};
+  CspPdoSnapshot csp{};
   std::array<float,20> position{},speed{},current{};
   std::array<uint16_t,20> status{};
   std::array<int16_t,20> torque_raw{};uint32_t current_valid_mask=0,torque_raw_valid_mask=0;

@@ -220,7 +220,7 @@
  /*
   * @brief EtherCAT 直接驱动实现
   *        基于 SNOWBOT_SOEM_Demo/sensor_motor_test.c
-@@ -626,6 +627,25 @@
+@@ -626,6 +627,35 @@
  }
  
  // ========== 单次 PDO 收发 (由 ROS loop 按 1kHz 调用) ==========
@@ -239,6 +239,16 @@
 +            << " sw=0x" << std::hex << s.status[i] << " cw=0x" << motor_sent_cw_[i].load() << std::dec
 +            << " fault=" << bool(s.status[i]&8) << " operation_enabled=" << bool(s.status[i]&4)
 +            << " requested=" << motor_enable_mask_[i].load() << " q=" << s.position[i] << " v=" << s.speed[i];
++        if(i>=16){const auto k=i-16;
++            out << " csp_send_attempt_ns=" << s.csp.send_attempt_ns
++                << " csp_command_available=" << bool(s.csp.command_mask&(1u<<i))
++                << " csp_feedback_valid=" << bool(s.csp.feedback_mask&(1u<<i))
++                << " csp_cw=" << s.csp.controlword[k]
++                << " mode_command=" << int(s.csp.mode_command[k]) << " mode_display=" << int(s.csp.mode_display[k])
++                << " target_position_raw=" << s.csp.target_position[k] << " target_velocity_raw=" << s.csp.target_velocity[k]
++                << " target_torque_raw=" << s.csp.target_torque[k]
++                << " actual_position_raw=" << s.csp.actual_position[k] << " actual_velocity_raw=" << s.csp.actual_velocity[k];
++        }
 +    }
 +    return out.str();
 +}

@@ -40,7 +40,12 @@ def write_drive_cycle_check(source, work, root):
     diag=text[text.index('std::string EtherCATDriver::driveDiagnostics() {'):text.index('void EtherCATDriver::cycle() {')]
     output=work/'test_drive_cycle.cpp'
     extra='#include "position_waist_units.h"\n' if (driver/'include/position_waist_units.h').is_file() else ''
-    output.write_text(extra+(root/'test_drive_cycle.inc').read_text().replace('// @ACTUAL_CYCLE@',cycle).replace('// @ACTUAL_DIAGNOSTICS@',diag))
+    capture_start=text.index('    position_session::CspPdoSnapshot csp_snapshot;')
+    capture=text[capture_start:text.index('    ec_send_processdata();',capture_start)]
+    receive_start=text.index('    auto& obs=observation_rt_;')
+    receive=text[receive_start:text.index('    obs.session=',receive_start)]
+    output.write_text(extra+(root/'test_drive_cycle.inc').read_text().replace('// @ACTUAL_CYCLE@',cycle)
+        .replace('// @ACTUAL_DIAGNOSTICS@',diag).replace('// @CSP_CAPTURE@',capture).replace('// @CSP_RECEIVE@',receive))
     return output
 
 def write_pdo_check(source, work):

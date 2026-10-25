@@ -126,6 +126,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 max_sample_age_ms=20 if not observation_only and not with_impedance else None,
                 timestamp='acquisition_start' if not observation_only and not with_impedance else None,fastdds_default='ASYNCHRONOUS' if not observation_only and not with_impedance else None,
                 site_override_preserved=True),
+            csp_diagnostics=dict(version=1,slots=[16,17,18,19],command_source='pre_send_pdo_buffer',
+                feedback_source='same_receive_attempt',sdo_reads_added=False,physical_units_verified=False),
             driver_started=False,hardware_commands_sent=False,full_build_verified=False,
             waist_units=dict(enabled=waist_velocity_ratio is not None,position_scale_changed=False,
                 physical_units_verified=False,motor_per_position_velocity=waist_velocity_ratio,

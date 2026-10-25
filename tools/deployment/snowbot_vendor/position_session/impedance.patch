@@ -64,9 +64,10 @@
          rclcpp::Publisher<snowbot_ctl_msgs::msg::PositionObservation>::SharedPtr position_observation_pub_;
 --- a/servo_control/include/servo_control/position_observation.h
 +++ b/servo_control/include/servo_control/position_observation.h
-@@ -13,6 +13,8 @@
+@@ -13,7 +13,9 @@
  }
  struct Observation {
+  CspPdoSnapshot csp{};
   std::array<float,20> position{},speed{},current{};
 + std::array<float,12> wrench{};uint8_t sensor_valid_mask=0,sensor_initialized_mask=0,sensor_advancing_mask=0;
 + std::array<uint16_t,2> sensor_data_no{};std::array<int64_t,2> sensor_sampled_ns{};
@@ -192,9 +193,15 @@
      std::lock_guard<std::mutex> lock(rt_reference_mutex_);
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -95,6 +95,8 @@
+@@ -95,12 +95,14 @@
          m.receive_attempt=s.attempt;m.wkc=s.wkc;m.expected_wkc=s.expected_wkc;
          m.valid_mask=m.pdo_age>=0 && m.pdo_age<=.02 ? s.valid_mask : 0;
+         m.csp_diagnostics_version=1;m.csp_send_attempt_ns=s.csp.send_attempt_ns;
+         m.csp_command_mask=m.attempt_age>=0 && m.attempt_age<=.02 ? s.csp.command_mask : 0;
+         m.csp_feedback_mask=m.valid_mask&s.csp.feedback_mask;
+         m.csp_controlword=s.csp.controlword;m.csp_mode_command=s.csp.mode_command;m.csp_mode_display=s.csp.mode_display;
+         m.csp_target_position_raw=s.csp.target_position;m.csp_target_velocity_raw=s.csp.target_velocity;m.csp_target_torque_raw=s.csp.target_torque;
+         m.csp_actual_position_raw=s.csp.actual_position;m.csp_actual_velocity_raw=s.csp.actual_velocity;
          for(int i=0;i<20;++i){m.position[i]=s.position[i];m.speed[i]=s.speed[i];m.current[i]=s.current[i];m.status[i]=s.status[i];}
 +        m.wrench=s.wrench;m.sensor_valid_mask=s.sensor_valid_mask;m.sensor_data_no=s.sensor_data_no;
 +        for(unsigned a=0;a<2;++a)m.sensor_age[a]=s.sensor_sampled_ns[a]>0 && now>=s.sensor_sampled_ns[a] ? (now-s.sensor_sampled_ns[a])*1e-9 : -1.;
