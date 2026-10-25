@@ -1,0 +1,10 @@
+# Goal: 指定目标高度（mm）。0 表示使用记忆点
+int32 target_height
+---
+# Result
+bool success
+string message
+---
+# Feedback
+int32 current_height
+float32 progress

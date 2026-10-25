@@ -1,0 +1,32 @@
+# ============================================================
+# 机械臂零位配置
+# ============================================================
+# 协议说明：
+#   1. 所有关节角度单位为弧度 (rad)
+#   2. 关节顺序与实物双臂关节顺序一致
+#   3. 手臂位姿均为相对于腰部坐标系 waist_pitch_joint 的位姿
+# ============================================================
+
+left_arm:
+  left_shoulder_pitch_joint: 0.0
+  left_shoulder_roll_joint:  0.0
+  left_shoulder_yaw_joint:   0.0
+  left_elbow_joint:          -1.31
+  left_wrist_roll_joint:     0.0
+  left_wrist_pitch_joint:    0.26
+  left_wrist_yaw_joint:      0.0
+
+right_arm:
+  right_shoulder_pitch_joint: 0.0
+  right_shoulder_roll_joint:  0.0
+  right_shoulder_yaw_joint:   0.0
+  right_elbow_joint:          1.31
+  right_wrist_roll_joint:     0.0
+  right_wrist_pitch_joint:    -0.26
+  right_wrist_yaw_joint:      0.0
+
+left_gripper:
+  left_gripper_joint: 0.0
+
+right_gripper:
+  right_gripper_joint: 0.0

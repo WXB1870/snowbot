@@ -11,11 +11,33 @@ Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录�
 - [底层驱动问题记录](底层驱动问题记录.md)：接口差异、问题证据和修复历史。
 - [当日过程记录](过程记录/2026-10-21.md)：118联调与资料迁移记录。
 
-改进版可编辑源码位于 [development-src](artifacts/snowbot-118-session-20261021/development-src/)，完整归档和恢复回执与其同目录。本轮位置会话唯一准备工具为[prepare_position_session.py](tools/deployment/prepare_position_session.py)，补丁与共用头在`tools/deployment/snowbot_vendor/position_session/`，候选源码／回退基线及证据在`artifacts/position-session-20261021/`，配套离线测试在`tests/`；旧`prepare_snowbot_vendor.py`仅复现历史补丁。
+底层原始源码基线位于 [baseline](artifacts/position-session-20261021/baseline/)，包含上层、中层、servo、消息、头腰、力传感器和模型包；配套位置会话源码由[prepare_position_session.py](tools/deployment/prepare_position_session.py)生成，补丁与共用头在`tools/deployment/snowbot_vendor/position_session/`，离线测试在`tests/`。早期`development-src`、完整恢复归档与现场证据仅保留在本地，不随Git分发；旧`prepare_snowbot_vendor.py`用于复现历史补丁。
 
 118已完成本轮位置会话软件部署：Bindu `5ee3868`／底层`f02b5de`叠加保留4处同事修改；后续初始化诊断版、现场运行／反馈时效限制及备份配方统一见[当前进度](当前进度.md)。此前原版恢复、JSON、源码归档和bundle保留为历史证据，其中旧绝对路径及当时的Bindu路径只用于溯源。
 
 本目录不自动连接、同步或启动机器人。机器人运动禁令及本机修改后同步的协作边界见[本项目规范](AGENTS.md#3-机器人软件工程约束)。
+
+## 源码与离线检查
+
+- Snowbot源码：[WXB1870/snowbot](https://github.com/WXB1870/snowbot)。
+- Bindu框架与原生执行实现：[WXB1870/bindu](https://github.com/WXB1870/bindu)。
+
+两个仓库可克隆在同一父目录。以下在Snowbot仓库根目录执行，显式指定Bindu源码路径；只生成本机源码副本，不连接设备、不构建或启动驱动。已有输出目录不会覆盖。
+
+```bash
+git rev-parse HEAD
+python3 -m tools.deployment.prepare_position_session \
+  artifacts/position-session-20261021/baseline \
+  --execution-source ../bindu/src/control/bindu_execution/native \
+  --output /tmp/snowbot-position
+python3 -m tests.integration.validate_position_invariants \
+  --baseline artifacts/position-session-20261021/baseline \
+  --source /tmp/snowbot-position/src
+python3 -m tests.integration.validate_position_native --source /tmp/snowbot-position/src
+python3 -m tests.integration.validate_position_model --source /tmp/snowbot-position/src
+```
+
+原始基线按现有完整文件清单纳入Git，保留原目录及文件；准备器逐文件校验SHA后应用补丁，并记录所选Bindu原生文件指纹。生成结果包含配套位置会话消息，原消息保持不变。完整servo构建另需匹配的ROS、Linux、Pinocchio及外部`kinematic_pose_msgs`等依赖；源码生成和内存检查不代表完整构建、现场部署或运动验收。部分厂商包许可字段未完整声明，第三方源码沿用原许可证。
 
 ## 现场条件与待确认项
 

@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>snowbot_servo_control</name>
+  <version>0.0.1</version>
+  <description>EtherCAT servo motor control ROS2 package</description>
+  <maintainer email="your@email.com">Your Name</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 主要依赖 -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>kinematic_pose_msgs</depend>
+  <depend>snowbot_ctl_msgs</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>boost</depend>
+  <depend>eigen</depend>
+  <!-- pinocchio 由 robotpkg 提供 (apt: robotpkg-pinocchio) -->
+  <depend>pinocchio</depend>
+
+  <!-- 类型支持 -->
+  <depend>rosidl_typesupport_cpp</depend>
+
+  <!-- 测试脚本运行时依赖 (Python) -->
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+
+  <!-- 构建时依赖 -->
+  <build_depend>yaml-cpp</build_depend>
+
+  <!-- 其他执行时依赖 -->
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher_gui</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

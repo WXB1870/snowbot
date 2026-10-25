@@ -1,0 +1,350 @@
+# 阻抗控制参数配置 (snowbot_servo_control/servo_node)
+#
+# 文件位置: snowbot_ctl_msgs/config/impedance_params.yaml
+# 加载方式: servo_node 启动时由 initImpedanceControllers() 自动加载,
+#          无需 ros2 run ... --params-file 显式指定.
+# 若文件加载失败或字段缺失, 自动回退到代码中的默认值.
+#
+# 单位约定:
+#   stiffness  平动 [N/m]   转动 [Nm/rad]
+#   damping    平动 [N*s/m] 转动 [Nm*s/rad]
+#
+# 参数说明:
+#   stiffness           6 维, 笛卡尔空间刚度 [kx, ky, kz, krx, kry, krz]
+#   damping             6 维, 阻尼系数 (mass=0 时为 viscous damping, >0 为临界阻尼参考)
+#   taskspace_mass      标量, >0 启用惯量整形 (M * ddx + D * dx + K * x = F_ext)
+#                              =0 仅阻尼模式 (D * dx + K * x = F_ext)
+#   cmd_lpf_alpha       力矩命令低通滤波系数 (0~1, 越大滤波越强, 0=不滤波)
+#   acc_lpf_alpha       加速度低通滤波系数
+#   has_effort_states    是否使用真实关节力矩反馈 (false: 仅用前馈)
+#   tool_mass           末端工具质量 [kg], >0 启用实时重力补偿, =0 不补偿
+#   tool_com_in_tcp     工具质心在 TCP(夹爪中心) 坐标系下的位置 [x, y, z] [m]
+#                       用于计算重力产生的力矩 M = r × F
+#                       (相比 ee_link, 用 TCP 表达更直观, 标定时直接以夹爪中心为基准)
+#   sensor_to_ee        传感器坐标系相对 ee_link 的位姿 [x, y, z, qx, qy, qz, qw]
+#                       用于把 sensor wrench 从传感器自身系变换到 base 系
+#                       (实际硬件中传感器与 ee_link 通常不重合, 既有平移也有旋转)
+#   tcp_to_ee           TCP(夹爪中心) 坐标系相对 ee_link 的位姿 [x, y, z, qx, qy, qz, qw]
+#                       用于把 FK 得到的 ee_link 位姿变换到 TCP, 与上位机期望位姿对齐
+#                       (sensor 与 tcp 间的相对位姿可由这两者推算, 无需重复配置)
+#   effort_limit_per_joint  关节力矩安全限幅 [Nm], 支持:
+#                          - 标量: 7 关节统一限幅 (如 5.0)
+#                          - 7 维数组: 各关节单独限幅
+#                          在 updateEffortCommands 输出前做对称限幅 |tau|<=limit
+#                          建议: 关节 1-4 设 30 Nm, 关节 5-7 设 9 Nm (按额定扭矩)
+#                          调试时建议先设小 (如 3-5 Nm) 防失控
+#
+# 零空间控制 (nullspace) 参数:
+#   nullspace_stiffness      标量, 零空间刚度 [Nm/rad], 0=禁用零空间控制
+#   nullspace_damping        标量, 零空间阻尼 [Nm*s/rad]
+#   零空间期望构型在使能时自动捕获当前关节角, 上位机可通过话题覆盖
+#
+# 参考信号滤波 (匹配上位机低频下发与 1kHz 控制周期):
+#   filter_params_pose        0~1, 末端位姿滤波百分比 (越大跟随越快, 1=不滤波)
+#   filter_params_nullspace  0~1, 零空间构型滤波百分比
+# 实际滤波步长 step = 1 / (kappa * f + 1), kappa = -1/log(1-p),
+# 其中 f=update_frequency, p=filter_params_xxx.
+# 经验值: 上位机 50 Hz, 控制器 1 kHz, filter=0.95 时对应截止频率约 6 Hz.
+#
+# 工具重力实时补偿:
+#   每个控制周期在基坐标系下计算工具重力 [F_g; M_g] 并从传感器读数中减去,
+#   补偿任意姿态下的工具重力影响:
+#     F_g_B = [0, 0, -m*g]                           基系下纯重力 (恒定)
+#     r_tool_B = R_ee_in_base * (R_ee_tcp * tool_com_in_tcp + t_ee_tcp)
+#                                                    质心在基系下的位置 (随姿态变化)
+#     M_g_B = r_tool_B × F_g_B                       重力绕 ee 原点的力矩
+#   注: enable 时仍捕获"残余偏置"(传感器零漂 + 未建模固定偏置), 在基系下减去.
+#       若未配置 tool_mass, 则残余偏置包含工具重力 (此时只在 enable 姿态下准确).
+#
+# 末端几何变换 (sensor/tcp 相对 ee_link):
+#   sensor_to_ee, tcp_to_ee 在 init 时一次性解析为 Eigen::Isometry3d,
+#   - sensor wrench: 先用 R_ee_sensor 把力/力矩从 sensor 系旋转到 ee 系,
+#     再用 R_ee_base 旋转到 base 系; 力矩还要考虑作用点从 sensor 原点平移到 ee 原点.
+#   - TCP 位姿: T_base_tcp = T_base_ee * T_ee_tcp, 与上位机期望位姿对齐.
+#   - 工具质心: 从 tcp 系转到 ee 系, 复用原 tool_com_in_ee_ 内部接口.
+#
+# 调参建议:
+#   1) 先 taskspace_mass=0 (阻尼模式), 验证机械臂能保持位姿且响应柔顺;
+#   2) 提升 stiffness 增加位置刚度, 提升 damping 增加阻尼防振;
+#   3) 若需要二阶系统响应, 设 taskspace_mass>0, 此时 damping 自动按
+#      D = 2*sqrt(M*K) * damping_ratio (代码内会自动计算阻尼比);
+
+impedance:
+  left:
+    # 可选: 在此处覆盖 URDF 路径和 link 名 (默认值见 makeDefault)
+    # urdf_path: /path/to/snowbot.urdf
+    ee_link: arm_l_link_7
+    controlled_joint_names:
+      - arm_l_joint_1
+      - arm_l_joint_2
+      - arm_l_joint_3
+      - arm_l_joint_4
+      - arm_l_joint_5
+      - arm_l_joint_6
+      - arm_l_joint_7
+
+    # 平动刚度 200 N/m, 转动刚度 20 Nm/rad (中等柔顺)
+    # stiffness: [1000.0, 1000.0, 1000.0, 300.0, 300.0, 300.0]
+    # damping:   [50.0,  50.0,  50.0,  30.0,  30.0,  30.0]
+    stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
+    damping:   [30.0,  30.0,  30.0,  10.0,  10.0,  10.0]
+    # stiffness: [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
+    # damping:   [20.0,  20.0,  20.0,  5.0,  5.0,  5.0]
+    # stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # damping:   [0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
+    taskspace_mass: 0.0       # 阻尼模式
+    pinv_damping: 0.02        # 雅可比阻尼伪逆 λ (0=精确伪逆, 0.01~0.05 推荐范围)
+    cmd_lpf_alpha: 0.4
+    acc_lpf_alpha: 0.2
+    has_effort_states: false  # CiA402 反馈的是电流, 不是直接力矩
+    # 末端工具重力补偿 (无工具时填 0)
+    tool_mass: 2.35           # 工具质量 [kg]
+    tool_com_in_tcp: [-0.070, 0.0, 0.0]  # 工具质心在 TCP 系下位置 [m]
+    # 末端几何变换 (相对 ee_link 原点, 标定后填入; 默认为单位变换表示无偏差)
+    #   sensor_to_ee: 传感器原点在 ee 系下的位姿 [x, y, z, qx, qy, qz, qw]
+    #   tcp_to_ee:    TCP(夹爪中心)在 ee 系下的位姿 [x, y, z, qx, qy, qz, qw]
+    #   默认 [0,0,0, 0,0,0,1] = 与 ee_link 完全重合 (向后兼容旧配置)
+    sensor_to_ee: [0.080, 0.0, 0.0, 0.683, 0.183, 0.683, 0.183]
+    tcp_to_ee:    [0.192, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    # 关节力矩限幅 [Nm]: 调试期保守 5 Nm, 正式可用 [30, 30, 30, 30, 9, 9, 9]
+    effort_limit_per_joint: [300.0, 150.0, 150.0, 150.0, 100.0, 100.0, 100.0]
+
+    # 重力补偿系数 (逐关节缩放 pinocchio 计算的重力项)
+    #   g_sub_(i) = kt_gravity[i] * robot_data_->g(i)
+    #   默认 1.0=完全补偿, 0.0=不补偿, >1.0=过补偿, <1.0=欠补偿
+    #   用途: 当 pinocchio 模型与实物存在偏差 (URDF 质量参数不准, 关节摩擦,
+    #         连杆加工公差等) 时逐关节微调, 使机械臂在重力补偿下保持静态不下落
+    kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]
+
+    # LuGre 动态摩擦补偿 (预滑动+滑动区, 含 Stribeck 效应)
+    #   数学模型: F = sigma0*z + sigma1*dz + sigma2*v
+    #     z: bristle 平均变形状态 (内部积分)
+    #     dz = v - sigma0*|v|/g(v)*z,  g(v) = Fc + (Fs-Fc)*exp(-(v/vs)^2)
+    #   参数说明:
+    #     enable  逐关节开关 (>0.5 启用), 标量或 7 维数组
+    #     sigma0 [N·m/rad]: bristle 刚度, 通常 1e4~1e6, 标量或 7 维数组
+    #     sigma1 [N·m·s/rad]: bristle 阻尼, 通常 10~500, 标量或 7 维数组
+    #     sigma2 [N·m·s/rad]: 粘性摩擦系数, 标量或 7 维数组
+    #     Fs [N·m]: 静摩擦力矩 (启动瞬间最大静摩擦), 7 维数组
+    #     Fc [N·m]: 库仑摩擦力矩 (稳态滑动摩擦), 7 维数组
+    #     vs [rad/s]: Stribeck 速度 (过渡区宽度, 越小越接近突变), 7 维数组
+    #   辨识方法: 让关节以不同恒速运动, 拟合 F(v) = Fc + (Fs-Fc)*exp(-(v/vs)^2) + sigma2*v
+    #   禁用: enable 设为 0 或所有参数填 0
+    lugre_friction:
+      enable:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # 逐关节开关 (>0.5 启用)
+      sigma0:  [3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3]
+      sigma1:  [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
+      sigma2:  [12.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
+      Fs: [13.0, 8.5, 8.5, 8.5, 4.0, 4.0, 4.0]   # 7 维: 逐关节静摩擦
+      Fc: [12.0, 7.5, 7.5, 7.5, 3.5, 3.5, 3.5]   # 7 维: 逐关节库仑摩擦
+      vs: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]  # 7 维: 逐关节 Stribeck 速度
+      dq_lpf_alpha: 0.3     # 速度低通滤波系数 (0~1, 越小越平滑但延迟大)
+
+    # 零空间控制 (关节空间冗余自由度调节)
+    nullspace_stiffness: 100.0     # 0=禁用; 通常 5~20 Nm/rad
+    nullspace_damping:   20.0     # 通常 2*sqrt(nullspace_stiffness)
+    # nullspace_stiffness: 30.0
+    # nullspace_damping:   10.0
+
+    # 参考信号滤波 (0~1, 1=不滤波, 越小越平滑但跟随延迟越大)
+    filter_params_pose:       0.1   # 末端位姿
+    filter_params_nullspace:  0.1   # 零空间构型
+    # 控制器实际运行频率 [Hz] 
+    #   必须与 servo_node 实际控制周期一致, 否则滤波系数与采样率不匹配
+    #   1000 Hz = 1ms 周期 (servo_node 默认)
+    update_frequency: 1000.0
+
+    # === 静差消除 === (左臂 stiffness=0, 积分和力闭环也禁用)
+    integral_gain_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # integral_gain_joint: [300.0, 300.0, 300.0, 300.0, 200.0, 200.0, 200.0]
+    integral_limit_joint: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    integral_force_threshold: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    integral_leakage: 2.0
+    integral_gain_alpha: 4.0
+    integral_gain_sigma: 0.02
+    force_feedback_gain: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    force_ff_lpf_alpha: 0.1
+
+    # 六维力传感器系统偏差补偿 [fx, fy, fz, mx, my, mz]
+    #   wrench_compensated = wrench_raw - sensor_offset
+    #   用于消除传感器零漂/安装偏差等系统性误差
+    sensor_offset: [2.7, 2.7, -2.5, -0.455, 0.21, -0.17]
+
+  right:
+    ee_link: arm_r_link_7
+    controlled_joint_names:
+      - arm_r_joint_1
+      - arm_r_joint_2
+      - arm_r_joint_3
+      - arm_r_joint_4
+      - arm_r_joint_5
+      - arm_r_joint_6
+      - arm_r_joint_7
+
+    # stiffness: [1000.0, 1000.0, 1000.0, 300.0, 300.0, 300.0]
+    # damping:   [50.0,  50.0,  50.0,  30.0,  30.0,  30.0]
+    stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
+    damping:   [30.0,  30.0,  30.0,  10.0,  10.0,  10.0]
+    # stiffness: [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
+    # damping:   [20.0,  20.0,  20.0,  5.0,  5.0,  5.0]
+    # stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # damping:   [0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
+    taskspace_mass: 0.0       # 3.5
+    pinv_damping: 0.02        # 雅可比阻尼伪逆 λ (0=精确伪逆, 0.01~0.05 推荐范围)
+    cmd_lpf_alpha: 0.4
+    acc_lpf_alpha: 0.2
+    has_effort_states: false
+    tool_mass: 2.35
+    tool_com_in_tcp: [-0.070, 0.0, 0.0]
+    sensor_to_ee: [0.080, 0.0, 0.0, 0.683, 0.183, 0.683, 0.183]
+    tcp_to_ee:    [0.192, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    effort_limit_per_joint: [300.0, 150.0, 150.0, 150.0, 100.0, 100.0, 100.0]
+    # 重力补偿系数 (逐关节缩放, 见左臂说明)
+    kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]
+    # LuGre 动态摩擦补偿 (见左臂说明)
+    lugre_friction:
+      enable:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      sigma0:  [3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3]
+      sigma1:  [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
+      sigma2:  [12.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
+      Fs: [13.0, 8.5, 8.5, 8.5, 4.0, 4.0, 4.0]
+      Fc: [12.0, 7.5, 7.5, 7.5, 3.5, 3.5, 3.5]
+      vs: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+      dq_lpf_alpha: 0.3
+    nullspace_stiffness: 100.0
+    nullspace_damping:   20.0
+    # nullspace_stiffness: 30.0
+    # nullspace_damping:   10.0
+    filter_params_pose:       0.1
+    filter_params_nullspace:  0.1
+    update_frequency:         1000.0
+
+    # === 静差消除 ===
+    # 方案1: 关节空间泄漏积分 (对常值扰动零静差, 仅自由空间开启)
+    #   关节空间积分绕过 J^T, 各关节独立积分, 无运动耦合振荡
+    #   integral_gain_joint: Kq (7 维), 推荐 stiffness/10 量级, 也支持标量
+    #   integral_limit_joint: 关节空间抗饱和限幅 [Nm] (7 维), 也支持标量
+    #   integral_force_threshold: 6 维 [N] / [Nm], 判定自由空间的力阈值
+    #     所有维度 < threshold → 积分开启; 任一维度 >= threshold → 清零 (末端受力)
+    #     推荐: 平动 2~5 N, 转动 0.3~1.0 Nm
+    integral_gain_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # integral_gain_joint: [300.0, 300.0, 300.0, 300.0, 200.0, 200.0, 200.0]
+    integral_limit_joint: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    integral_force_threshold: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    # 泄漏系数 σ (σ>0): d(accum)/dt = J^#*dx - σ*accum, 直流增益 1/σ 有限
+    #   σ 大 → 稳定但静差抑制弱; σ 小 → 静差抑制强但可能振荡
+    # 推荐: 0.5~5.0, 从大往小调
+    integral_leakage: 2.0
+    # 非线性增益 (小误差放大): gain_boost = 1 + alpha * exp(-|dq_err|/sigma)
+    #   alpha: 误差→0 时最大放大倍数; sigma: 过渡尺度 [rad]
+    #   sigma=0.02: 误差<0.02rad(~1.1°)时满增益, >0.06rad 时无放大
+    integral_gain_alpha: 4.0
+    integral_gain_sigma: 0.02
+
+    # 方案2: 末端外力闭环反馈 (基于 F/T 传感器)
+    #   force_feedback_gain: 6 维, 传感器残留偏差 → 闭环修正力
+    #   force_ff_lpf_alpha: 低通滤波系数 (0~1, 越小越平滑)
+    # force_feedback_gain: [0.3, 0.3, 0.3, 0.1, 0.1, 0.1]
+    force_feedback_gain: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    force_ff_lpf_alpha: 0.1
+
+    # 六维力传感器系统偏差补偿 [fx, fy, fz, mx, my, mz]
+    #   wrench_compensated = wrench_raw - sensor_offset
+    #   用于消除传感器零漂/安装偏差等系统性误差
+    sensor_offset: [1.40, 16.9, 14.6, -0.165, 0.170, 0.06]
+
+#===============================================================================
+# 双臂协调 (阶段 1: 主从控制)
+#===============================================================================
+# 整个段可选, 不配置时 mode=off, 两臂独立阻抗控制 (零影响).
+# 切换方式: 通过 ROS 话题 /servo_node/dual_arm/mode 运行时切换.
+#
+# mode:  off       - 两臂独立阻抗 (默认, 不加本段时的行为)
+#        leader    - 主臂独立阻抗 (当前与 off 效果相同, 预留)
+#        follower  - 从臂跟随主臂, 保持 T_tool_constraint 相对位姿
+#
+# leader_side: "left" 或 "right", 哪个臂是主臂
+#
+# tool_constraint: 从臂 TCP 相对主臂 TCP 的固定位姿 (双臂夹持工具后标定).
+#   position: [x, y, z] 平移 [m]
+#   orientation: [roll, pitch, yaw] 姿态 [rad] (RPY, ZYX 顺序)
+#
+#   若不配置 tool_constraint (或保持单位阵), 首次进入 follower 模式时
+#   自动捕获当前两臂 TCP 的实际相对位姿, 确保切换瞬间无跳变.
+#
+# 使用示例:
+#   1. 两臂独立阻抗运动到工具两侧, 夹爪闭合夹持
+#   2. ros2 topic pub /servo_node/dual_arm/mode std_msgs/msg/String "{data: 'follower'}" -1
+#   3. 系统自动捕获当前相对位姿, 从臂保持约束跟随主臂运动
+#   4. ros2 topic pub /servo_node/dual_arm/mode std_msgs/msg/String "{data: 'off'}" -1 切回独立
+#
+# dual_arm:
+#   leader_side: "left"
+#   tool_constraint:
+#     position: [0.0, 0.25, 0.0]
+#     orientation: [0.0, 0.0, 1.57]
+
+# === 阶段 2: 物体级阻抗控制 ===
+# 模式切换: 通过 ROS 话题 ~/dual_arm/mode 运行时发送 "object_impedance"
+#
+# 协调层融合两臂 TCP 位姿到 TRP (工具参考点), 在物体笛卡尔空间
+# 计算阻抗 wrench, 对称分配到两臂, 注入到各自 impedance controller.
+#
+# max_grasp_deviation: 夹持安全阈值 (m)
+#   两臂 TCP 间距相对进入模式时 latch 值的最大允许偏差.
+#   刚性夹持下偏差应接近 0, 超过此值说明物体滑落 / 未夹持 —
+#   对称力分配假设不再成立, 自动降级为 OFF 模式防止碰撞.
+#   默认 0.02 (±2cm), 软体夹持可适当调大.
+#
+# trp_geometry: 两臂 TCP 到 TRP 的固定变换 (标定得到)
+#   left_tcp_to_trp: 左臂 TCP → TRP
+#   right_tcp_to_trp: 右臂 TCP → TRP
+#   若不配置, 默认单位阵 → T\_trp\_left = 左臂TCP, T\_trp\_right = 右臂TCP
+#   融合结果 = 两臂 TCP 的位置中点 + 四元数 slerp 0.5 姿态
+#   ⚠ 仅适用于对称夹持且两臂 TCP 间距较小的场景. 建议通过标定填写.
+#
+# object_impedance: 6 维对角阻抗参数
+#   stiffness: [fx fy fz mx my mz] (N/m, N·m/rad)
+#   damping:   [fx fy fz mx my mz] (N·s/m, N·m·s/rad)
+#
+# Step 5 - internal_force (可选, 默认全零 → 关闭, 纯对称分配 = Step 4 行为):
+#   Full 3D PD 控制器, 监测双臂相对位姿/速度偏差 (运动学代理).
+#   叠加后合力恒为零, 不影响物体级阻抗的平移/旋转.
+#   比 1D PI 更优: 检测全方向相对滑移/漂移 (刚体夹持假设完整相对位姿恒定).
+#
+#   kp:          P 增益 (N/m), 逐轴独立. 建议远小于 object_stiffness (<20).
+#                支持标量 [5.0] 或三维 [5.0 5.0 5.0].
+#   kd:          D 增益 (N·s/m), 抑制相对运动振荡. 建议 kp 的 1/5 ~ 1/3.
+#   max_wrench:  每轴输出限幅 (N), 防内力过大挤坏物体.
+#
+#   示例 (软夹持小物体, 保持轻握 + 抗滑移):
+#     internal_force:
+#       kp: [5.0, 5.0, 5.0]   # 或直接 5.0 (各轴相同)
+#       kd: [1.5, 1.5, 1.5]
+#       max_wrench: 10.0
+#
+# 目标位姿: 通过 ROS 话题下发 (可选)
+#   ~/dual_arm/trp_reference  (geometry_msgs/PoseStamped)
+#   若不订阅, 进入 object_impedance 模式时自动 latch 当前 TRP 位姿,
+#   零初始跟踪误差 → 零初始输出 wrench, 无切换冲击.
+#
+dual_arm:
+  # 注意: mode 仅通过 ROS 话题运行时切换, 不在 YAML 中配置
+  max_grasp_deviation: 0.4    # ±2cm 刚性夹持安全阈值, 软体可调大
+  # 以下默认全注释 / 零 → Step 5 内力控制关闭, 纯对称分配 (Step 4 行为)
+  internal_force:
+    kp: [100.0, 100.0, 100.0]     # Full 3D PD (或标量 5.0 各轴相同)
+    kd: [20.0, 20.0, 20.0]     # 约 kp 的 1/3, 抑制相对振荡
+    max_wrench: 20.0        # 每轴限幅 (N)
+  object_impedance:
+    trp_geometry:
+      left_tcp_to_trp:
+        position: [0.0, 0.0, 0.0]
+        orientation: [0.0, 0.0, 0.0]
+      right_tcp_to_trp:
+        position: [0.0, 0.0, 0.0]
+        orientation: [0.0, 0.0, 0.0]
+    # stiffness: [200.0, 200.0, 200.0, 20.0, 20.0, 20.0]
+    # damping:   [20.0,  20.0,  20.0,  5.0,  5.0,  5.0]
+    stiffness: [2.0, 2.0, 2.0, 0.20, 0.20, 0.20]
+    damping:   [2.0,  2.0,  2.0,  0.50,  0.50,  0.50]

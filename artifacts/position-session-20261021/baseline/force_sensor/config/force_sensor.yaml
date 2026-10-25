@@ -1,0 +1,16 @@
+encos_force_sensor_node:
+  ros__parameters:
+    # 去皮重
+    tare_samples: 10           # 去皮重采样次数
+
+    # 力控参数（状态机: FREE → APPROACH → FORCE_CTRL）
+    mu: 0.2                    # 摩擦系数（滑脱检测: Ft/Fn > 0.8*mu）
+    Fn_min: 1.0                # 最小夹紧力 (N)
+    Fn_max: 5.0                # 最大夹紧力上限 (N)
+    slip_increment: 0.5        # 滑脱增量 (N)
+    contact_threshold: 0.5     # 接触检测阈值 (N)
+    slow_alpha: 0.005          # 慢速基准更新系数（仅FREE状态）
+    force_kp: 0.0005           # PD力控比例增益 (rad/N)
+    force_max_step: 0.00005    # 力控每帧最大位移 (rad)
+    force_deadband: 0.2        # 力控死区 (N)
+    force_filter_alpha: 0.1    # 力低通滤波系数

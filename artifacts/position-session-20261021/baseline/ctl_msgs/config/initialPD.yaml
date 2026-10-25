@@ -1,0 +1,215 @@
+# ============================================================
+# 机械臂 PD 控制器初始增益配置
+# ============================================================
+# 协议说明：
+#   1. Kp 为比例增益，Kd 为微分增益
+#   2. 关节顺序与实物双臂关节顺序一致
+#   3. 对应 C++ 数组 Kp_lArm_low / Kd_lArm_low / Kp_rArm_low / Kd_rArm_low
+# ============================================================
+
+# ============================================================
+# 低刚度 (low)
+# 对应 C++ 数组 Kp_lArm_mid / Kd_lArm_mid / Kp_rArm_mid / Kd_rArm_mid
+# ============================================================
+
+left_arm_Kp_low:
+  left_shoulder_pitch_joint_kp: 160
+  left_shoulder_roll_joint_kp:  140
+  left_shoulder_yaw_joint_kp:   100
+  left_elbow_joint_kp:          100
+  left_wrist_roll_joint_kp:     100
+  left_wrist_pitch_joint_kp:    100
+  left_wrist_yaw_joint_kp:      80
+
+left_arm_Kd_low:
+  left_shoulder_pitch_joint_kd: 50
+  left_shoulder_roll_joint_kd:  40
+  left_shoulder_yaw_joint_kd:   30
+  left_elbow_joint_kd:          30
+  left_wrist_roll_joint_kd:     30
+  left_wrist_pitch_joint_kd:    30
+  left_wrist_yaw_joint_kd:      30
+
+right_arm_Kp_low:
+  right_shoulder_pitch_joint_kp: 160
+  right_shoulder_roll_joint_kp:  140
+  right_shoulder_yaw_joint_kp:   100
+  right_elbow_joint_kp:          100
+  right_wrist_roll_joint_kp:     100
+  right_wrist_pitch_joint_kp:    100
+  right_wrist_yaw_joint_kp:      80
+
+right_arm_Kd_low:
+  right_shoulder_pitch_joint_kd: 50
+  right_shoulder_roll_joint_kd:  40
+  right_shoulder_yaw_joint_kd:   30
+  right_elbow_joint_kd:          30
+  right_wrist_roll_joint_kd:     30
+  right_wrist_pitch_joint_kd:    30
+  right_wrist_yaw_joint_kd:      30
+
+# ============================================================
+# 中等刚度 (mid)
+# 对应 C++ 数组 Kp_lArm_mid / Kd_lArm_mid / Kp_rArm_mid / Kd_rArm_mid
+# ============================================================
+
+left_arm_Kp_mid:
+  left_shoulder_pitch_joint_kp: 440
+  left_shoulder_roll_joint_kp:  400
+  left_shoulder_yaw_joint_kp:   400
+  left_elbow_joint_kp:          400
+  left_wrist_roll_joint_kp:     300
+  left_wrist_pitch_joint_kp:    300
+  left_wrist_yaw_joint_kp:      280
+
+left_arm_Kd_mid:
+  left_shoulder_pitch_joint_kd: 224
+  left_shoulder_roll_joint_kd:  154
+  left_shoulder_yaw_joint_kd:   154
+  left_elbow_joint_kd:          154
+  left_wrist_roll_joint_kd:     154
+  left_wrist_pitch_joint_kd:    154
+  left_wrist_yaw_joint_kd:      154
+
+right_arm_Kp_mid:
+  right_shoulder_pitch_joint_kp: 440
+  right_shoulder_roll_joint_kp:  400
+  right_shoulder_yaw_joint_kp:   400
+  right_elbow_joint_kp:          400
+  right_wrist_roll_joint_kp:     300
+  right_wrist_pitch_joint_kp:    300
+  right_wrist_yaw_joint_kp:      280
+
+right_arm_Kd_mid:
+  right_shoulder_pitch_joint_kd: 224
+  right_shoulder_roll_joint_kd:  154
+  right_shoulder_yaw_joint_kd:   154
+  right_elbow_joint_kd:          154
+  right_wrist_roll_joint_kd:     154
+  right_wrist_pitch_joint_kd:    154
+  right_wrist_yaw_joint_kd:      154
+
+# ============================================================
+# 高刚度 (high)
+# 对应 C++ 数组 Kp_lArm_high / Kd_lArm_high / Kp_rArm_high / Kd_rArm_high
+# ============================================================
+
+left_arm_Kp_high:
+  left_shoulder_pitch_joint_kp: 1200
+  left_shoulder_roll_joint_kp:  1200
+  left_shoulder_yaw_joint_kp:   1200
+  left_elbow_joint_kp:          1200
+  left_wrist_roll_joint_kp:     600
+  left_wrist_pitch_joint_kp:    600
+  left_wrist_yaw_joint_kp:      560
+
+left_arm_Kd_high:
+  left_shoulder_pitch_joint_kd: 600
+  left_shoulder_roll_joint_kd:  600
+  left_shoulder_yaw_joint_kd:   600
+  left_elbow_joint_kd:          600
+  left_wrist_roll_joint_kd:     308
+  left_wrist_pitch_joint_kd:    308
+  left_wrist_yaw_joint_kd:      308
+
+right_arm_Kp_high:
+  right_shoulder_pitch_joint_kp: 1200
+  right_shoulder_roll_joint_kp:  1200
+  right_shoulder_yaw_joint_kp:   1200
+  right_elbow_joint_kp:          1200
+  right_wrist_roll_joint_kp:     600
+  right_wrist_pitch_joint_kp:    600
+  right_wrist_yaw_joint_kp:      560
+
+right_arm_Kd_high:
+  right_shoulder_pitch_joint_kd: 600
+  right_shoulder_roll_joint_kd:  600
+  right_shoulder_yaw_joint_kd:   600
+  right_elbow_joint_kd:          600
+  right_wrist_roll_joint_kd:     308
+  right_wrist_pitch_joint_kd:    308
+  right_wrist_yaw_joint_kd:      308
+
+# ============================================================
+# 超高刚度 (superhigh)
+# 对应 C++ 数组 Kp_lArm_superhigh / Kd_lArm_superhigh / Kp_rArm_superhigh / Kd_rArm_superhigh
+# ============================================================
+
+left_arm_Kp_superhigh:
+  left_shoulder_pitch_joint_kp: 1650
+  left_shoulder_roll_joint_kp:  1580
+  left_shoulder_yaw_joint_kp:   2000
+  left_elbow_joint_kp:          1580
+  left_wrist_roll_joint_kp:     580
+  left_wrist_pitch_joint_kp:    580
+  left_wrist_yaw_joint_kp:      580
+
+left_arm_Kd_superhigh:
+  left_shoulder_pitch_joint_kd: 1000
+  left_shoulder_roll_joint_kd:  1000
+  left_shoulder_yaw_joint_kd:   3050
+  left_elbow_joint_kd:          1000
+  left_wrist_roll_joint_kd:     300
+  left_wrist_pitch_joint_kd:    300
+  left_wrist_yaw_joint_kd:      300
+
+right_arm_Kp_superhigh:
+  right_shoulder_pitch_joint_kp: 1650
+  right_shoulder_roll_joint_kp:  1580
+  right_shoulder_yaw_joint_kp:   2000
+  right_elbow_joint_kp:          1580
+  right_wrist_roll_joint_kp:     580
+  right_wrist_pitch_joint_kp:    580
+  right_wrist_yaw_joint_kp:      580
+
+right_arm_Kd_superhigh:
+  right_shoulder_pitch_joint_kd: 1000
+  right_shoulder_roll_joint_kd:  1000
+  right_shoulder_yaw_joint_kd:   3050
+  right_elbow_joint_kd:          1000
+  right_wrist_roll_joint_kd:     300
+  right_wrist_pitch_joint_kd:    300
+  right_wrist_yaw_joint_kd:      300
+
+# ============================================================
+# 拖拽模式 (tag)
+# Kp 全为 0（无力反馈，自由拖拽），Kd 全为 12（统一阻尼）
+# 对应 C++ 数组 Kp_lArm_tag / Kd_lArm_tag / Kp_rArm_tag / Kd_rArm_tag
+# ============================================================
+
+left_arm_Kp_tag:
+  left_shoulder_pitch_joint_kp: 0
+  left_shoulder_roll_joint_kp:  0
+  left_shoulder_yaw_joint_kp:   0
+  left_elbow_joint_kp:          0
+  left_wrist_roll_joint_kp:     0
+  left_wrist_pitch_joint_kp:    0
+  left_wrist_yaw_joint_kp:      0
+
+left_arm_Kd_tag:
+  left_shoulder_pitch_joint_kd: 12
+  left_shoulder_roll_joint_kd:  12
+  left_shoulder_yaw_joint_kd:   12
+  left_elbow_joint_kd:          12
+  left_wrist_roll_joint_kd:     12
+  left_wrist_pitch_joint_kd:    12
+  left_wrist_yaw_joint_kd:      12
+
+right_arm_Kp_tag:
+  right_shoulder_pitch_joint_kp: 0
+  right_shoulder_roll_joint_kp:  0
+  right_shoulder_yaw_joint_kp:   0
+  right_elbow_joint_kp:          0
+  right_wrist_roll_joint_kp:     0
+  right_wrist_pitch_joint_kp:    0
+  right_wrist_yaw_joint_kp:      0
+
+right_arm_Kd_tag:
+  right_shoulder_pitch_joint_kd: 12
+  right_shoulder_roll_joint_kd:  12
+  right_shoulder_yaw_joint_kd:   12
+  right_elbow_joint_kd:          12
+  right_wrist_roll_joint_kd:     12
+  right_wrist_pitch_joint_kd:    12
+  right_wrist_yaw_joint_kd:      12
+

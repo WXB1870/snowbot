@@ -1,0 +1,4 @@
+# 请求为空
+---
+bool success
+string message
