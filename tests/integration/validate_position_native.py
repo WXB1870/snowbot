@@ -231,6 +231,19 @@ def write_loop_runtime_check(source, work, root):
         end=text.index('\n}',begin)+2
         fixture=fixture.replace('// @ACTUAL_FEEDBACK_PUBLISH@',text[begin:end].replace(
             'position_session::steady_ns()','feedback_clock()'))
+    if 'void ServoNode::feedback_send()' in text:
+        fixture='#define POSITION_ASYNC_FEEDBACK 1\n'+fixture
+        begin=text.index('void ServoNode::feedback_send()')
+        end=text.index('\n}',begin)+2
+        fixture=fixture.replace('// @ACTUAL_FEEDBACK_SEND@',text[begin:end].replace(
+            'position_session::steady_ns()','feedback_clock()'))
+    main=(source/'servo_control/src/main.cpp').read_text()
+    if 'RMW_FASTRTPS_PUBLICATION_MODE' in main:
+        begin=main.index('{',main.index('int main('))+1
+        setup=main[begin:main.index('    (void) argc;',begin)]
+        fixture=fixture.replace('// @ACTUAL_TRANSPORT_SETUP@',
+            'static int configure_transport(){'+setup+'\nreturn 0;}')
+        fixture='#define POSITION_ASYNC_TRANSPORT 1\n'+fixture
     path.write_text(fixture)
     return path
 
@@ -308,7 +321,7 @@ def main():
         sources.extend((args.source/'servo_control/include/servo_control/drive_maintenance.h',args.source/'servo_control/include/servo_control/ethercat_driver.h',root/'test_drive_cycle.inc'))
     if 'LoopTiming' in (args.source/'servo_control/include/servo_control/position_clock.h').read_text():
         names.append('test_position_loop_runtime')
-        sources.extend((args.source/'servo_control/include/servo_control/position_clock.h',args.source/'servo_control/include/ros_controller/rosLoop.h'))
+        sources.extend((args.source/'servo_control/include/servo_control/position_clock.h',args.source/'servo_control/include/ros_controller/rosLoop.h',args.source/'servo_control/src/main.cpp'))
     sources.append(Path(__file__).resolve())
     if args.baseline:sources.append(args.baseline/'dual_arm_control/src/controller/ArmInterface.cpp')
     sources.extend(root/(name+'.cpp') for name in names if (root/(name+'.cpp')).is_file())

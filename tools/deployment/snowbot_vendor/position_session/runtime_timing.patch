@@ -1,12 +1,17 @@
 --- a/servo_control/include/servo_control/position_clock.h
 +++ b/servo_control/include/servo_control/position_clock.h
-@@ -1,4 +1,5 @@
+@@ -1,6 +1,8 @@
  #pragma once
  #include <cstdint>
 +#include <array>
++#include <atomic>
  namespace position_session {
  // New position session only. Startup/exit and legacy timing remain untouched.
-@@ -11,3 +12,25 @@
+ class Interval {
+  int64_t last_=0;
+@@ -9,5 +11,40 @@
+  // A retarget must not erase a preceding sampling gap.
+  void admit(int64_t now,bool takeover){if(takeover)reset(now);}
   double tick(int64_t now){const auto old=last_;last_=now;return old>0 && now>old ? (now-old)*1e-9 : -1.;}
  };
 +// Diagnostic bookkeeping belongs to the single ROS/main thread only.
@@ -31,28 +36,76 @@
 + }
 + Snapshot snapshot(int64_t now)const{auto s=spans_;finish(s,phase_,begin_,now);return s;}
 +};
++// One producer / one consumer, latest-only telemetry handoff. A blocked DDS
++// publisher cannot hold a lock or accumulate a queue on the control thread.
++template<class T> class LatestTelemetry {
++ std::array<T,3> slots_{};std::atomic<unsigned> middle_{1};
++ unsigned back_=2,front_=0;
++public:
++ static_assert(std::atomic<unsigned>::is_always_lock_free,"lock-free telemetry required");
++ void put(const T& value){slots_[back_]=value;back_=middle_.exchange(back_|4u,std::memory_order_acq_rel)&3u;}
++ bool take(T& value){
++  if(!(middle_.load(std::memory_order_acquire)&4u))return false;
++  front_=middle_.exchange(front_,std::memory_order_acq_rel)&3u;value=slots_[front_];return true;
++ }
++};
  } // namespace position_session
 --- a/servo_control/include/ros_controller/rosLoop.h
 +++ b/servo_control/include/ros_controller/rosLoop.h
-@@ -26,4 +26,5 @@
+@@ -24,8 +24,9 @@
+ #include <fstream>
+ #include <thread>
  #include <chrono>
  #include "rclcpp/rclcpp.hpp"
 +#include "rclcpp/executors/single_threaded_executor.hpp"
  #include "std_msgs/msg/float64_multi_array.hpp"
  #include "geometry_msgs/msg/wrench_stamped.hpp"
-@@ -205,4 +206,9 @@
+ #include "geometry_msgs/msg/pose_stamped.hpp"
+
+@@ -136,8 +137,10 @@
+         ServoNode();
+
+         //析构函数
+         ~ServoNode(){
++            feedback_publish_stop_.store(true);
++            if(feedback_publish_thread_.joinable())feedback_publish_thread_.join();
+             if (performance_test) {
+                 delete performance_test;
+             }
+         }
+@@ -146,8 +149,9 @@
+         void rosLoopVar_Init();
+
+         //ros消息参量发送模块 -- 反馈值发送函数
+         void msg_publish();
++        void feedback_send();
+
+         //ros消息回调函数 -- 上位机控制消息接收模块
+         void ctlmsg_get();
+
+@@ -203,8 +207,17 @@
+         int64_t position_target_prepare_ns_=10000000;
+         void position_target_dispatch();void position_interrupt();
          position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
          double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
 +        // One executor owns the callback groups throughout run(); both original
 +        // callback pumps remain on the main thread, in their original order.
 +        rclcpp::executors::SingleThreadedExecutor ros_executor_;
 +        bool ros_executor_added_=false;
++        struct FeedbackSample {snowbot_ctl_msgs::msg::RetInformation message;int64_t sampled_ns=0;};
++        position_session::LatestTelemetry<FeedbackSample> feedback_mailbox_;
++        std::atomic<bool> feedback_publish_stop_{false};std::thread feedback_publish_thread_;
++        bool feedback_first_sent_=false; // publishing thread only
 +        position_session::LoopTiming position_loop_timing_,position_feedback_timing_;
          position_session::Interval position_interval_;
          position_session::Output position_output_;
+         uint64_t position_frame_=0;
+         bool position_startup_complete_=false;
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -184,4 +184,27 @@
+@@ -182,8 +182,31 @@
+         if(fault.detected_ns && fault.detected_ns!=position_last_rt_cycle_fault_ns_){
+             RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_FIRST_FAULT steady_ns=%lld session=%llu seq=%llu pdo=%llu origin=%s deadline_late_ms=%.6f checks=0x%x dt_ms=%.6f",
                  (long long)fault.detected_ns,(unsigned long long)fault.session,(unsigned long long)fault.sequence,(unsigned long long)fault.pdo_sample,
                  fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
 +            // One bounded diagnostic batch from the existing non-RT timer.
@@ -70,7 +123,7 @@
 +                (long long)fault.detected_ns,(long long)fault.rt_deadline_ns,(long long)position_output_.rt_deadline,(long long)position_output_.sample_time_ns,
 +                (unsigned long long)position_feedback_.sample,(long long)position_feedback_.progress,(long long)position_feedback_.received,(long long)position_feedback_.source,position_feedback_.advances);
 +            const auto feedback_spans=position_feedback_timing_.snapshot(position_session::steady_ns());
-+            constexpr const char* feedback_names[]={"build","left_gripper","right_gripper","pack","ros_publish"};
++            constexpr const char* feedback_names[]={"build","left_gripper","right_gripper","pack","handoff"};
 +            if(feedback_spans.session==fault.session)for(unsigned i=0;i<5;++i){
 +                const auto& last=feedback_spans.last[i];const auto& longest=feedback_spans.longest[i];
 +                if(!last.begin)continue;
@@ -80,14 +133,43 @@
 +            }
              position_last_rt_cycle_fault_ns_=fault.detected_ns;
          }
-@@ -958,4 +981,6 @@
+         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+     });
+@@ -291,8 +314,19 @@
+     performance_test = new performanceTestSeal(this);  // 传入当前节点指针
+
+     //----------阻抗控制器初始化----------
+     initImpedanceControllers();
++    // No callbacks, device access or command ownership move to this worker.
++    feedback_publish_thread_=std::thread([this]{
++        while(!feedback_publish_stop_.load()){
++            try{feedback_send();}
++            catch(const std::exception& e){
++                RCLCPP_ERROR(this->get_logger(),"FEEDBACK_PUBLISH_FAILED: %s",e.what());
++                feedback_publish_stop_.store(true);break;
++            }
++            std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        }
++    });
+ }
+
+ //==================== 阻抗控制实现 ====================
+
+@@ -956,8 +990,11 @@
+ }
+
  //ros消息参量发送模块 -- 反馈值发送函数
  void ServoNode::msg_publish(){
 +    position_feedback_timing_.bind(position_gate_.last().session);
 +    position_feedback_timing_.mark(position_session::LoopTiming::Prepare,position_session::steady_ns());
++    const auto feedback_sampled_ns=position_session::steady_ns();
      auto tempRetData_pub = snowbot_ctl_msgs::msg::RetInformation();
      tempRetData_pub.header.stamp = this->now();  // 添加当前时间戳
-@@ -975,6 +1000,9 @@
+
+     //获取并发送反馈值
+@@ -973,10 +1010,13 @@
+
+     float left_gripper_pos = 0.0f, left_gripper_spd = 0.0f, left_gripper_cur = 0.0f;
      float right_gripper_pos = 0.0f, right_gripper_spd = 0.0f, right_gripper_cur = 0.0f;
      uint16_t left_gripper_status = 0, right_gripper_status = 0;
 +    position_feedback_timing_.mark(position_session::LoopTiming::FeedbackPublish,position_session::steady_ns());
@@ -97,12 +179,29 @@
 +    position_feedback_timing_.mark(position_session::LoopTiming::Compute,position_session::steady_ns());
      tempRetData_pub.l_position[7] = left_gripper_pos;
      tempRetData_pub.l_speed[7] = left_gripper_spd;
-@@ -991,10 +1019,16 @@
+     tempRetData_pub.l_iq[7] = left_gripper_cur;
+     tempRetData_pub.r_position[7] = right_gripper_pos;
+@@ -989,14 +1029,32 @@
+     }else{
+         tempRetData_pub.if_first_time = 0;
      }
 
+-    RetData_pub->publish(tempRetData_pub);
 +    position_feedback_timing_.mark(position_session::LoopTiming::Admission,position_session::steady_ns());
-     RetData_pub->publish(tempRetData_pub);
++    feedback_mailbox_.put({tempRetData_pub,feedback_sampled_ns});
 +    position_feedback_timing_.mark(position_session::LoopTiming::Count,position_session::steady_ns());
++}
++
++// Only the telemetry worker calls this method. Keep the original acquisition
++// timestamp; never re-date a sample delayed behind DDS backpressure.
++void ServoNode::feedback_send(){
++    FeedbackSample sample;
++    if(!feedback_mailbox_.take(sample))return;
++    const auto age=position_session::steady_ns()-sample.sampled_ns;
++    if(age<0 || age>20000000)return;
++    sample.message.if_first_time=feedback_first_sent_ ? 0 : 1;
++    RetData_pub->publish(sample.message);
++    feedback_first_sent_=true;
  }
 
  //ros消息参量发送模块 -- 反馈值发送函数
@@ -115,14 +214,22 @@
 +    ros_executor_.spin_some();
  }
 
-@@ -1359,4 +1393,6 @@
+ //消息传输辅助函数 -- 仅仅进行一次消息的接收(与底层关节的通讯)
+ void ServoNode::EtherCATmsg_Get(){
+@@ -1357,8 +1415,10 @@
+     position_startup_complete_=arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load();
+     drive_startup_finished_=!sigInterrupt.load();
      //开启ros2循环
      while (rclcpp::ok()){
 +        position_loop_timing_.bind(position_gate_.last().session);
 +        position_loop_timing_.mark(position_session::LoopTiming::Prepare,position_session::steady_ns());
          //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
          if (sigInterrupt.load() && !shutdown_mode_) {
-@@ -1456,8 +1492,11 @@
+             shutdown_mode_ = true;
+             shutdown_start_time = std::chrono::steady_clock::now();
+@@ -1454,12 +1514,15 @@
+             ifShallInit = false;
+         }
 
          //发送一轮反馈值
 +        position_loop_timing_.mark(position_session::LoopTiming::FeedbackPublish,position_session::steady_ns());
@@ -134,7 +241,11 @@
 +        position_loop_timing_.mark(position_session::LoopTiming::Compute,position_session::steady_ns());
 
          //----- 关机回零: 覆盖上位机目标, 走同一套插补链路 (像上位机下发一样) -----
-@@ -1751,5 +1790,11 @@
+         if (shutdown_mode_) {
+             const auto shutdown_now = std::chrono::steady_clock::now();
+@@ -1749,9 +1812,15 @@
+         applyImpedanceControl();
+
          //----------------------
          //进行一轮EtherCAT发送
 -        if(!shutdown_mode_ && !sigInterrupt.load()){position_poll();position_step();}
@@ -147,7 +258,11 @@
 +        position_loop_timing_.mark(position_session::LoopTiming::LegacyIO,position_session::steady_ns());
          EtherCATrun();
          if(shutdown_mode_)EtherCAT_positionBypass(); // Hand back only after original exit target cache is written.
-@@ -1761,8 +1806,11 @@
+         if (arm_shutdown_handoff_pending && shutdown_mode_) {
+             EtherCAT_EndArmShutdownHandoff();
+@@ -1759,12 +1828,15 @@
+             std::cout << "关机回零目标已写入，双臂控制权完成切换。" << std::endl;
+         }
 
          //发布六维力传感器数据
 +        position_loop_timing_.mark(position_session::LoopTiming::WrenchPublish,position_session::steady_ns());
@@ -160,3 +275,28 @@
 +        position_loop_timing_.mark(position_session::LoopTiming::Sleep,position_session::steady_ns());
          loop_rate.sleep();
      }
+
+     //-----------------------------------------------
+--- a/servo_control/src/main.cpp
++++ b/servo_control/src/main.cpp
+@@ -1,6 +1,7 @@
+ #include <iostream>
+ #include <cstdio>
++#include <cstdlib>
+ #include <csignal>
+ #include <atomic>
+ #include <pthread.h>
+ #include "rclcpp/rclcpp.hpp"
+@@ -17,8 +18,12 @@
+     sigInterrupt.store(true, std::memory_order_release);
+ }
+
+ int main(int argc, char ** argv){
++    // Configure Fast DDS before init and preserve explicit site overrides.
++    if(::setenv("RMW_FASTRTPS_PUBLICATION_MODE","ASYNCHRONOUS",0)!=0){
++        std::perror("RMW_FASTRTPS_PUBLICATION_MODE");return 1;
++    }
+     (void) argc;
+     (void) argv;
+
+     std::cout << "机器人控制程序开启" << std::endl;
