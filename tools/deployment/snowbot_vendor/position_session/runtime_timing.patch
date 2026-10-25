@@ -300,3 +300,8 @@
      (void) argv;
 
      std::cout << "机器人控制程序开启" << std::endl;
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -2177 +2177 @@
+-    double time_now = this->now().seconds() + this->now().nanoseconds() * 1e-9;
++    double time_now = this->now().seconds();

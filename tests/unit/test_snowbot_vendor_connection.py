@@ -159,6 +159,63 @@ int main(){check_position_pdo_output();MappingProbe probe;
         self.assertFalse((output/'src/robot_control/include/position_session_contract.h').exists())
     def test_original_paths_and_buses_invariant(self):
         subprocess.run(['python3',str(ROOT/'tests/integration/validate_position_invariants.py'),'--baseline',str(self.baseline),'--source',str(self.release/'src')],check=True,capture_output=True,text=True)
+    def test_actual_gripper_elapsed_clock_matches_command_interval(self):
+        compiler=shutil.which('c++')
+        if not compiler:self.skipTest('C++ compiler unavailable')
+        def method(source,name):
+            start=source.index('void ServoNode::'+name+'(')
+            opening=source.index('{',start);depth=1;end=opening+1
+            while depth:
+                depth+=(source[end]=='{')-(source[end]=='}');end+=1
+            return source[start:end]
+        prefix=r'''#include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <memory>
+#include <vector>
+namespace std_msgs {namespace msg {struct Float64MultiArray {
+ using SharedPtr=std::shared_ptr<Float64MultiArray>;std::vector<double> data;
+};}}
+static bool EtherCAT_driveResetBusy(){return false;}
+static void EtherCAT_setMotorEnable(bool){}
+static void EtherCAT_setSingleMotorEnable(int,bool){}
+static double getGripperFbPos(int){return 0.;}
+static void setLeftGripperCmd(double,double,double,double,double){}
+static void setRightGripperCmd(double,double,double,double,double){}
+struct Clock {int64_t ns;double seconds()const{return ns*1e-9;}int64_t nanoseconds()const{return ns;}};
+struct ServoNode {bool shutdown_mode_=false;int64_t clock_ns=1000000000;
+ Clock now()const{return {clock_ns};}
+ void gripper_cmd_apply(const std_msgs::msg::Float64MultiArray::SharedPtr,bool);
+ void gripper_runin();
+'''
+        for side in ('left','right'):
+            prefix+=f' bool g_{side}_inited=false,g_{side}_ifRunin=false;int g_{side}_winlen=0,g_{side}_step=0;\n'
+            prefix+=' double '+','.join('g_'+side+'_'+name+'=0' for name in
+                ('pos_target','pos_start','pos_curr','time_last','spd','tor','kp','kd'))+';\n'
+        prefix+='};\n'
+        checks=r'''
+int main(){for(bool left:{false,true}){
+ ServoNode n;auto msg=std::make_shared<std_msgs::msg::Float64MultiArray>();
+ msg->data={.1,0.,0.,100.,30.};n.gripper_cmd_apply(msg,left);
+ for(int i=0;i<20;++i)n.gripper_runin();
+ n.clock_ns+=20000000;msg->data[0]=.2;n.gripper_cmd_apply(msg,left);
+ if((left?n.g_left_winlen:n.g_right_winlen)!=20)return 1;
+ for(int i=0;i<10;++i)n.gripper_runin();
+ if(std::abs((left?n.g_left_pos_curr:n.g_right_pos_curr)-.15)>1e-9)return 2;
+ for(int i=0;i<10;++i)n.gripper_runin();
+ if(std::abs((left?n.g_left_pos_curr:n.g_right_pos_curr)-.2)>1e-9)return 3;
+ n.clock_ns+=2000000000;msg->data[0]=.3;n.gripper_cmd_apply(msg,left);
+ if((left?n.g_left_winlen:n.g_right_winlen)!=500)return 4;
+ }return 0;}
+'''
+        for label,folder,expected in [('baseline',self.baseline,1),('candidate',self.release/'src',0)]:
+            source=(folder/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+            cpp=self.work/(label+'-gripper-clock.cpp');binary=self.work/(label+'-gripper-clock')
+            cpp.write_text(prefix+method(source,'gripper_cmd_apply')+'\n'+method(source,'gripper_runin')+checks)
+            subprocess.run([compiler,'-std=c++17',str(cpp),'-o',str(binary)],check=True,capture_output=True,text=True)
+            result=subprocess.run([str(binary)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,expected,result.stdout+result.stderr)
+
     def test_actual_production_native_contracts(self):
         subprocess.run(['python3',str(ROOT/'tests/integration/validate_position_native.py'),'--source',str(self.release/'src')],check=True,capture_output=True,text=True)
         subprocess.run(['python3',str(ROOT/'tests/integration/validate_position_model.py'),'--source',str(self.release/'src')],check=True,capture_output=True,text=True)
