@@ -16,6 +16,10 @@ void* operator new(std::size_t n){if(count_memory)++allocations;if(auto p=std::m
 void* operator new[](std::size_t n){return ::operator new(n);}
 void operator delete(void* p)noexcept{if(p&&count_memory)++deletions;std::free(p);}
 void operator delete[](void* p)noexcept{::operator delete(p);}
+#if defined(__cpp_sized_deallocation)
+void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
+void operator delete[](void* p,std::size_t)noexcept{::operator delete(p);}
+#endif
 namespace rclcpp { namespace executors {
 struct SingleThreadedExecutor {
  static unsigned instances;
