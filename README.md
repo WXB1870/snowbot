@@ -2,7 +2,7 @@
 
 Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录维护Snowbot应用包、底层准备工具、专属配置和现场记录：源码基线、补丁、问题、恢复备份与验证证据；Bindu公共框架和可复用适配接口仍在 `../galbot/bindu/`。
 
-双臂遥操是本项目的定制场景。实现时允许按需修改Bindu相关代码；可复用的能力和接口改进在Bindu维护，定制操作流程、按键方案、场景参数、现场配方与验证记录在Snowbot维护。现有双臂运行实现仍在Bindu，本轮补充归属和修改规则。
+双臂遥操作是Snowbot的定制应用，可复用的能力和接口改进在Bindu维护，定制操作流程、按键方案、场景参数、现场配方与验证记录在Snowbot维护。现有双臂运行实现仍在Bindu，本轮补充归属和修改规则。
 
 - [代理规范](AGENTS.md)：本项目协作与执行边界。
 - [当前进度](当前进度.md)：原版恢复、改进版保全及未完成项。
@@ -45,7 +45,7 @@ python3 -m tools.deployment.x86_real prepare \
 python3 -m tools.deployment.x86_real build
 ```
 
-构建不等于启动。环境与源码身份保存在部署清单；有效配置、来源及哈希保存在 `resolved-config.json`。现场启停与物理验收仍由人员执行。
+构建生成安装产物，运行节点需单独启动。环境与源码身份保存在部署清单；有效配置、来源及哈希保存在 `resolved-config.json`。现场启停与物理验收仍由人员执行。
 
 ## 源码与离线检查
 
@@ -67,10 +67,10 @@ python3 -m tests.integration.validate_position_native --source /tmp/snowbot-posi
 python3 -m tests.integration.validate_position_model --source /tmp/snowbot-position/src
 ```
 
-原始基线按现有完整文件清单纳入Git，保留原目录及文件；准备器逐文件校验SHA后应用补丁，并记录所选Bindu原生文件指纹。生成结果包含配套位置会话消息，原消息保持不变。完整servo构建另需匹配的ROS、Linux、Pinocchio及外部`kinematic_pose_msgs`等依赖；源码生成和内存检查不代表完整构建、现场部署或运动验收。部分厂商包许可字段未完整声明，第三方源码沿用原许可证。
+原始基线按现有完整文件清单纳入Git，保留原目录及文件；准备器逐文件校验SHA后应用补丁，并记录所选Bindu原生文件指纹。生成结果包含配套位置会话消息，原消息保持不变。完整servo构建另需匹配的ROS、Linux、Pinocchio及外部`kinematic_pose_msgs`等依赖；源码生成和内存检查覆盖离线准备流程，完整构建、现场部署与运动验证需分别完成。部分厂商包许可字段未完整声明，第三方源码沿用原许可证。
 
 ## 现场条件与待确认项
 
-- 118为Ubuntu 24.04.5／ROS 2 Jazzy／Python 3.12.3／x86_64；现场工作区分别为 `/home/cc/snowbot_ws` 和 `/home/cc/bindu`。用户早先提供的 `/home/sun/snowbot` 流程不等于118现状。
+- 118为Ubuntu 24.04.5／ROS 2 Jazzy／Python 3.12.3／x86_64；现场工作区分别为 `/home/cc/snowbot_ws` 和 `/home/cc/bindu`。`/home/sun/snowbot`为历史环境路径，118使用上述工作区。
 - 25电机与20逻辑轴对应、物理轴序／零点、夹爪／握点／六维力标定和持载停止仍待现场确认。
 - 恢复前曾读到完整20轴反馈；当前底层已回到原版，历史通过结果以[当前进度](当前进度.md)限定时间和版本。
