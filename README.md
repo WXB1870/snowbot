@@ -71,7 +71,7 @@ python3 -m tests.integration.validate_position_native --source "releases/$snowbo
 python3 -m tests.integration.validate_position_model --source "releases/$snowbot_release_id/src"
 ```
 
-原始基线按现有完整文件清单纳入Git，保留原目录及文件；准备器逐文件校验SHA后应用补丁，并记录所选Bindu原生文件指纹。生成结果包含配套位置会话消息，原消息保持不变。完整servo构建另需匹配的ROS、Linux、Pinocchio及外部`kinematic_pose_msgs`等依赖；源码生成和内存检查覆盖离线准备流程，完整构建、现场部署与运动验证需分别完成。部分厂商包许可字段未完整声明，第三方源码沿用原许可证。
+原始基线按现有完整文件清单纳入Git；准备器逐文件校验SHA后应用补丁，并记录所选Bindu原生文件指纹。配对Bindu提交由[`dependencies.repos`](dependencies.repos)固定，获取与构建步骤见[新克隆的配对源码与构建](运行与验证.md#新克隆的配对源码与构建)。完整位置会话已移除原始servo未使用的`kinematic_pose_msgs`依赖；原始输入及仅观察模式仍保留它。ROS、Linux、Pinocchio与其他系统依赖须在目标环境准备；完整构建、现场部署和运动验证分别完成。部分厂商包许可字段未完整声明，第三方源码沿用原许可证。
 
 ## 现场条件与待确认项
 

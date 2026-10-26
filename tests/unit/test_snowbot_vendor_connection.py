@@ -44,6 +44,26 @@ class PositionReleaseTests(unittest.TestCase):
             for package in ('robot_control','dual_arm_control','servo_control'):
                 if name=='position_session_ros.h' and package=='servo_control':continue
                 self.assertEqual((vendor.ASSETS/name).read_bytes(),(self.release/'src'/package/'include'/name).read_bytes())
+    def test_committed_source_pair_and_generated_build_dependencies(self):
+        paired=json.loads((ROOT/'dependencies.repos').read_text())['repositories']['bindu']
+        self.assertEqual(paired['type'],'git')
+        self.assertEqual(paired['url'],'https://github.com/WXB1870/bindu.git')
+        self.assertRegex(paired['version'],r'^[0-9a-f]{40}$')
+        manifest=json.loads((self.release/'position_release.json').read_text())
+        self.assertEqual(manifest['preparation']['recommended_bindu_source'],paired)
+        self.assertEqual(manifest['preparation']['source_pairing_sha256'],vendor.digest(ROOT/'dependencies.repos'))
+        self.assertFalse(manifest['waist_units']['enabled'])
+        self.assertEqual(manifest['csp_encoder']['position_counts_per_rev'],262144)
+        # The preserved original requires this external message; the generated
+        # full session already removes its unused include and build dependency.
+        for name in ('CMakeLists.txt','package.xml','include/ros_controller/rosLoop.h'):
+            self.assertIn('kinematic_pose_msgs',(self.baseline/'servo_control'/name).read_text())
+            self.assertNotIn('kinematic_pose_msgs',(self.release/'src/servo_control'/name).read_text())
+        for name in vendor.NATIVE_FILES:
+            folder='include' if name.endswith('.hpp') else 'src'
+            copied=self.release/'src/servo_control'/folder/'bindu_execution_native'/name
+            self.assertEqual(vendor.digest(copied),manifest['native_execution'][name])
+
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
         manifest=json.loads((output/'position_release.json').read_text())
