@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -24,6 +25,32 @@ def baseline_source():
     if root not in source.parents or not source.is_dir():
         raise ValueError('POSITION_BASELINE_SOURCE_MISSING')
     return source
+
+
+
+def release_output(release_id):
+    """Select an immutable named output in this application's release directory."""
+    if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,95}', release_id)
+            or release_id.lower() in ('latest', 'current', 'final')):
+        raise ValueError('POSITION_RELEASE_ID_INVALID')
+    root=Path(__file__).resolve().parents[2]
+    releases=root/'releases'
+    if releases.is_symlink():
+        raise ValueError('POSITION_RELEASE_DIRECTORY_SYMLINK')
+    return releases/release_id
+
+
+def source_identity(path):
+    """Record Git provenance when available; file hashes remain authoritative."""
+    path=Path(path).resolve()
+    try:
+        def git(*args):
+            return subprocess.check_output(['git','-C',str(path),*args],stderr=subprocess.DEVNULL,text=True).strip()
+        return dict(path=str(path),repository=git('rev-parse','--show-toplevel'),
+                    commit=git('rev-parse','HEAD'),
+                    tracked_dirty=bool(git('status','--porcelain','--untracked-files=no')))
+    except (OSError,subprocess.CalledProcessError):
+        return dict(path=str(path),repository=None,commit=None,tracked_dirty=None)
 
 
 def digest(path):
@@ -134,7 +161,9 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
             rel='ctl_msgs/msg/'+name+'.msg'
             if digest(stage/'src'/rel)!=digest(source/rel):raise ValueError('LEGACY_MESSAGE_CHANGED:'+name)
-        manifest=dict(arm_reference_margin_rad=arm_reference_margin,schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
+        manifest=dict(preparation=dict(tool_sha256=digest(Path(__file__)),snowbot=source_identity(ASSETS),
+            execution=None if native is None else source_identity(native),artifact_role='generated_candidate',
+            deployment_verified=False,physical_acceptance=False),arm_reference_margin_rad=arm_reference_margin,schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
             rigid_prediction=(dict(enabled=True,recipe_version=3,urdf_sha256=digest(Path(prediction_urdf)),tool_sha256=digest(Path(prediction_tool)),generator_sha256=digest(generator),names=model_names,left_frame=model_tool['left_frame'],right_frame=model_tool['right_frame']) if prediction_urdf else dict(enabled=False)),
@@ -167,7 +196,10 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('source',type=Path,nargs='?',default=baseline_source());p.add_argument('--output',type=Path,required=True)
+    p.add_argument('source',type=Path,nargs='?',default=baseline_source())
+    destination=p.add_mutually_exclusive_group(required=True)
+    destination.add_argument('--release-id',help='Unique immutable candidate name under snowbot/releases; latest/current/final are rejected')
+    destination.add_argument('--output',type=Path,help='Explicit output for temporary checks or externally managed assembly')
     p.add_argument('--observation-only',action='store_true')
     p.add_argument('--with-impedance',action='store_true',help='Include optional backend; default execution mode remains position')
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
@@ -176,4 +208,5 @@ if __name__=='__main__':
     p.add_argument('--waist-velocity-ratio',type=float,nargs=2,metavar=('WAIST1','WAIST2'),help='Explicit motor/current-position velocity ratios for feedback division AND command multiplication; positions and limits remain unchanged')
     p.add_argument('--waist-feedforward-gain',type=float,default=0.,help='Optional waist CSP 0x60B1 gain, 0..0.1; requires explicit velocity ratios; default preserves 0x60FF')
     a=p.parse_args()
-    print(prepare(a.source,a.output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))
+    output=release_output(a.release_id) if a.release_id is not None else a.output
+    print(prepare(a.source,output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))

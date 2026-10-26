@@ -15,3 +15,11 @@ install/
 log/
 dist/
 *.egg-info/
+
+# Local generated releases, deployment receipts, and recovery copies
+/backups/*
+!/backups/COLCON_IGNORE
+/releases/*
+!/releases/COLCON_IGNORE
+/deployments/*
+!/deployments/COLCON_IGNORE

@@ -12,16 +12,28 @@ ROOT=Path(__file__).resolve().parents[2]
 class PositionReleaseTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.baseline=Path(os.environ.get('SNOWBOT_POSITION_BASELINE',ROOT/'artifacts/position-session-20261021/baseline'))
-        if not cls.baseline.is_dir():raise unittest.SkipTest('Local reviewed baseline is not distributed in Git')
+        cls.baseline=Path(os.environ.get('SNOWBOT_POSITION_BASELINE',ROOT/'vendor/snowbot/original'))
+        if not cls.baseline.is_dir():raise RuntimeError('Reviewed vendor baseline is missing')
         cls.tmp=tempfile.TemporaryDirectory();cls.work=Path(cls.tmp.name)
         cls.release=vendor.prepare(cls.baseline,cls.work/'release')
     @classmethod
     def tearDownClass(cls):cls.tmp.cleanup()
+    def test_named_release_outputs_reject_ambiguous_or_escaping_names(self):
+        self.assertEqual(vendor.release_output('20261026-encoder-6dc74af'),
+                         ROOT/'releases/20261026-encoder-6dc74af')
+        for name in ('', '.', '..', '../escape', '/tmp/escape', 'a/b', 'latest', 'CURRENT', 'final', 'x'*97):
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'RELEASE_ID_INVALID'):
+                vendor.release_output(name)
+
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
         self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
+        self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
+        self.assertFalse(m['preparation']['deployment_verified'])
+        self.assertFalse(m['preparation']['physical_acceptance'])
+        self.assertEqual(m['preparation']['tool_sha256'],vendor.digest(Path(vendor.__file__)))
+        self.assertEqual(m['preparation']['snowbot']['repository'],str(ROOT))
         self.assertEqual(m['feedback_publication']['mode'],'latest_only_worker')
         self.assertEqual(m['feedback_publication']['max_sample_age_ms'],20)
         self.assertEqual(m['feedback_publication']['timestamp'],'acquisition_start')
@@ -60,10 +72,8 @@ class PositionReleaseTests(unittest.TestCase):
             vendor.prepare(self.baseline,self.work/'invalid-impedance',with_impedance=True,observation_only=True)
 
     def test_rigid_model_is_explicit_hashed_and_incompatible_modes_rejected(self):
-        bindu=ROOT.parent/'galbot/bindu'
-        urdf=bindu/'src/hardware/bindu_description/urdf/snowbot_control.urdf'
-        tool=bindu/'src/integration/bindu_runtime/config/robots/snowbot/bimanual_snowbot_real.json'
-        if not urdf.is_file():self.skipTest('Canonical Bindu kinematic model unavailable')
+        urdf=ROOT/'src/snowbot_description/urdf/snowbot_control.urdf'
+        tool=ROOT/'src/snowbot_bringup/config/robots/snowbot/bimanual_snowbot_real.json'
         output=vendor.prepare(self.baseline,self.work/'rigid',prediction_urdf=urdf,prediction_tool=tool)
         manifest=json.loads((output/'position_release.json').read_text())
         self.assertTrue(manifest['rigid_prediction']['enabled'])
