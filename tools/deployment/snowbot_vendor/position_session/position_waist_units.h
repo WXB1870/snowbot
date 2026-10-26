@@ -21,9 +21,9 @@ constexpr uint16_t velocity_object(unsigned alias) {
 inline int32_t command_speed(unsigned slot, double position_speed) {
     const double multiplier = selected(slot)
         ? motor_per_position[slot - 18] * (feedforward_gain > 0 ? feedforward_gain : 1.) : 1.;
-    return csp_counts(position_speed * multiplier);
+    return csp_speed_counts(position_speed * multiplier);
 }
 inline double written_speed(unsigned slot, double position_speed) {
-    return feedback_speed(slot, csp_radians(command_speed(slot, position_speed)));
+    return feedback_speed(slot, csp_speed_radians(command_speed(slot, position_speed)));
 }
 } // namespace position_session::waist_units

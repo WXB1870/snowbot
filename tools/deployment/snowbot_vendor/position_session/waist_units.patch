@@ -11,7 +11,7 @@
 +                csp_rx_[m]->velocity = position_session::waist_units::selected(m) && position_session::waist_units::feedforward_gain > 0 ? 0 :
 +                    position_session::waist_units::command_speed(m,motor_cmd_spd_[m].load());
 @@ -832 +835 @@
--                csp_rx_[m]->velocity=position_session::csp_counts(cmd.v[i]);csp_rx_[m]->torque=0;
+-                csp_rx_[m]->velocity=position_session::csp_speed_counts(cmd.v[i]);csp_rx_[m]->torque=0;
 +                csp_rx_[m]->velocity=position_session::waist_units::command_speed(m,cmd.v[i]);csp_rx_[m]->torque=0;
 @@ -884 +887 @@
 -                static_cast<float>(csp_tx_[m]->velocity * (2.0 * M_PI / 65536.0)));
@@ -20,5 +20,5 @@
 -            obs.speed[m]=float(csp_tx_[m]->velocity*(2.0*M_PI/65536.0));
 +            obs.speed[m]=float(position_session::waist_units::feedback_speed(m,csp_tx_[m]->velocity*(2.0*M_PI/65536.0)));
 @@ -935 +938 @@
--    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::csp_radians(position_session::csp_counts(applied.v[i])));}
+-    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::csp_speed_radians(position_session::csp_speed_counts(applied.v[i])));}
 +    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::waist_units::written_speed(position_session::position_slot(i),applied.v[i]));}

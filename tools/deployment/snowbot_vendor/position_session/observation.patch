@@ -237,7 +237,7 @@
 +                obs.csp.actual_position[i]=csp_tx_[m]->position;obs.csp.actual_velocity[i]=csp_tx_[m]->velocity;
 +                if(complete)obs.csp.feedback_mask|=1u<<m;
 +            }
-+            obs.position[m]=float(csp_tx_[m]->position*(2.0*M_PI/65536.0));
++            obs.position[m]=float(csp_tx_[m]->position*(2.0*M_PI/262144.0));
 +            obs.speed[m]=float(csp_tx_[m]->velocity*(2.0*M_PI/65536.0));
 +            obs.current[m]=0;obs.torque_raw[m]=csp_tx_[m]->torque;
 +            if(complete)obs.torque_raw_valid_mask|=1u<<m;
@@ -267,3 +267,17 @@
  }
  
  bool EtherCAT_isOperational() {
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -582 +582 @@
+-        // 编码器计数值转换为弧度: 65536 pulses = 2 * PI rad
++        // 双编码器外圈位置: 262144 counts = 2 * PI rad
+@@ -681 +681 @@
+-            // ROS2 目标位置转换 (弧度 -> 编码器脉冲数: 2*PI rad = 65536 counts)
++            // ROS2 目标位置转换 (双编码器外圈: 2*PI rad = 262144 counts)
+@@ -688 +688 @@
+-                int32_t target_counts = (int32_t)std::round((double)motor_cmd_pos_[m].load() * (65536.0 / (2.0 * M_PI)));
++                int32_t target_counts = (int32_t)std::round((double)motor_cmd_pos_[m].load() * (262144.0 / (2.0 * M_PI)));
+@@ -815 +815 @@
+-                static_cast<float>(csp_tx_[m]->position * (2.0 * M_PI / 65536.0)));
++                static_cast<float>(csp_tx_[m]->position * (2.0 * M_PI / 262144.0)));

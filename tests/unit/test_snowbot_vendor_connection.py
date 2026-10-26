@@ -81,7 +81,7 @@ class PositionReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
             vendor.prepare(self.baseline,self.work/'bad-model',prediction_urdf=urdf)
 
-    def test_waist_units_are_explicit_preserve_positions_and_use_actual_pdo_writer(self):
+    def test_waist_units_are_explicit_and_use_actual_pdo_writer(self):
         from tests.integration.validate_position_native import write_pdo_check, write_drive_cycle_check
         compiler=shutil.which('c++')
         if not compiler:self.skipTest('C++ compiler unavailable')
@@ -90,7 +90,9 @@ class PositionReleaseTests(unittest.TestCase):
                 waist_velocity_ratio=(25.25,25.25),waist_feedforward_gain=gain)
             manifest=json.loads((output/'position_release.json').read_text())
             self.assertIn('waist_units',manifest['components'])
-            self.assertFalse(manifest['waist_units']['position_scale_changed'])
+            self.assertTrue(manifest['waist_units']['position_scale_changed'])
+            self.assertEqual(manifest['csp_encoder']['position_counts_per_rev'],262144)
+            self.assertEqual(manifest['csp_encoder']['speed_counts_per_rev'],65536)
             self.assertFalse(manifest['waist_units']['physical_units_verified'])
             self.assertEqual(manifest['waist_units']['motor_per_position_velocity'],[25.25,25.25])
             self.assertTrue(manifest['waist_units']['velocity_command_scaled'])

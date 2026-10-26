@@ -177,6 +177,10 @@ int main(){
  Watchdog isolation;isolation.evaluate(selected,o,1000000000);
  for(unsigned i=0;i<20;++i){assert(isolation.motor_enabled(false,true,i)==bool(controlled_mask&(1u<<i)));assert(!isolation.motor_enabled(false,false,i));}
  assert(position_slot(14)==18&&position_slot(15)==19&&controlled_mask==0xc7f7f);
+ // Independent full-revolution expectations catch a shared wrong encoder scale.
+ assert(csp_counts(6.28318530717958647692)==262144);
+ assert(csp_speed_counts(6.28318530717958647692)==65536);
+ assert(std::abs(csp_radians(262144)-6.28318530717958647692)<1e-12);
  assert(std::abs(csp_radians(csp_counts(.1234))-.1234)<=.5/csp_counts_per_rad);
  assert(!f.step(.1));Interval clock;clock.reset(1000000000);assert(std::abs(clock.tick(1001000000)-.001)<1e-12);assert(clock.tick(1001000000)<0);
  Output p;p.selected=true;p.policy=2;p.operation=1;p.session=1;p.sequence=1;p.admission_generation=1;p.deadline=1100000000;p.q.fill(.3);Watchdog w;w.evaluate(p,o,1000000000);assert(!w.disabled&&w.reason==OK);

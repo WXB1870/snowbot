@@ -1499,7 +1499,7 @@
 +            if(is_csp_motor_[m]){
 +                if(!csp_rx_[m])continue;
 +                csp_rx_[m]->position=position_session::csp_counts(cmd.q[i]);
-+                csp_rx_[m]->velocity=position_session::csp_counts(cmd.v[i]);csp_rx_[m]->torque=0;
++                csp_rx_[m]->velocity=position_session::csp_speed_counts(cmd.v[i]);csp_rx_[m]->torque=0;
 +            }else{
 +                if(!m_rx_[m])continue;
 +                m_rx_[m]->target_position=cmd.q[i];m_rx_[m]->target_speed=cmd.v[i];
@@ -1524,7 +1524,7 @@
 +    obs.source_stamp_ns=applied.source_stamp_ns;obs.expires_at_ns=applied.expires_at_ns;obs.trajectory_phase=applied.trajectory_phase;
 +    obs.reference_position=applied.reference_position;obs.reference_speed=applied.reference_speed;obs.reference_acceleration=applied.reference_acceleration;
 +    obs.output_position=applied.q;obs.output_speed=applied.v;obs.output_torque=applied.torque;obs.output_kp=applied.kp;obs.output_kd=applied.kd;
-+    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::csp_radians(position_session::csp_counts(applied.v[i])));}
++    for(unsigned i=14;i<position_session::joint_count;++i){obs.output_position[i]=float(position_session::csp_radians(position_session::csp_counts(applied.q[i])));obs.output_speed[i]=float(position_session::csp_speed_radians(position_session::csp_speed_counts(applied.v[i])));}
 +    obs.output_valid=session_packet.selected&&!session_watchdog_.disabled&&position_written==position_session::controlled_mask&&position_session::measured(obs,obs.attempted_ns)&&!(position_session::fault_mask(obs)&position_session::controlled_mask);
 +    obs.reference_valid=obs.output_valid&&applied.trajectory&&applied.failure_reason==0&&session_watchdog_.reason<=position_session::PAUSED;
      observation_cache_.publish(obs);

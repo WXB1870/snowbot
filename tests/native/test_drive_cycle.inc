@@ -105,7 +105,7 @@ int main(){
   const bool waist=slot>=18;
   const double multiplier=waist?position_session::waist_units::motor_per_position[slot-18]:1.;
   const auto expected=waist&&position_session::waist_units::feedforward_gain>0?0:
-      position_session::csp_counts(v*multiplier);
+      position_session::csp_speed_counts(v*multiplier);
   assert(crx[slot-16].velocity==expected);
   assert(crx[slot-16].position==position_session::csp_counts(.01f));
  }

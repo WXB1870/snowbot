@@ -16,9 +16,13 @@ constexpr int64_t ros_feedback_timeout_ns=40000000;
 constexpr unsigned joint_count=16;
 constexpr uint32_t controlled_mask=0xc7f7f;
 constexpr unsigned position_slot(unsigned i){return i<7?i:i<14?i+1:i+4;}
-constexpr double csp_counts_per_rad=65536.0/6.28318530717958647692;
+// Dual-encoder outer-ring position and motor speed use different resolutions.
+constexpr double csp_counts_per_rad=262144.0/6.28318530717958647692;
+constexpr double csp_speed_counts_per_rad=65536.0/6.28318530717958647692;
 inline int32_t csp_counts(double q){return int32_t(std::round(q*csp_counts_per_rad));}
 inline double csp_radians(int32_t q){return q/csp_counts_per_rad;}
+inline int32_t csp_speed_counts(double v){return int32_t(std::round(v*csp_speed_counts_per_rad));}
+inline double csp_speed_radians(int32_t v){return v/csp_speed_counts_per_rad;}
 struct Meta {
  uint64_t session=0,sequence=0;int64_t stamp=0,expires=0;uint8_t operation=0;
  bool operator==(const Meta& b)const{return session==b.session && sequence==b.sequence && stamp==b.stamp && expires==b.expires && operation==b.operation;}

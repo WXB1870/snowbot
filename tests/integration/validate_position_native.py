@@ -103,15 +103,15 @@ void check_position_pdo_output(){
  for(unsigned slot: {18u,19u})for(double v: {-.02,0.,.02}){
   const double gain=waist_units::feedforward_gain>0?waist_units::feedforward_gain:1.;
   const auto counts=waist_units::command_speed(slot,v);
-  assert(counts==csp_counts(v*waist_units::motor_per_position[slot-18]*gain));
+  assert(counts==csp_speed_counts(v*waist_units::motor_per_position[slot-18]*gain));
   assert(std::abs(waist_units::written_speed(slot,v)-v*gain)<=
       3.141592653589793/65536./waist_units::motor_per_position[slot-18]+1e-12);
  }
- assert(waist_units::command_speed(16,.02)==csp_counts(.02));
+ assert(waist_units::command_speed(16,.02)==csp_speed_counts(.02));
  assert(waist_units::velocity_object(17)==0x60ff);
  assert(waist_units::velocity_object(19)==(waist_units::feedforward_gain>0?0x60b1:0x60ff));
 #else
- assert(csp[18].velocity==csp_counts(.03f));
+ assert(csp[18].velocity==csp_speed_counts(.03f));
 #endif
  assert(pt[7].target_position==99&&pt[15].target_position==99&&csp[16].position==99&&csp[17].position==99);
  session_packet.operation=2;++session_packet.sequence;session_watchdog_.evaluate(session_packet,obs,1000000000);
