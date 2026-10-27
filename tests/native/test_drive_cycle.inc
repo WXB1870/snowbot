@@ -43,10 +43,23 @@ void check_csp_snapshot(){
  assert(first.csp.controlword[2]==0x1f&&first.csp.mode_command[2]==8&&first.csp.mode_display[2]==9);
  assert(first.csp.actual_position[2]==tx[2].position&&first.csp.actual_velocity[2]==tx[2].velocity);
  assert(first.torque_raw[18]==32767&&first.status[18]==0x1237);
+ // Independent position/speed reference from the selected driver: a full
+ // output-position turn is 262144 counts; a motor-speed turn/s is 65536.
+ for(auto& value:tx){value.position=262144;value.velocity=65536;}
+ collect();
+ for(unsigned slot=16;slot<20;++slot){
+  assert(std::abs(observation_rt_.position[slot]-6.283185307179586)<1e-5);
+  double expected_speed=6.283185307179586;
+#if __has_include("position_waist_units.h")
+  if(slot>=18)expected_speed/=position_session::waist_units::motor_per_position[slot-18];
+#endif
+  assert(std::abs(observation_rt_.speed[slot]-expected_speed)<1e-5);
+ }
+ const auto attempts=observation_rt_.attempt,successful_sample=observation_rt_.sample;
  // Bad WKC never validates stale incoming mode/encoder data, but still reports
  // the distinct outgoing attempt. No synthetic mode 8 or zero feedback.
  wkc_=66;tx[2].ModeOp=-1;collect();
- assert(observation_rt_.sample==first.sample&&observation_rt_.attempt==first.attempt+1);
+ assert(observation_rt_.sample==successful_sample&&observation_rt_.attempt==attempts+1);
  assert(observation_rt_.csp.command_mask==0xf0000&&observation_rt_.csp.feedback_mask==0);
  assert(observation_rt_.valid_mask==0&&observation_rt_.csp.mode_display[2]==-1);
  // A missing PDO pointer and a non-CSP slot must not inherit old availability.
