@@ -170,6 +170,10 @@
   "grasp_rotation_tolerance_rad": 0.05,
   "tool_gain": 10.0,
   "posture_gain": 0.1,
+  "posture_weight": 0.01,
+  "shared_target_gain": 0.1,
+  "shared_target_weight": 0.05,
+  "shared_targets": {"body_joint_1": 0.0, "body_joint_2": 0.0},
   "shared_motion_weight": 0.1,
   "coupled_locked_joints": [],
   "pose_filter": {
@@ -206,7 +210,24 @@
   "collision_joint_step_rad": 0.01,
   "geometry_step_backtracking": true,
   "posture_policy": {
-    "reference": "initial_capture",
+    "reference": {
+      "body_joint_1": 0.0,
+      "body_joint_2": 0.0,
+      "arm_l_joint_1": 0.058572,
+      "arm_l_joint_2": 0.430916,
+      "arm_l_joint_3": 0.431745,
+      "arm_l_joint_4": -0.446687,
+      "arm_l_joint_5": -0.981549,
+      "arm_l_joint_6": 0.109259,
+      "arm_l_joint_7": -1.125745,
+      "arm_r_joint_1": -0.107687,
+      "arm_r_joint_2": -0.908045,
+      "arm_r_joint_3": -0.431745,
+      "arm_r_joint_4": 0.537685,
+      "arm_r_joint_5": 0.237326,
+      "arm_r_joint_6": 0.427245,
+      "arm_r_joint_7": 1.1
+    },
     "position_bounds": {"body_joint_2": [-0.45, 0.45]}
   },
   "reference_kinematics": true,
