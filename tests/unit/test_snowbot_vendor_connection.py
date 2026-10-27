@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -110,6 +110,25 @@ class PositionReleaseTests(unittest.TestCase):
                 vendor.prepare(self.baseline,self.work/'bad-rigid',prediction_urdf=urdf,prediction_tool=tool,**options)
         with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
             vendor.prepare(self.baseline,self.work/'bad-model',prediction_urdf=urdf)
+
+    def test_feedback_ratio_read_and_actual_pdo_writer(self):
+        from tests.integration.validate_position_native import write_pdo_check, write_drive_cycle_check
+        compiler=shutil.which('c++')
+        if not compiler:self.skipTest('C++ compiler unavailable')
+        output=self.release;include=output/'src/servo_control/include'
+        manifest=json.loads((output/'position_release.json').read_text())
+        self.assertTrue(manifest['waist_feedback']['enabled'])
+        self.assertFalse(manifest['waist_feedback']['velocity_command_scaled'])
+        self.assertEqual(manifest['waist_feedback']['provisional_ratio'],[101,101])
+        driver=(output/'src/servo_control/src/servo_control/ethercat_driver.cpp').read_text()
+        self.assertLess(driver.index('ec_SDOread(slave,0x200E,2,'),driver.index('// === 2. 电机 PDO 配置 (PREOP) ==='))
+        cpp=write_pdo_check(output/'src',output)
+        cpp.write_text(cpp.read_text()+'\nint main(){check_position_pdo_output();}\n')
+        for name,source in (('pdo',cpp),('cycle',write_drive_cycle_check(output/'src',output,ROOT/'tests/native'))):
+            binary=output/('feedback-'+name)
+            subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-variable','-pthread','-I',str(include),
+                '-I',str(output),str(source),'-o',str(binary)],check=True,capture_output=True,text=True)
+            subprocess.run([str(binary)],check=True,capture_output=True,text=True)
 
     def test_waist_units_are_explicit_and_use_actual_pdo_writer(self):
         from tests.integration.validate_position_native import write_pdo_check, write_drive_cycle_check

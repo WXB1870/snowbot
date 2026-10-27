@@ -7,7 +7,29 @@
 #define EN_STEP 5
 // @ACTUAL_CYCLE@
 // @ACTUAL_DIAGNOSTICS@
+#if __has_include("position_waist_feedback.h")
+void load_test_ratios(position_session::WaistFeedbackUnits& units) {
+ const int slaves[2]={19,20};
+ assert(units.load(slaves,[](int s,int& bytes,int32_t& ratio){bytes=4;ratio=s==19?101:81;return 1;}));
+}
+void check_feedback_ratios(){
+ position_session::WaistFeedbackUnits u;const int slaves[2]={19,20};
+ assert(std::isnan(u.speed(18,1.)));assert(u.speed(16,2.)==2.);
+ load_test_ratios(u);assert(u.speed(18,101.)==1.);assert(u.speed(19,-81.)==-1.);
+ assert(!u.axis(0).provisional&&u.axis(0).reported==101);
+ unsigned calls=0;
+ assert(u.load(slaves,[&](int,int&,int32_t&){++calls;return 0;}));assert(calls==2);
+ assert(u.axis(0).provisional&&u.axis(1).provisional&&u.speed(19,101.)==1.);
+ assert(std::abs(u.speed(18,-655.*6.283185307179586/65536.)-(-.06279733777/101.))<1e-10);
+ for(int bad:{0,-1,100,1000})assert(!u.load(slaves,[&](int,int&,int32_t& r){r=bad;return 1;}));
+ assert(!u.load(slaves,[](int,int& n,int32_t& r){n=2;r=101;return 1;}));
+ const int missing[2]={19,0};assert(!u.load(missing,[](int,int&,int32_t& r){r=101;return 1;}));
+}
+#endif
 EtherCATDriver::EtherCATDriver(){
+#if __has_include("position_waist_feedback.h")
+ load_test_ratios(waist_feedback_units_);
+#endif
  std::fill_n(m_rx_,TOTAL_SLAVES,nullptr);std::fill_n(m_tx_,TOTAL_SLAVES,nullptr);
  std::fill_n(csp_rx_,TOTAL_SLAVES,nullptr);std::fill_n(csp_tx_,TOTAL_SLAVES,nullptr);
  inOP_=true;cycle_count_=0;
@@ -17,6 +39,9 @@ EtherCATDriver::~EtherCATDriver(){}
 // Deliberately change outgoing buffers after capture: a reconstructed command
 // or a later buffer read must not masquerade as the pre-send sample.
 void check_csp_snapshot(){
+#if __has_include("position_waist_feedback.h")
+ position_session::WaistFeedbackUnits waist_feedback_units_;load_test_ratios(waist_feedback_units_);
+#endif
  std::array<csp_rx_t,4> rx{};std::array<csp_tx_t,4> tx{};
  std::array<csp_rx_t*,20> csp_rx_{};std::array<csp_tx_t*,20> csp_tx_{};
  std::array<motor_tx_pdo_t*,20> m_tx_{};std::array<bool,20> is_csp_motor_{};
@@ -53,6 +78,9 @@ void check_csp_snapshot(){
 #if __has_include("position_waist_units.h")
   if(slot>=18)expected_speed/=position_session::waist_units::motor_per_position[slot-18];
 #endif
+#if __has_include("position_waist_feedback.h")
+  if(slot>=18)expected_speed/=slot==18?101.:81.;
+#endif
   assert(std::abs(observation_rt_.speed[slot]-expected_speed)<1e-5);
  }
  const auto attempts=observation_rt_.attempt,successful_sample=observation_rt_.sample;
@@ -69,6 +97,9 @@ void check_csp_snapshot(){
  assert(first.csp.mode_display[2]==9); // Previous copies remain detached.
 }
 int main(){
+#if __has_include("position_waist_feedback.h")
+ check_feedback_ratios();
+#endif
  check_csp_snapshot();
  EtherCATDriver d;
  std::array<motor_rx_pdo_t,16> rx{};std::array<motor_tx_pdo_t,16> tx{};
@@ -103,7 +134,7 @@ int main(){
  assert(report.find("actual_position_raw=-765")!=std::string::npos);
  assert(report.find("manufacturer_error_code=unavailable_not_mapped")!=std::string::npos);
  for(const char* label:{"L1 slot=0","L8 slot=7","R1 slot=8","R8 slot=15","Head1 slot=16","Waist2 slot=19"})assert(report.find(label)!=std::string::npos);
-#if __has_include("position_waist_units.h")
+#if __has_include("position_waist_units.h") || __has_include("position_waist_feedback.h")
  // Exercise the actual legacy writer in memory as well as the owned-session writer.
  EtherCATDriver legacy;legacy.motor_enable_.store(true);
  for(unsigned slot=16;slot<20;++slot){
@@ -115,10 +146,14 @@ int main(){
  for(unsigned tick=0;tick<35;++tick)legacy.cycle();
  for(unsigned slot=16;slot<20;++slot){
   const double v=slot%2?double(-.02f):double(.02f);
+#if __has_include("position_waist_units.h")
   const bool waist=slot>=18;
   const double multiplier=waist?position_session::waist_units::motor_per_position[slot-18]:1.;
   const auto expected=waist&&position_session::waist_units::feedforward_gain>0?0:
       position_session::csp_speed_counts(v*multiplier);
+#else
+  const auto expected=position_session::csp_speed_counts(v);
+#endif
   assert(crx[slot-16].velocity==expected);
   assert(crx[slot-16].position==position_session::csp_counts(.01f));
  }

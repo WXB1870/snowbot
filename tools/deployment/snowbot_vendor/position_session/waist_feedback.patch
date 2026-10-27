@@ -1,0 +1,63 @@
+--- a/servo_control/include/servo_control/ethercat_driver.h
++++ b/servo_control/include/servo_control/ethercat_driver.h
+@@ -5,6 +5,7 @@
+  */
+ #ifndef ETHERCAT_DRIVER_H
+ #define ETHERCAT_DRIVER_H
++#include "position_waist_feedback.h"
+ #include "servo_control/position_observation.h"
+ #include "servo_control/drive_maintenance.h"
+ #include "servo_control/position_watchdog.h"
+@@ -192,6 +193,7 @@
+     position_session::Watchdog session_watchdog_;
+     std::atomic<bool> session_bypass_{true};
+     position_session::ObservationCache observation_cache_;
++    position_session::WaistFeedbackUnits waist_feedback_units_;
+     position_session::Observation observation_rt_; // RT writer only
+     int cycle_count_;
+     std::atomic<bool> motor_enable_{true};  // 电机使能: true=使能, false=抱闸
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -305,6 +305,24 @@
+                 motor_slave_map[motor_idx] = s;
+             }
+         }
++    }
++
++    // Read-only reduction-ratio query before PDO configuration or OP/enable.
++    const int waist_slaves[2]={motor_slave_map[18],motor_slave_map[19]};
++    const bool waist_units_ok=waist_feedback_units_.load(waist_slaves,
++        [](int slave,int& bytes,int32_t& ratio) {
++            return ec_SDOread(slave,0x200E,2,FALSE,&bytes,&ratio,EC_TIMEOUTSAFE);
++        });
++    for(unsigned i=0;i<2;++i) {
++        const auto& a=waist_feedback_units_.axis(i);
++        printf("[waist_feedback] alias=%u slave=%d object=0x200E:02 wkc=%d bytes=%d reported=%d used_ratio=%.0f source=%s\n",
++            19+i,waist_slaves[i],a.wkc,a.bytes,int(a.reported),a.ratio,
++            a.provisional?"provisional_101":(a.ratio>0?"device":"invalid"));
++    }
++    fflush(stdout);
++    if(!waist_units_ok) {
++        fprintf(stderr,"[waist_feedback] invalid ratio response or missing waist slave; initialization refused\n");
++        ec_close();return false;
+     }
+ 
+     // === 2. 电机 PDO 配置 (PREOP) ===
+@@ -903,7 +921,7 @@
+             motor_fb_pos_[m].store(
+                 static_cast<float>(csp_tx_[m]->position * (2.0 * M_PI / 262144.0)));
+             motor_fb_spd_[m].store(
+-                static_cast<float>(csp_tx_[m]->velocity * (2.0 * M_PI / 65536.0)));
++                static_cast<float>(waist_feedback_units_.speed(m,csp_tx_[m]->velocity * (2.0 * M_PI / 65536.0))));
+             motor_fb_cur_[m].store(static_cast<float>(csp_tx_[m]->torque) * 0.001f);
+             motor_fb_status_[m].store(csp_tx_[m]->statusword);
+         } else if (!is_csp_motor_[m] && m_tx_[m]) {
+@@ -940,7 +958,7 @@
+                 if(complete)obs.csp.feedback_mask|=1u<<m;
+             }
+             obs.position[m]=float(csp_tx_[m]->position*(2.0*M_PI/262144.0));
+-            obs.speed[m]=float(csp_tx_[m]->velocity*(2.0*M_PI/65536.0));
++            obs.speed[m]=float(waist_feedback_units_.speed(m,csp_tx_[m]->velocity*(2.0*M_PI/65536.0)));
+             obs.current[m]=0;obs.torque_raw[m]=csp_tx_[m]->torque;
+             if(complete)obs.torque_raw_valid_mask|=1u<<m;
+             obs.status[m]=csp_tx_[m]->statusword;
