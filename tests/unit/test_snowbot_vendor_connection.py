@@ -64,6 +64,35 @@ class PositionReleaseTests(unittest.TestCase):
             copied=self.release/'src/servo_control'/folder/'bindu_execution_native'/name
             self.assertEqual(vendor.digest(copied),manifest['native_execution'][name])
 
+    def test_arm_homing_accepts_half_degree_without_changing_settle_or_bus_gate(self):
+        import re
+        compiler=shutil.which('c++')
+        if not compiler:self.skipTest('C++ compiler unavailable')
+        header=(self.release/'src/servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text()
+        loop=(self.release/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
+        definitions='\n'.join(re.findall(r'^#define ZERO_POS_(?:THRESHOLD|EXIT_THRESH).*$',header,re.M))
+        timeout=re.search(r'^constexpr double kRetzeroTimeoutAcceptError = .*?;',loop,re.M).group()
+        self.assertIn('if (settle_cnt > 500) retZero_done = true;',loop)
+        self.assertIn('constexpr int kRetzeroTimeoutCycles = 10000;',loop)
+        self.assertIn('bool residual_within_startup_tolerance = EtherCAT_communicationHealthy();',loop)
+        self.assertIn('arm_startup_ready = residual_within_startup_tolerance;',loop)
+        self.assertIn('(0.001)',(self.baseline/'servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text())
+        source=self.work/'homing-tolerance.cpp'
+        source.write_text('#include <cassert>\n#include <cmath>\n'+definitions+'\n'+timeout+
+            '\nint main(){\n'
+            'const double degree=std::acos(-1.)/180.;\n'
+            'assert(std::abs(ZERO_POS_EXIT_THRESH/degree-.5)<1e-12);\n'
+            'double limits[]={ZERO_POS_THRESHOLD,ZERO_POS_EXIT_THRESH,kRetzeroTimeoutAcceptError};\n'
+            'double signs[]={-1.,1.};\n'
+            'for(double limit:limits){for(double sign:signs){\n'
+            'assert(!(std::abs(sign*.499*degree)>limit));\n'
+            'assert(!(std::abs(sign*.5*degree)>limit));\n'
+            'assert(std::abs(sign*.501*degree)>limit);}}\n'
+            '}\n')
+        binary=self.work/'homing-tolerance'
+        subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True,capture_output=True,text=True)
+        subprocess.run([str(binary)],check=True,capture_output=True,text=True)
+
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
         manifest=json.loads((output/'position_release.json').read_text())
