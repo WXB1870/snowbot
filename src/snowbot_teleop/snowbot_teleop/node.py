@@ -1115,7 +1115,7 @@ class PicoNode(RuntimeNode):
             # now rather than depending on the coordinator timer's previous
             # feedback sample when handing a held A request back to standby.
             self.control.update_feedback(self.feedback(),self.now())
-        if stopped_failure:self.control.update_feedback(self.feedback(),self.now())
+        if rejected or stopped_failure:self.control.update_feedback(self.feedback(),self.now())
         self.control.complete(intent.token,ok,reason,self.now(),rejected=rejected,stopped_failure=stopped_failure)
         if canceled:
             self.event('PICO_OPERATION_CANCELED',json.dumps(dict(token=intent.token,operation=intent.operation,
