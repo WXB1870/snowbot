@@ -41,16 +41,9 @@ snowbot/
 
 生成与历史产物按[产物存放约定](运行与验证.md#生成产物与历史归档)维护。当前本机候选见[发布索引](releases/index.json)，最近一次有回执的118版本见[部署索引](deployments/index.json)，历史位置映射见[产物索引](artifacts/index.json)。索引标注盘点日期及证据状态；历史回执不证明机器人当前在线版本。生成目录只作输出，不直接修改。
 
-从Bindu执行的x86部署，先加载匹配ROS与厂商消息，再选定本工作区：
+## 部署与使用入口
 
-```bash
-python3 -m tools.deployment.x86_real prepare \
-  --application-source /绝对路径/snowbot \
-  --vendor-setup /绝对路径/厂商安装/local_setup.bash
-python3 -m tools.deployment.x86_real build
-```
-
-构建生成安装产物，运行节点需单独启动。环境与源码身份保存在部署清单；有效配置、来源及哈希保存在 `resolved-config.json`。现场启停与物理验收仍由人员执行。
+正式下载、底层编译、Bindu与Snowbot上层构建、现场配置和日常启动统一见[部署与运行](运行与验证.md#新克隆的配对源码与构建)。已有安装直接看[日常启动](运行与验证.md#日常启动)，更新按[变更类型](运行与验证.md#日常修改与更新)选择动作。现有`x86_real`工具仍在Bindu仓库，由本指南统一说明用法。
 
 ## 源码与离线检查
 

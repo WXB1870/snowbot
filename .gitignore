@@ -23,3 +23,6 @@ dist/
 !/releases/COLCON_IGNORE
 /deployments/*
 !/deployments/COLCON_IGNORE
+
+# Local deployment documentation migration and historical evidence
+/过程记录/2026-10-28.md
