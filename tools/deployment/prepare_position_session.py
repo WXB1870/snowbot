@@ -152,6 +152,9 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             shutil.copy2(ASSETS/'position_waist_feedback.h',stage/'src/servo_control/include/position_waist_feedback.h')
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'waist_feedback.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'waist_feedback')
+        if not observation_only and not with_impedance:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'deployed_vendor.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'deployed_vendor')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
@@ -170,6 +173,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         pairing=json.loads(pairing_path.read_text())['repositories']['bindu']
         manifest=dict(preparation=dict(tool_sha256=digest(Path(__file__)),snowbot=source_identity(ASSETS),
             recommended_bindu_source=pairing,source_pairing_sha256=digest(pairing_path),
+            deployment_reference=json.loads((pairing_path.parent/'vendor/snowbot/baseline.json').read_text()).get('deployment_reference'),
             execution=None if native is None else source_identity(native),artifact_role='generated_candidate',
             deployment_verified=False,physical_acceptance=False),arm_reference_margin_rad=arm_reference_margin,schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),

@@ -23,7 +23,7 @@
     "recorder_enabled": false,
     "recording_mode": "off",
     "description_enabled": false,
-    "tool_display_enabled": true,
+    "tool_display_enabled": false,
     "position_contract": true,
     "pico_config": "package://snowbot_bringup/config/robots/snowbot/pico_snowbot_position_real.json",
     "base_config": "package://snowbot_bringup/config/robots/snowbot/snowbot_base.json",

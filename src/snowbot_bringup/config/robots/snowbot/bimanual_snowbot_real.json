@@ -1,8 +1,7 @@
 {
   "simulation_only": false,
   "collision_scope": "configured_tool_geometry",
-  "measured_joint_limit_tolerance_rad": 0.03490658503988659,
-  "urdf": "snowbot_control.urdf",
+  "urdf": "snowbot_control_real.urdf",
   "resource_groups": [
     "waist",
     "left_arm",
@@ -40,13 +39,11 @@
   "position_scale": 1.0,
   "vr_tool_mapping": "hand_line_midpoint",
   "operator_yaw_rad": 0.0,
-  "direction_reference": "headset_on_engage",
   "sample_period": 0.01,
   "max_integration_interval": 0.1,
   "integration_max_sample_gap": 0.25,
   "max_reference_error": 0.15,
   "worker_timeout": 0.23,
-  "rigid_reference_prediction": true,
   "worker_startup_timeout": 30.0,
   "relative_gain": 12.0,
   "max_relative_error": 0.08,
@@ -116,7 +113,6 @@
         ]
       }
     },
-    "shaft_contact_endpoint_tolerance_m": 0.1,
     "shaft_contacts": {
       "arm_l_link_7": {
         "grip": "left",
@@ -146,7 +142,8 @@
     ],
     "check_grasp_contacts": false,
     "max_grasp_penetration_m": 0.005,
-    "geometry_kind": "rod"
+    "geometry_kind": "rod",
+    "shaft_contact_endpoint_tolerance_m": 0.1
   },
   "right_to_tool": [
     -0.7180654330047566,
@@ -171,7 +168,6 @@
   "tool_gain": 10.0,
   "posture_gain": 0.1,
   "shared_motion_weight": 0.1,
-  "coupled_locked_joints": [],
   "pose_filter": {
     "enabled": true,
     "position": {
@@ -186,8 +182,6 @@
     }
   },
   "limit_margin": 0.15,
-  "limit_avoidance_margin": 0.15,
-  "limit_avoidance_weight": 0.05,
   "damper_gain": 6.0,
   "right_axial_grasp": {
     "grip_in_right_flange_m": [
@@ -207,11 +201,24 @@
   "geometry_step_backtracking": true,
   "posture_policy": {
     "reference": "initial_capture",
-    "position_bounds": {"body_joint_2": [-0.45, 0.45]}
+    "position_bounds": {
+      "body_joint_2": [
+        -0.45,
+        0.45
+      ]
+    }
   },
   "reference_kinematics": true,
-  "tracking_feedback": "measured_shared",
-  "posture_reference_margin_rad": 0.027453292519943295,
+  "posture_reference_margin_rad": 0.027453292519943294,
   "input_frame": "car_base_link",
-  "tool_velocity_feedforward": true
+  "tool_velocity_feedforward": true,
+  "grasp_reference_source": "measured_rigid",
+  "tool_grasp_confirmation": "operator",
+  "rigid_reference_prediction": true,
+  "direction_reference": "headset_on_engage",
+  "limit_avoidance_margin": 0.15,
+  "limit_avoidance_weight": 0.05,
+  "tracking_feedback": "measured_shared",
+  "coupled_locked_joints": [],
+  "measured_joint_limit_tolerance_rad": 0.03490658503988659
 }

@@ -227,7 +227,7 @@
 +   uint8_t axis_checks=0;
 +   if(!std::isfinite(reference[i]))axis_checks|=4;
 +   if(reference[i]<position_session::lower[i]||reference[i]>position_session::upper[i])axis_checks|=8;
-+   if(std::abs(reference[i]-position_feedback_.q[i])>.5)axis_checks|=16;
++   if(std::abs(reference[i]-position_feedback_.q[i])>.25)axis_checks|=16;
 +   if(axis_checks){valid=false;checks|=axis_checks;if(failed_axis<0)failed_axis=int16_t(i);}
 +  }
 +  if(!valid && position_output_.failure_reason!=position_session::CYCLE_OR_TRACKING_ERROR){

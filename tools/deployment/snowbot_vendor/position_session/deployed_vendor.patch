@@ -1,0 +1,179 @@
+--- a/servo_control/include/impedance/cartesian_impedance_controller.h
++++ b/servo_control/include/impedance/cartesian_impedance_controller.h
+@@ -67,0 +68 @@
++  double z() const { return z_; }
+@@ -166,0 +168,5 @@
++    // 摩擦补偿意图力矩阈值 (逐关节, Nm, 默认 0.0 = 禁用意图模式, 回退到 LuGre 速度符号)
++    // |accel_feedforward_+impedance_torques_+nullspace_torques_| > threshold 时,
++    //   摩擦补偿方向跟随合力方向 (+|friction| / -|friction|)
++    // ≤ threshold 时摩擦补偿置零 (无明确运动意图)
++    std::vector<double> comp_torque_threshold{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+@@ -550 +556,2 @@
+-  VectorXd friction_torques_;        // LuGre 摩擦前馈力矩 (n_dof_, 调试用)
++  VectorXd friction_torques_;        // LuGre 摩擦前馈力矩 (n_dof_, 原始输出, 调试用)
++  VectorXd friction_applied_;        // 实际应用的摩擦补偿 (n_dof_, 可由意图力矩决定方向)
+--- a/servo_control/src/impedance/cartesian_impedance_controller.cpp
++++ b/servo_control/src/impedance/cartesian_impedance_controller.cpp
+@@ -5,0 +6 @@
++#include <iomanip>
+@@ -6,0 +8 @@
++#include <sstream>
+@@ -68,0 +71 @@
++  cfg.lugre_friction.comp_torque_threshold = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+@@ -249,0 +253,2 @@
++    parse7("comp_torque_threshold", cfg.lugre_friction.comp_torque_threshold,
++           {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+@@ -525,0 +531,2 @@
++  friction_applied_.resize(n_dof_);
++  friction_applied_.setZero();
+@@ -998,0 +1006,24 @@
++
++    // === 关节空间等效刚度/阻尼 (诊断用, 仅首帧打印) ===
++    // K_q = J^T * (K * J + D * dJ/dt)
++    // D_q = J^T * (D * J + 2 * Lambda * dJ/dt)
++    Eigen::MatrixXd K_q = jacobian_.transpose() * (
++        desired_stiffness_ * jacobian_ +
++        desired_damping_ * jacobian_dt_);
++    Eigen::MatrixXd D_q = jacobian_.transpose() * (
++        desired_damping_ * jacobian_ +
++        2.0 * Lambda * jacobian_dt_);
++    if (!diag_params_printed_) {
++      Eigen::VectorXd kq_diag = K_q.diagonal();
++      Eigen::VectorXd dq_diag = D_q.diagonal();
++      std::ostringstream kq_ss, dq_ss;
++      for (int i = 0; i < kq_diag.size(); ++i) {
++        if (i > 0) { kq_ss << ", "; dq_ss << ", "; }
++        kq_ss << std::fixed << std::setprecision(2) << kq_diag(i);
++        dq_ss << std::fixed << std::setprecision(2) << dq_diag(i);
++      }
++      RCLCPP_INFO(node_->get_logger(),
++          "[JointImpedanceDiag %s] n_dof=%zu  K_q_diag=[%s]  D_q_diag=[%s]",
++          config_.ee_link.c_str(), n_dof_, kq_ss.str().c_str(), dq_ss.str().c_str());
++      diag_params_printed_ = true;
++    }
+@@ -1055,6 +1086,6 @@
+-    // for (int i = 0; i < 6; ++i) {
+-    //   if (std::abs(sensor_wrench_at_tcp_(i)) >= integral_force_threshold_(i)) {
+-    //     free_space = false;
+-    //     break;
+-    //   }
+-    // }
++    for (int i = 0; i < 6; ++i) {
++      if (std::abs(sensor_wrench_at_tcp_(i)) >= integral_force_threshold_(i)) {
++        free_space = false;
++        break;
++      }
++    }
+@@ -1085 +1116,7 @@
+-
++      for (int i = 0; i < n_dof_; ++i) {
++        if(tau_integral_(i) > config_.lugre_friction.Fs[i]){
++          tau_integral_(i) = config_.lugre_friction.Fs[i];
++        }else if(tau_integral_(i) < -config_.lugre_friction.Fs[i]){
++          tau_integral_(i) = -config_.lugre_friction.Fs[i];
++        }
++      }
+@@ -1157,4 +1194,36 @@
+-  // 摩擦补偿符号说明:
+-  //   LuGre step() 返回的是"需要施加的补偿力矩" (与运动方向同号),
+-  //   即 v>0 时输出正值, 电机施加正向力矩抵消摩擦 (摩擦沿 -v 方向).
+-  //   因此 tau_desired_ += friction_torques_.
++  // 摩擦补偿方向选择: 根据意图力矩 (accel + impedance + nullspace) 而非 LuGre 速度符号
++  //   逐关节:
++  //     intent_tau > +threshold → friction_applied = +|friction| (顺着意图方向施加摩擦补偿)
++  //     intent_tau < -threshold → friction_applied = -|friction|
++  //     |intent_tau| ≤ threshold → friction_applied = 0 (死区内无明确运动意图)
++  //   threshold = 0 (默认) 时回退到 LuGre 速度符号: friction_applied = friction_torques_
++  {
++    Eigen::VectorXd intent_tau = accel_feedforward_ + impedance_torques_ + nullspace_torques_;
++    // friction_applied_.setZero();
++    for (size_t i = 0; i < n_dof_; ++i) {
++      const double th = (i < config_.lugre_friction.comp_torque_threshold.size())
++          ? config_.lugre_friction.comp_torque_threshold[i] : 0.0;
++      const double abs_fric = std::abs(friction_torques_(i));
++      if (th > 0.0 && abs_fric > 1e-9) {
++        if(abs(robot_dq_(i))< config_.lugre_friction.vs[i]) {
++          // if (intent_tau(i) > th)        friction_applied_(i) =  abs_fric;
++          // else if (intent_tau(i) < -th) friction_applied_(i) = -abs_fric;
++          // else{
++            // if(robot_dq_(i) > 1e-6){
++            //   friction_applied_(i) =  config_.lugre_friction.Fc[i];
++            // } else if(robot_dq_(i) < -1e-6){
++            //   friction_applied_(i) =  -config_.lugre_friction.Fc[i];
++            // }else{
++            //   friction_applied_(i) =  0.0;
++            // }
++          // }
++          friction_applied_(i) = config_.lugre_friction.Fs[i]*std::tanh(th*robot_dq_(i)+intent_tau(i));
++        }else{
++          friction_applied_(i) = friction_torques_(i);
++        }
++      } else {
++        friction_applied_(i) = friction_torques_(i);
++      }
++    }
++  }
++
+@@ -1162 +1231 @@
+-               + twist_compensation_ + g_sub_ + friction_torques_;
++               + twist_compensation_ + g_sub_ + friction_applied_;
+@@ -1263,2 +1332,2 @@
+-  // effort_commands_ 与 friction_torques_ 联合发布到 ~/effort_cmds 话题
+-  //   布局: [0..n_dof_-1]=effort_commands_, [n_dof_..2*n_dof_-1]=friction_torques_
++  // effort_commands_ 与 friction_applied_ 联合发布到 ~/effort_cmds 话题
++  //   布局: [0..n_dof_-1]=effort_commands_, [n_dof_..2*n_dof_-1]=friction_applied_ (实际应用)
+@@ -1268 +1337 @@
+-    // 布局: [0..n-1]=effort_commands_, [n..2n-1]=friction_torques_,
++    // 布局: [0..n-1]=effort_commands_, [n..2n-1]=friction_applied_,
+@@ -1272 +1341,2 @@
+-    //        [5n..5n+5]=impedance_wrench_ (笛卡尔阻抗 wrench, 6 维: Fx,Fy,Fz,Mx,My,Mz)
++    //        [5n..5n+5]=impedance_wrench_ (笛卡尔阻抗 wrench, 6 维: Fx,Fy,Fz,Mx,My,Mz),
++    //        [5n+6..6n+5]=lugre_z_ (LuGre bristle 变形状态 z, n_dof_ 维)
+@@ -1274 +1344,2 @@
+-    effort_msg_.data.resize(off_wrench + 6);
++    const size_t off_lugre_z = off_wrench + 6;
++    effort_msg_.data.resize(off_lugre_z + n_dof_);
+@@ -1277 +1348 @@
+-      effort_msg_.data[n_dof_ + i]        = friction_torques_(i);
++      effort_msg_.data[n_dof_ + i]        = friction_applied_(i);
+@@ -1280,0 +1352 @@
++      effort_msg_.data[off_lugre_z + i]   = (i < lugre_friction_.size()) ? lugre_friction_[i].z() : 0.0;
+--- a/ctl_msgs/config/impedance_params.yaml
++++ b/ctl_msgs/config/impedance_params.yaml
+@@ -89,2 +89,2 @@
+-    stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
+-    damping:   [30.0,  30.0,  30.0,  10.0,  10.0,  10.0]
++    stiffness: [300.0, 300.0, 300.0, 60.0, 60.0, 60.0]
++    damping:   [30.0,  30.0,  30.0,  20.0,  20.0,  20.0]
+@@ -117 +117 @@
+-    kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]
++    kt_gravity: [1.28, 1.35, 1.35, 1.35, 1.35, 1.35, 1.35]
+@@ -130,0 +131,3 @@
++    #     comp_torque_threshold [Nm]: 意图力矩阈值 (逐关节, 默认 0 = 禁用意图模式,
++    #       回退到 LuGre 速度符号); |accel+impedance+nullspace| > threshold 时摩擦
++    #       补偿方向跟随合力方向 (+|f|/-|f|), ≤ threshold 时置零 (死区)
+@@ -138,2 +141,2 @@
+-      Fs: [13.0, 8.5, 8.5, 8.5, 4.0, 4.0, 4.0]   # 7 维: 逐关节静摩擦
+-      Fc: [12.0, 7.5, 7.5, 7.5, 3.5, 3.5, 3.5]   # 7 维: 逐关节库仑摩擦
++      Fs: [13.0, 8.0, 7.0, 8.0, 4.0, 4.0, 4.0]   # 7 维: 逐关节静摩擦
++      Fc: [12.0, 7.5, 6.5, 7.5, 3.5, 3.5, 3.5]   # 7 维: 逐关节库仑摩擦
+@@ -141,0 +145,2 @@
++      # comp_torque_threshold: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]  # Nm, 默认 0 = 回退速度符号
++      comp_torque_threshold: [150.0, 200.0, 200.0, 200.0, 150.0, 150.0, 150.0]
+@@ -186,2 +191,2 @@
+-    stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
+-    damping:   [30.0,  30.0,  30.0,  10.0,  10.0,  10.0]
++    stiffness: [300.0, 300.0, 300.0, 60.0, 60.0, 60.0]
++    damping:   [30.0,  30.0,  30.0,  20.0,  20.0,  20.0]
+@@ -203 +208 @@
+-    kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]
++    kt_gravity: [1.28, 1.35, 1.35, 1.35, 1.35, 1.35, 1.35]
+@@ -210 +215 @@
+-      Fs: [13.0, 8.5, 8.5, 8.5, 4.0, 4.0, 4.0]
++      Fs: [13.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
+@@ -213,0 +219,2 @@
++      # comp_torque_threshold: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
++      comp_torque_threshold: [150.0, 200.0, 200.0, 200.0, 150.0, 150.0, 150.0]
+@@ -217,0 +225,2 @@
++    # nullspace_stiffness: 0.0
++    # nullspace_damping:   0.0

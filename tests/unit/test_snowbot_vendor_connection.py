@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -64,34 +64,16 @@ class PositionReleaseTests(unittest.TestCase):
             copied=self.release/'src/servo_control'/folder/'bindu_execution_native'/name
             self.assertEqual(vendor.digest(copied),manifest['native_execution'][name])
 
-    def test_arm_homing_accepts_half_degree_without_changing_settle_or_bus_gate(self):
-        import re
-        compiler=shutil.which('c++')
-        if not compiler:self.skipTest('C++ compiler unavailable')
+    def test_arm_homing_matches_deployed_thresholds_and_keeps_bus_gate(self):
         header=(self.release/'src/servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text()
         loop=(self.release/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
-        definitions='\n'.join(re.findall(r'^#define ZERO_POS_(?:THRESHOLD|EXIT_THRESH).*$',header,re.M))
-        timeout=re.search(r'^constexpr double kRetzeroTimeoutAcceptError = .*?;',loop,re.M).group()
+        self.assertIn('#define ZERO_POS_THRESHOLD    (0.001)',header)
+        self.assertIn('#define ZERO_POS_EXIT_THRESH  (0.001)',header)
+        self.assertIn('constexpr float kRetzeroTimeoutAcceptError = 0.01f;',loop)
         self.assertIn('if (settle_cnt > 500) retZero_done = true;',loop)
         self.assertIn('constexpr int kRetzeroTimeoutCycles = 10000;',loop)
         self.assertIn('bool residual_within_startup_tolerance = EtherCAT_communicationHealthy();',loop)
         self.assertIn('arm_startup_ready = residual_within_startup_tolerance;',loop)
-        self.assertIn('(0.001)',(self.baseline/'servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text())
-        source=self.work/'homing-tolerance.cpp'
-        source.write_text('#include <cassert>\n#include <cmath>\n'+definitions+'\n'+timeout+
-            '\nint main(){\n'
-            'const double degree=std::acos(-1.)/180.;\n'
-            'assert(std::abs(ZERO_POS_EXIT_THRESH/degree-.5)<1e-12);\n'
-            'double limits[]={ZERO_POS_THRESHOLD,ZERO_POS_EXIT_THRESH,kRetzeroTimeoutAcceptError};\n'
-            'double signs[]={-1.,1.};\n'
-            'for(double limit:limits){for(double sign:signs){\n'
-            'assert(!(std::abs(sign*.499*degree)>limit));\n'
-            'assert(!(std::abs(sign*.5*degree)>limit));\n'
-            'assert(std::abs(sign*.501*degree)>limit);}}\n'
-            '}\n')
-        binary=self.work/'homing-tolerance'
-        subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True,capture_output=True,text=True)
-        subprocess.run([str(binary)],check=True,capture_output=True,text=True)
 
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
@@ -299,5 +281,76 @@ int main(){for(bool left:{false,true}){
     def test_actual_production_native_contracts(self):
         subprocess.run(['python3',str(ROOT/'tests/integration/validate_position_native.py'),'--source',str(self.release/'src')],check=True,capture_output=True,text=True)
         subprocess.run(['python3',str(ROOT/'tests/integration/validate_position_model.py'),'--source',str(self.release/'src')],check=True,capture_output=True,text=True)
+
+
+
+class DeploymentEntryTests(unittest.TestCase):
+    def test_lock_fetches_exact_revision_and_preserves_existing_checkouts(self):
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        def run(root,*args):
+            return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);remote=root/'origin';remote.mkdir()
+            run(remote,'init','-q');run(remote,'config','user.name','fixture');run(remote,'config','user.email','fixture@example.invalid')
+            (remote/'src').mkdir();(remote/'src/value').write_text('locked')
+            run(remote,'add','.');run(remote,'commit','-qm','locked');locked=run(remote,'rev-parse','HEAD')
+            (remote/'src/value').write_text('newer');run(remote,'commit','-qam','newer');newer=run(remote,'rev-parse','HEAD')
+            (root/'dependencies.repos').write_text(json.dumps({'repositories':{'bindu':dict(type='git',url=str(remote),version=locked)}}))
+            with patch.object(deploy,'ROOT',root):
+                source=deploy.locked_bindu(None,acquire=True)
+                self.assertEqual(run(source,'rev-parse','HEAD'),locked)
+                self.assertEqual((source/'src/value').read_text(),'locked')
+                (source/'src/value').write_text('local edits')
+                with self.assertRaisesRegex(ValueError,'local changes'):
+                    deploy.locked_bindu(None,acquire=True)
+                self.assertEqual((source/'src/value').read_text(),'local edits')
+                with self.assertRaisesRegex(ValueError,'left unchanged'):
+                    deploy.locked_bindu(remote,acquire=True)
+                self.assertEqual(run(remote,'rev-parse','HEAD'),newer)
+                (source/'src/value').write_text('locked')
+                data=json.loads((root/'dependencies.repos').read_text());data['repositories']['bindu']['version']=newer
+                (root/'dependencies.repos').write_text(json.dumps(data))
+                with self.assertRaisesRegex(ValueError,'left unchanged'):
+                    deploy.locked_bindu(None)  # Daily start must not update source.
+                self.assertEqual(run(source,'rev-parse','HEAD'),locked)
+                self.assertEqual(run(deploy.locked_bindu(None,acquire=True),'rev-parse','HEAD'),newer)
+
+    def test_generated_vendor_reuses_cache_preserves_site_and_rejects_local_edits(self):
+        from tools.deployment import deploy
+        from bindu_contracts.resources import package_share
+        bindu=package_share('bindu_execution').parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace=Path(tmp)
+            site=workspace/'vendor-position.yaml';site.write_text('site-owned parameters')
+            output=deploy.assemble(bindu,workspace)
+            self.assertTrue((output/'src/servo_control/package.xml').is_file())
+            self.assertEqual(deploy.assemble(bindu,workspace),output)
+            self.assertEqual(site.read_text(),'site-owned parameters')
+            changed=output/'src/servo_control/src/main.cpp';changed.write_text('local maintenance')
+            with self.assertRaisesRegex(ValueError,'Generated vendor changed'):
+                deploy.assemble(bindu,workspace)
+            self.assertEqual(changed.read_text(),'local maintenance')
+
+    def test_prepare_build_and_start_have_separate_side_effects(self):
+        from unittest.mock import Mock, patch
+        from tools.deployment import deploy
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace=Path(tmp);(workspace/'upper').mkdir();(workspace/'upper/deployment.json').write_text('{}')
+            calls=Mock();bindu=workspace/'bindu';vendor=workspace/'vendor'
+            with patch.object(deploy,'require_platform'),patch.object(deploy,'require_stopped'), \
+                 patch.object(deploy,'locked_bindu',return_value=bindu), \
+                 patch.object(deploy,'assemble',side_effect=lambda *a:(calls.assemble(),vendor)[1]), \
+                 patch.object(deploy,'vendor_build',side_effect=lambda *a:calls.vendor()), \
+                 patch.object(deploy,'prepare_ros_dependencies',side_effect=lambda *a:calls.rosdep()), \
+                 patch.object(deploy,'x86',side_effect=lambda b,w,c,*a:calls.upper(c)), \
+                 patch.object(deploy,'receipt',side_effect=lambda *a:calls.receipt()):
+                self.assertEqual(deploy.main(['prepare','--workspace',str(workspace)]),0)
+                self.assertEqual([c[0] for c in calls.mock_calls],['assemble','rosdep','vendor','upper','upper','receipt'])
+                self.assertEqual([c.args for c in calls.mock_calls if c[0]=='upper'],[('prepare',),('build',)])
+                calls.reset_mock();self.assertEqual(deploy.main(['build','--workspace',str(workspace)]),0)
+                self.assertEqual([c[0] for c in calls.mock_calls],['assemble','vendor','upper','receipt'])
+                calls.reset_mock();self.assertEqual(deploy.main(['start','--workspace',str(workspace),'--enable-commands']),0)
+                self.assertEqual(calls.mock_calls,[unittest.mock.call.upper('start')])
 
 if __name__=='__main__':unittest.main()

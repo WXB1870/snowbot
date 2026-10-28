@@ -28,7 +28,7 @@ snowbot/
 │   ├── snowbot_hardware/      厂商消息、会话、反馈、夹爪及设备节点
 │   └── snowbot_teleop/        PICO准备、装卸、操作状态机及协调节点
 ├── vendor/snowbot/            original/原始输入、baseline.json与SHA身份
-├── tools/deployment/         唯一底层源码准备器与补丁维护源
+├── tools/deployment/         统一部署入口、底层准备器与补丁维护源
 ├── tests/                    底层离线检查；跨框架回归沿用Bindu tests
 ├── releases/                 唯一命名的生成候选与index.json（本地）
 ├── deployments/118/          已有部署批次与回执；index.json标明记录状态（本地）
@@ -36,17 +36,17 @@ snowbot/
 └── backups/                  本机恢复材料（本地）
 ```
 
-配置的唯一维护目录为 `src/snowbot_bringup/config/`：`deployments/` 选择装配，`robots/snowbot/` 保存本体索引、profile、工具、PICO、夹爪及可选底盘参数。沿用已有文件名、字段与数值，避免结构迁移同时改变控制行为。部署配方用 `robot_package=snowbot_bringup` 选择应用 launch，资源通过 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 解析。现场 `site.json` 保存实际选择与网络、设备、标定条件；未知字段及无效组合仍拒绝。
+配置模板的唯一维护目录为 `src/snowbot_bringup/config/`：`deployments/` 选择装配，`robots/snowbot/` 保存本体索引、profile、工具、PICO、夹爪及可选底盘参数。默认实机参数按最后部署证据整理，单机覆盖保留在现场配方。部署配方用 `robot_package=snowbot_bringup` 选择应用 launch，资源通过 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 解析。现场 `site.json` 保存实际选择与网络、设备、标定条件；未知字段及无效组合仍拒绝。
 
 厂商原始基线已逐字节迁至 `vendor/snowbot/original/`，由 `vendor/snowbot/baseline.json` 固定其清单身份；日常修改在准备器、补丁与公共头文件维护，生成目录只作输出，不再作为第二个维护源。原始文件与同事资产不改写，`artifacts/`、`vendor/snowbot/`、`releases/`、`deployments/`、`backups/`中的 `COLCON_IGNORE` 防止外层构建误装配历史源码或原始驱动。Bindu原导入入口为兼容转发，新实现只维护一次。
 
-生成与历史产物按[产物存放约定](运行与验证.md#生成产物与历史归档)维护。当前本机候选见[发布索引](releases/index.json)，最近一次有回执的118版本见[部署索引](deployments/index.json)，历史位置映射见[产物索引](artifacts/index.json)。索引标注盘点日期及证据状态；历史回执不证明机器人当前在线版本。生成目录只作输出，不直接修改。
+生成与历史产物按[产物存放约定](运行与验证.md#基线与可复现边界)维护。当前本机候选见[发布索引](releases/index.json)，最近一次有回执的118版本见[部署索引](deployments/index.json)，历史位置映射见[产物索引](artifacts/index.json)。索引标注盘点日期及证据状态；历史回执不证明机器人当前在线版本。生成目录只作输出，不直接修改。
 
 ## 部署与使用入口
 
-实机文档只以2026-10-28最后部署到118的兼容版`df2645a`为准，沿用原单仓布局。源码保留在Bindu的`xavier/deploy-grasp-waist-118-20261028`，获取、编译和日常运行见[运行指南](运行与验证.md#获取与编译已部署版本)。
+从[运行指南](运行与验证.md#首次准备与构建)获取选定Snowbot版本后，执行`python3 -m tools.deployment.deploy prepare`；统一入口按`dependencies.repos`获取锁定Bindu，构建包含servo的vendor和两仓上层。后续`build`复用环境，`start`复用现场配置及既有预检，人工顺序启动底层。支持条件及现场标定边界见运行指南。
 
-当前两个仓库继续按框架／应用分工维护；`dependencies.repos`用于拆仓开发源码参考，不作为还原该次118部署的入口。
+默认控制行为以118最后部署的df2645a及配套底层、现场覆盖为对照；旧单仓安装保留原样，不把本次软件整理视为118已更新。现场配置、私钥及构建产物保持本地。
 
 ## 未实现项
 
