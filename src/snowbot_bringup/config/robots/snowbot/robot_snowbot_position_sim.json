@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "robot_id": "snowbot",
+  "model": {
+    "urdf": "package://snowbot_description/urdf/snowbot_control_real.urdf",
+    "display_urdf": "package://snowbot_description/urdf/snowbot_display.urdf",
+    "base_frame": "car_base_link"
+  },
+  "profile": "snowbot_real_position.json",
+  "teleop": {
+    "single_arm": {},
+    "tool": "bimanual_snowbot_position_sim.json"
+  },
+  "position_mapping": null
+}
