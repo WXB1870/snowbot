@@ -25,6 +25,5 @@
       "max_speed": 0.2
     }
   },
-  "simulation_only": true,
-  "independent_trigger_control": true
+  "simulation_only": true
 }

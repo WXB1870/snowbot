@@ -130,8 +130,10 @@ class PositionSimulation(ExecutionNode):
 
     def lease(self, request, reply):
         if request.operation == 'acquire':
+            grippers=self.grippers.core
+            blocked=grippers.busy and (grippers.fault or not grippers.cfg.get('independent_trigger_control',False))
             reason = ('COMMANDS_DISABLED' if not self.commands_enabled else
-                      'GRIPPERS_BUSY_OR_FAULT' if self.grippers.core.busy else '')
+                      'GRIPPERS_BUSY_OR_FAULT' if blocked else '')
             if reason:
                 reply.ok, reply.code, reply.profile_hash = False, reason, self.profile.digest
                 return reply
