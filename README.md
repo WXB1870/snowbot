@@ -43,28 +43,13 @@ snowbot/
 
 ## 部署与使用入口
 
-正式下载、底层编译、Bindu与Snowbot上层构建、现场配置和日常启动统一见[部署与运行](运行与验证.md#新克隆的配对源码与构建)。已有安装直接看[日常启动](运行与验证.md#日常启动)，更新按[变更类型](运行与验证.md#日常修改与更新)选择动作。现有`x86_real`工具仍在Bindu仓库，由本指南统一说明用法。
+实机文档只以2026-10-28最后部署到118的兼容版`df2645a`为准，沿用原单仓布局。源码保留在Bindu的`xavier/deploy-grasp-waist-118-20261028`，获取、编译和日常运行见[运行指南](运行与验证.md#获取与编译已部署版本)。
 
-## 源码与离线检查
+当前两个仓库继续按框架／应用分工维护；`dependencies.repos`用于拆仓开发源码参考，不作为还原该次118部署的入口。
 
-- Snowbot源码：[WXB1870/snowbot](https://github.com/WXB1870/snowbot)。
-- Bindu框架与原生执行实现：[WXB1870/bindu](https://github.com/WXB1870/bindu)。
+## 未实现项
 
-两个仓库可克隆在同一父目录。以下在Snowbot仓库根目录执行，显式指定Bindu源码路径；只生成本机源码副本，不连接设备、不构建或启动驱动。已有输出目录不会覆盖。
-
-```bash
-snowbot_release_id="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
-python3 -m tools.deployment.prepare_position_session \
-  --execution-source /绝对路径/bindu/src/control/bindu_execution/native \
-  --release-id "$snowbot_release_id"
-python3 -m tests.integration.validate_position_invariants \
-  --baseline vendor/snowbot/original \
-  --source "releases/$snowbot_release_id/src"
-python3 -m tests.integration.validate_position_native --source "releases/$snowbot_release_id/src"
-python3 -m tests.integration.validate_position_model --source "releases/$snowbot_release_id/src"
-```
-
-原始基线按现有完整文件清单纳入Git；准备器逐文件校验SHA后应用补丁，并记录所选Bindu原生文件指纹。配对Bindu提交由[`dependencies.repos`](dependencies.repos)固定，获取与构建步骤见[新克隆的配对源码与构建](运行与验证.md#新克隆的配对源码与构建)。完整位置会话已移除原始servo未使用的`kinematic_pose_msgs`依赖；原始输入及仅观察模式仍保留它。ROS、Linux、Pinocchio与其他系统依赖须在目标环境准备；完整构建、现场部署和运动验证分别完成。部分厂商包许可字段未完整声明，第三方源码沿用原许可证。
+姿态优化保存在两仓的`xavier/posture-optimization`开发分支。它未部署、未完成实体效果验收，不作为main或实机运行指南中的已实现能力。
 
 ## 现场条件与待确认项
 
