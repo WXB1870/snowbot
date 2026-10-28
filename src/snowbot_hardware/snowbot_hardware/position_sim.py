@@ -29,7 +29,7 @@ def position_devices(node, profile):
     io_type = SnowbotIO
     options = {}
     if node.physics_transport is not None:
-        from .simulation_devices import PhysicsPositionIO
+        from bindu_runtime.simulation_devices import PhysicsPositionIO
         io_type, options = PhysicsPositionIO, dict(physics=node.physics_transport)
     io = io_type(profile, lambda groups, q: transport.write_joints(q), node.now,
                  command_enabled=node.commands_enabled, simulated=True, **options)

@@ -50,24 +50,17 @@
    position_cycle_reason_=position_v2_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
 --- a/servo_control/src/servo_control/ethercat_driver.cpp
 +++ b/servo_control/src/servo_control/ethercat_driver.cpp
-@@ -791,7 +791,8 @@
-     if(session_packet.selected && !session_watchdog_.disabled){
-         const auto& cmd=session_watchdog_.output;
+@@ -793,3 +793,4 @@
          for(unsigned i=0;i<position_session::joint_count;++i){const unsigned m=position_session::position_slot(i);
 -            if(enable_step[m]<EN_STEP*6)continue;
 +            // Never expose legacy targets/gains between enable and session control.
 +            // Startup's session target is the captured measured pose, with v=0.
              if(is_csp_motor_[m]){
-                 if(!csp_rx_[m])continue;
-                 csp_rx_[m]->position=position_session::csp_counts(cmd.q[i]);
-@@ -801,6 +802,6 @@
-                 m_rx_[m]->target_position=cmd.q[i];m_rx_[m]->target_speed=cmd.v[i];
-                 m_rx_[m]->KP=cmd.kp[i];m_rx_[m]->KD=cmd.kd[i];m_rx_[m]->target_torque=cmd.torque[i];
+@@ -803,3 +804,3 @@
              }
 -            position_written|=1u<<m;
 +            if(enable_step[m]>=EN_STEP*6)position_written|=1u<<m;
          }
-     }
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
 @@ -1785,6 +1785,15 @@
