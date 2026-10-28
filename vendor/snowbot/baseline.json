@@ -20,5 +20,14 @@
     "arm_homing_timeout_accept_rad": 0.01,
     "posture_optimization": false,
     "site_files_committed": false
+  },
+  "default_policy": {
+    "following_guard_rad": 0.5,
+    "arm_homing_trigger_rad": 0.008726646259971648,
+    "arm_homing_exit_rad": 0.008726646259971648,
+    "arm_homing_timeout_accept_rad": 0.01,
+    "source": "user_requested_wider_thresholds_2026-10-29",
+    "hardware_validated": false,
+    "scope": "position_target_stream"
   }
 }

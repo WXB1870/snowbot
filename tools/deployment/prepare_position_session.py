@@ -174,6 +174,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         manifest=dict(preparation=dict(tool_sha256=digest(Path(__file__)),snowbot=source_identity(ASSETS),
             recommended_bindu_source=pairing,source_pairing_sha256=digest(pairing_path),
             deployment_reference=json.loads((pairing_path.parent/'vendor/snowbot/baseline.json').read_text()).get('deployment_reference'),
+            default_policy=json.loads((pairing_path.parent/'vendor/snowbot/baseline.json').read_text()).get('default_policy'),
             execution=None if native is None else source_identity(native),artifact_role='generated_candidate',
             deployment_verified=False,physical_acceptance=False),arm_reference_margin_rad=arm_reference_margin,schema=1,baseline='restored-original-20261021',latest_colleague_source_verified=False,
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),

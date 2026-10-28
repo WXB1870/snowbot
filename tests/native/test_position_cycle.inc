@@ -170,21 +170,21 @@ void check_cycle_fault_diagnostics(){
   assert(!snapshot.cycle_fault.detected_ns&&!h.node.position_output_.cycle_fault.detected_ns);
 #endif
  }
- // The target-stream tracking guard allows up to 0.25 rad on either side;
+ // The target-stream tracking guard allows up to 0.5 rad on either side;
  // larger error still latches the actual axis and disables the owned group.
- for(unsigned axis:{0u,7u,14u,15u})for(double error:{-.251,-.25,-.249,.249,.25,.250166999,.251}){
+ for(unsigned axis:{0u,7u,14u,15u})for(double error:{-.501,-.5,-.499,.250166999,.499,.5,.501}){
   CycleHarness h;
-  // Binary-exact starting pose keeps the exact 0.25 boundary independent of
+  // Binary-exact starting pose keeps the exact 0.5 boundary independent of
   // float PDO rounding; the injected measurement is not copied from a target.
   h.measured[axis]=.125;snapshot.position[position_slot(axis)]=.125f;
   hold(h);h.measured[axis]=float(.125+error);snapshot.position[position_slot(axis)]=float(h.measured[axis]);h.tick();
-  const bool exceeded=std::abs(error)>.25;
+  const bool exceeded=std::abs(error)>.5;
   assert(h.watchdog.disabled==exceeded);
   if(!exceeded){assert(h.watchdog.reason==PAUSED&&snapshot.hold_valid);continue;}
   assert(h.watchdog.reason==CYCLE_OR_TRACKING_ERROR&&!snapshot.hold_valid);
 #ifdef POSITION_CYCLE_DIAGNOSTICS
   assert(snapshot.cycle_fault.origin==1&&snapshot.cycle_fault.checks==16&&snapshot.cycle_fault.axis==int16_t(axis));
-  assert(std::abs(snapshot.cycle_fault.reference-snapshot.cycle_fault.measured)>.25);
+  assert(std::abs(snapshot.cycle_fault.reference-snapshot.cycle_fault.measured)>.5);
 #endif
  }
  // No active trajectory is a sampling error, not an interval/tracking error.
