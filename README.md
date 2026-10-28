@@ -27,20 +27,20 @@ Snowbot是基于[Bindu通用机器人框架](https://github.com/WXB1870/bindu)�
 | 厂商底层 | 提供准备器使用的通用原生执行代码 | 原始vendor基线、专属补丁、公共头及生成工具；构建servo、中层、topic上层与消息 |
 | 部署与使用 | 框架开发构建，以及供应用复用的`x86_real`上层构建工具 | 锁定Bindu、组织完整构建、现场配置、日常启动与设备问题记录 |
 
-`snowbot_hardware`负责厂商协议、会话和反馈适配；真正的servo程序来自vendor源码与补丁。Bindu中的旧Snowbot导入和launch仅保留兼容转发，正式应用实现维护在本仓四个包中。生成树、现场配置、证书私钥及构建产物保持本地。
+`snowbot_hardware`负责厂商协议、会话和反馈适配；真正的servo程序来自vendor源码与补丁。Snowbot运行工具安装在`snowbot_bringup.teleop`与`snowbot_bringup.simulation`，页面安装在该包的`share/web/`。Bindu中的旧Snowbot导入、工具命令和launch保留兼容转发，正式应用实现维护在本仓四个包中。生成树、现场配置、证书私钥及构建产物保持本地。
 
 ## 当前工程结构
 
 ```text
 snowbot/
 ├── src/
-│   ├── snowbot_bringup/       launch、部署配方与机器人配置
+│   ├── snowbot_bringup/       launch、配置、仿真／操作台运行工具及页面
 │   ├── snowbot_description/   URDF、CAD及来源声明
 │   ├── snowbot_hardware/      厂商消息、会话、反馈、夹爪及设备节点
 │   └── snowbot_teleop/        PICO准备、装卸、操作状态机及协调节点
 ├── vendor/snowbot/            original/原始输入、baseline.json与SHA身份
 ├── tools/deployment/         统一部署入口、底层准备器与补丁维护源
-├── tests/                    底层离线检查；跨框架回归沿用Bindu tests
+├── tests/                    PICO、操作台、设备／底层检查及两仓集成回归
 ├── releases/                 唯一命名的生成候选与index.json（本地）
 ├── deployments/118/          已有部署批次与回执；index.json标明记录状态（本地）
 ├── artifacts/                dependencies/锁定依赖、robot/部署产物及历史归档（本地）
