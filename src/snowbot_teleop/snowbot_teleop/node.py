@@ -842,7 +842,7 @@ class PicoNode(RuntimeNode):
         if mode=='bimanual_tool' and not self.position_contract and not self.unheld_test and not getattr(self,'independent_grippers',False) and getattr(self,'automatic_close_grippers',False):
             await self.position_ops.close_grippers(intent,allow_command=intent.operation in ('select_mode','confirm_tool'))
             self.current(intent)
-        if mode=='bimanual_tool' and self.position_contract:
+        if mode=='bimanual_tool' and self.position_contract and self.operator_grasp:
             self.operator_grasp_positions={}
             self.control.virtual=False
         elif mode=='bimanual_tool' and self.unheld_test:
