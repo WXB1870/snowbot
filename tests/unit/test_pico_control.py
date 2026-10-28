@@ -89,7 +89,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node=self.production('tick');node.last_tick_at=None;node.waiters=set();node.validator=S(poll=lambda:None)
             node.state=node.position_ops=node.base=None;node.last_context_at=node.last_status=1.
             node.now=lambda:1.;node.feedback=lambda:PicoFeedback(1.,True)
-            node.control=S(phase='engaging',context_at=1.,pending=S(operation='follow'),
+            node.control=S(phase='engaging',teleop_mode='bimanual_tool',context_at=1.,pending=S(operation='follow'),
                 lock=Mock(),update_feedback=Mock(),tick=Mock(),drain=lambda:[])
             node.tool_result=S(done=lambda:True,result=lambda:S(result=S(code=code,accepted_commands=0)))
             node.pending_intent=node.record_future=node.running=None
@@ -897,7 +897,7 @@ class OperationCancellationTests(unittest.IsolatedAsyncioTestCase):
         r=Rig(guided=True,direct=True);r.triggers=[1.,0.];r.step()
         r.triggers=[0.,0.];r.step();r.stopped=False;r.buttons[1]=1;r.step()
         intent=r.core.pending
-        node=S(control=r.core,cancel_tool=AsyncMock(),current=Mock(),
+        node=S(control=r.core,position_contract=True,cancel_tool=AsyncMock(),current=Mock(),
             position_ops=S(move_grippers=AsyncMock()),now=lambda:r.now,
             feedback=Mock(return_value=PicoFeedback(r.now,True,('closed','closed'))),
             event=Mock(),simulation=True)

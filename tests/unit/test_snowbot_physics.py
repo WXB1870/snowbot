@@ -175,22 +175,22 @@ class PositionPhysicsTests(unittest.TestCase):
         self.assertFalse(self.core.hold_acknowledgments)
 
     def test_measured_boundary_bias_can_ack_without_clipping_actual_or_drive_target(self):
-        self.q['arm_r_joint_3']=-.5799692869
+        self.q['arm_r_joint_3']=self.profile.limits['arm_r_joint_3'][0]+.0000307131
         self.core.accept(self.command(operation='hold',group='right_arm'),10.01,self.q)
-        self.core.stepped();self.q['arm_r_joint_3']=-.5800696015
+        self.core.stepped();self.q['arm_r_joint_3']=self.profile.limits['arm_r_joint_3'][0]-.0000696015
         for at in (10.02,10.13):self.core.observe_holds(self.q,dict.fromkeys(self.q,0.),at)
         ack=self.core.hold_acknowledgments['right_arm']
         self.assertEqual(ack['positions']['arm_r_joint_3'],self.q['arm_r_joint_3'])
-        self.assertEqual(self.core.hold_positions['arm_r_joint_3'],-.5799692869)
+        self.assertEqual(self.core.hold_positions['arm_r_joint_3'],self.profile.limits['arm_r_joint_3'][0]+.0000307131)
 
     def test_measured_overrun_beyond_feedback_tolerance_cannot_ack(self):
         self.core.accept(self.command(operation='hold',group='right_arm'),10.01,self.q)
-        self.core.stepped();self.q['arm_r_joint_3']=-.582001
+        self.core.stepped();self.q['arm_r_joint_3']=self.profile.limits['arm_r_joint_3'][0]-self.profile.feedback_tolerances['joint_position']-.000001
         for at in (10.02,10.13):self.core.observe_holds(self.q,dict.fromkeys(self.q,0.),at)
         self.assertFalse(self.core.hold_acknowledgments)
 
     def test_tiny_out_of_limit_motion_target_is_still_rejected(self):
-        values=[0.]*7;values[2]=-.5800001
+        values=[0.]*7;values[2]=self.profile.limits['arm_r_joint_3'][0]-.0000001
         with self.assertRaisesRegex(ValueError,'SIM_JOINT_LIMIT'):
             self.core.accept(self.command(group='right_arm',positions=values),10.01,self.q)
 
@@ -347,7 +347,7 @@ class PhysicsPositionStopTests(unittest.TestCase):
         self.assertEqual(self.io.confirmed_stop_targets()['arm_r_joint_1'],.0077)
 
     def test_measured_boundary_bias_releases_stop_with_actual_ack(self):
-        self.q['arm_r_joint_3']=-.5800696015;self.now+=.01;self.observe()
+        self.q['arm_r_joint_3']=self.profile.limits['arm_r_joint_3'][0]-.0000696015;self.now+=.01;self.observe()
         self.engine.halt(self.now);self.now+=.02;self.observe();self.acknowledge()
         self.assertEqual(self.io.confirmed_stop_targets()['arm_r_joint_3'],self.q['arm_r_joint_3'])
         self.engine.tick(self.now)
@@ -355,7 +355,7 @@ class PhysicsPositionStopTests(unittest.TestCase):
 
     def test_ack_beyond_measured_boundary_envelope_cannot_release_stop(self):
         self.engine.halt(self.now);self.now+=.02
-        self.q['arm_r_joint_3']=-.582001;self.observe();self.acknowledge()
+        self.q['arm_r_joint_3']=self.profile.limits['arm_r_joint_3'][0]-self.profile.feedback_tolerances['joint_position']-.000001;self.observe();self.acknowledge()
         self.assertIsNone(self.io.confirmed_stop_targets())
         self.engine.tick(self.now)
         self.assertIsNotNone(self.engine.stopping)

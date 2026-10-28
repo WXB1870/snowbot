@@ -390,8 +390,9 @@ class SimulationEntryTests(unittest.TestCase):
         entry.os.environ.pop('BINDU_VR_CONFIG', None)
         entry.os.environ.pop('BINDU_VR_ENV', None)
         # Only the package index is replaced; configuration/model validation is real.
+        shares={name:str(package_share(name)) for name in ('snowbot_bringup','snowbot_description')}
         packages=S(get_package_share_directory=lambda name: str(ROOT/'src/integration/bindu_runtime')
-                   if name=='bindu_runtime' else str(package_share(name)))
+                   if name=='bindu_runtime' else shares[name])
         index=patch.dict(sys.modules,{'ament_index_python':S(packages=packages),
                                      'ament_index_python.packages':packages})
         index.start();self.addCleanup(index.stop)
