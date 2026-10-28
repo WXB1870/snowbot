@@ -1001,7 +1001,8 @@ class PicoNode(RuntimeNode):
             else:await self.cancel_tool()
             self.current(intent)
             read_only=intent.operation in ('prepare','confirm_tool','follow','select_mode')
-            if (getattr(self,'automatic_close_grippers',False) and not getattr(self,'independent_grippers',False) and not self.unheld_test and
+            if (not self.position_contract and getattr(self,'automatic_close_grippers',False) and
+                    not getattr(self,'independent_grippers',False) and not self.unheld_test and
                     (intent.operation=='confirm_tool' or intent.operation=='select_mode' and intent.value=='bimanual_tool')):
                 read_only=False
             if intent.operation=='prepare':
