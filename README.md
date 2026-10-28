@@ -6,10 +6,11 @@ Snowbot 是基于 Bindu 通用机器人框架的扫雪应用场景。本目录�
 
 - [代理规范](AGENTS.md)：本项目协作与执行边界。
 - [当前进度](当前进度.md)：原版恢复、改进版保全及未完成项。
+- [TODO](TODO.md)：待实施问题、建议方向与完成条件。
 - [位置遥操作修改目标](位置遥操作修改目标.md)：能力复用、阻抗隔离边界、修改目标与完成条件。
 - [运行与验证](运行与验证.md)：本机准备工具、现场流程和验收边界。
 - [底层驱动问题记录](底层驱动问题记录.md)：接口差异、问题证据和修复历史。
-- [当前过程记录](过程记录/2026-10-26.md)：本机工程整理及迁入的历史版本条目。
+- [当前过程记录](过程记录/2026-10-27.md)：夹爪位置、运行入口及文档收敛；整理前历史仍保留在对应日期记录。
 
 底层原始源码基线位于 [baseline](vendor/snowbot/original/)，包含上层、中层、servo、消息、头腰、力传感器和模型包；配套位置会话源码由[prepare_position_session.py](tools/deployment/prepare_position_session.py)生成，补丁与共用头在`tools/deployment/snowbot_vendor/position_session/`，离线测试在`tests/`。早期`development-src`、完整恢复归档与现场证据仅保留在本地，不随Git分发；旧`prepare_snowbot_vendor.py`用于复现历史补丁。
 

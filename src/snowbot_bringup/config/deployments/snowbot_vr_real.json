@@ -28,7 +28,8 @@
     "pico_config": "package://snowbot_bringup/config/robots/snowbot/pico_snowbot_position_real.json",
     "base_config": "package://snowbot_bringup/config/robots/snowbot/snowbot_base.json",
     "trajectory_max_velocity": 1.0,
-    "trajectory_max_acceleration": 4.5
+    "trajectory_max_acceleration": 4.5,
+    "trajectory_max_jerk": 259.2
   },
   "robot_package": "snowbot_bringup"
 }
