@@ -245,7 +245,8 @@ def run_session(args, manifest):
                 client_timing_probe=dict(path=str(probe),sha256=hashlib.sha256(probe.read_bytes()).hexdigest(),
                     clock_semantics='browser monotonic send time; never used as control freshness or one-way latency'),
                 diagnostic_format='JSONL: received_at, received_monotonic_ns, data; ROS fields retained',
-                diagnostic_chunk_bytes=128*1024*1024, process_log_repeat_interval_s=5.,
+                runtime_parameters=args.runtime_parameters,
+                diagnostic_chunk_bytes=args.runtime_parameters['diagnostics']['chunk_bytes'], process_log_repeat_interval_s=5.,
                 process_log_health='process-log-health.json'))
             # Keep CLI overrides next to file provenance; the selected site may
             # differ from the values actually passed to the control processes.

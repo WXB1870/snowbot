@@ -509,7 +509,10 @@ class SimulationEntryTests(unittest.TestCase):
             installed=dict(ready=True,native_process_exit_success=True,source_sha256='installed',
                            source_revisions={'bindu':{'commit':'built_revision','dirty':False}})
             build.write_text(json.dumps(installed))
-            recipe=package_share('snowbot_bringup')/'config/deployments/snowbot_vr_real.json'
+            template=package_share('snowbot_bringup')/'config/deployments/snowbot_vr_real.json'
+            parameters=root/'parameters.json';parameters.write_text(json.dumps({'diagnostics':{'chunk_bytes':1024}}))
+            selected=json.loads(template.read_text());selected['arguments']['parameters_config']=str(parameters)
+            recipe=root/'site.json';recipe.write_text(json.dumps(selected))
             args=entry.parse_args(['--config',str(recipe),'--enable-commands','--namespace','cli_namespace',
                                   '--output',str(root/'run'),'--duration','.001','--no-diagnostics'])
             with patch.dict(entry.os.environ,BINDU_VR_ENV=str(root/'env.sh')), \
@@ -524,6 +527,9 @@ class SimulationEntryTests(unittest.TestCase):
             self.assertEqual(record['configuration']['arguments']['command_enabled'],'true')
             self.assertEqual(record['configs']['deployment']['content']['arguments']['command_enabled'],False)
             self.assertIn('display_urdf',record['configuration']['sources'])
+            self.assertEqual(record['diagnostic_chunk_bytes'],1024)
+            self.assertEqual(record['runtime_parameters']['diagnostics']['chunk_bytes'],1024)
+            self.assertEqual(record['runtime_parameters']['pico']['prepare_button_hold_s'],1.)
             self.assertEqual(record['phase'],'finished')
 
     def test_check_leaves_no_run_directory_and_existing_output_is_preserved(self):

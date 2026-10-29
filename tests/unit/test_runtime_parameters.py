@@ -28,6 +28,12 @@ class RuntimeParameterTests(unittest.TestCase):
         cfg['pico']['prepare_command_ttl_s']=.3
         self.assertEqual(load_parameters()['pico']['prepare_command_ttl_s'],.25)
 
+    def test_numeric_overrides_have_ros_compatible_types(self):
+        cfg=self.load({'pico':{'pair_max_skew_s':1,'rpc_timeout_s':2},'display':{'poll_ms':200}})
+        self.assertIs(type(cfg['pico']['pair_max_skew_s']),float)
+        self.assertIs(type(cfg['pico']['rpc_timeout_s']),float)
+        self.assertIs(type(cfg['display']['poll_ms']),int)
+
     def test_unknown_fields_types_and_nonfinite_values_are_rejected(self):
         for bad in ({'other':{}},{'schema_version':True},{'pico':{'other':1}},
                     *({'pico':{'rpc_timeout_s':v}} for v in (0,-1,True,'2',float('nan'),float('inf'),10**400)),

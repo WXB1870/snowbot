@@ -81,6 +81,8 @@ def load_parameters(path=None):
             if (not finite or
                     key in _INTEGER_FIELDS and type(value) is not int):
                 raise ValueError('SNOWBOT_PARAMETER:'+group+'.'+key)
+            if key not in _INTEGER_FIELDS:
+                values[key] = float(value)
     p, g, d = (result[name] for name in ('pico', 'gripper', 'diagnostics'))
     for name in ('grip', 'trigger'):
         if not 0 < p[name+'_release_threshold'] < p[name+'_press_threshold'] < 1:
