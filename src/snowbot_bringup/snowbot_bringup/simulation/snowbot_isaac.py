@@ -94,7 +94,12 @@ def main():
         joint_damping_nm_s_rad=live['gripper_damping_nm_s_rad'])
     args.output.mkdir(parents=True,exist_ok=False)
     from isaacsim import SimulationApp
+    if not live['headless']:
+        import faulthandler
+        faulthandler.dump_traceback_later(45.)
     app=SimulationApp(dict(headless=live['headless'],fast_shutdown=True,width=640,height=480))
+    if not live['headless']:
+        faulthandler.cancel_dump_traceback_later()
     stopping=[False]
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stopping.__setitem__(0,True))
     node=None;publisher=None

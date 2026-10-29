@@ -34,7 +34,7 @@ def websocket_input(port, source, stop, errors):
     """Real Vuer wire input for this isolated fixture, including downlink drain."""
     from websockets.sync.client import connect
     from msgpack import packb
-    end=time.monotonic()+35.;peer=None;last_raw=None
+    end=time.monotonic()+source.get('websocket_startup_timeout',35.);peer=None;last_raw=None
     try:
         while peer is None and not stop.is_set() and time.monotonic()<end:
             try:peer=connect(f'ws://127.0.0.1:{port}/',open_timeout=1.)
@@ -75,9 +75,6 @@ def websocket_input(port, source, stop, errors):
                         d=source['raw_pair'][0]
                         if d.get('head_pose'):
                             head_seq=source['seq']
-                            if source.get('raw_replay'):
-                                offset=source.setdefault('head_seq_offset',head_seq+1-int(d['head_seq']))
-                                head_seq=int(d['head_seq'])+offset
                             age=float(d.get('head_age_s',0.))*1000.
                             head=dict(version=1,samples=[dict(seq=head_seq,age_ms=age,
                                 frame_time_ms=timing['perf_ms']-age,frame_id='recorded',
@@ -104,6 +101,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     node.create_subscription(MotionCommand,ns+'/execution/accepted',accepted.append,100)
     node.create_subscription(GripperState,ns+'/gripper/state',lambda m:grippers.update({m.side:m}),10)
     source=dict(buttons=[0,0],trigger=[0.,0.],grip=0.,grips=None,delta=0.,deltas=[0.,0.],stream=False,seq=0,head_tracking_id=token)
+    if gui:source['websocket_startup_timeout']=240.
     counters=[ButtonCounters(),ButtonCounters()]
     vr=node.create_publisher(VRInput,ns+'/teleop/vr/raw',10)
     fixture=json.loads((CFG/'pico_snowbot_position_sim.json').read_text())
@@ -211,6 +209,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         command=[sys.executable, '-m', 'tools.teleop.run_vr','--config',str(path),'--physics',
             '--domain-id',os.environ['ROS_DOMAIN_ID'],'--namespace',ns,'--port',str(web_port),
             '--vr-port',str(port),'--output',str(out/'unified-session')]
+        if gui:command+=['--startup-timeout','180']
     process=subprocess.Popen(command,
         stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=BINDU_ROOT)
     peer_stop=threading.Event();peer_errors=[];peer=None
@@ -264,12 +263,12 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
                     (trace_dir/'teleop-state.jsonl').stat().st_size>0,30.)
     try:
         wait(lambda:states and views and time.time()-seconds(states[-1].feedback_stamp)<.2 and
-             len(grippers)==2 and all(g.feedback_valid for g in grippers.values()),60. if physics else 40.)
+             len(grippers)==2 and all(g.feedback_valid for g in grippers.values()),240. if gui else 60. if physics else 40.)
         start_observer()
         pump(2.)  # Discover every reader before connecting the test hands, on either backend.
         source['stream']=True
         wait(lambda:states and states[-1].feedback_stamp.sec>0 and views and
-             views[-1]['phase']=='standby' and len(grippers)==2,60. if physics else 40.)
+             views[-1]['phase']=='standby' and len(grippers)==2,240. if gui else 60. if physics else 40.)
         assert not accepted and not packets,'startup actuation'
         initial=dict(zip(states[-1].joints.name,states[-1].joints.position))
         assert all(n in initial and abs(initial[n]-v)<(.003 if physics else 1e-9)
@@ -437,7 +436,22 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
                 d=pair[0]
                 return clocks[(d['source_id'],d['seq'])] if replay['clock']=='client' else seconds(d['stamp'])
             origin=packet_time(segment['pairs'][0]);start=time.monotonic();source['raw_replay']=True
+            recording_gaps=[]
             for index,pair in enumerate(segment['pairs'][1:],1):
+                gap=packet_time(pair)-packet_time(segment['pairs'][index-1])
+                if replay.get('review_gaps') and gap>.25:
+                    source.update(raw_replay=False,raw_held=False)
+                    phase('tool_standby')
+                    wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+                    delay=packet_time(pair)-origin-(time.monotonic()-start)
+                    if delay>0:pump(delay)
+                    source.update(raw_pair=pair,raw_index=index,raw_held=False)
+                    pump(.2);source['raw_held']=True;phase('following')
+                    recording_gaps.append(dict(before_input_seq=pair[0]['seq'],gap_s=gap,
+                        action='confirmed stop and explicit fresh clutch; no interpolated hand frames'))
+                    start=time.monotonic()-(packet_time(pair)-origin)
+                    source['raw_replay']=True
+                    continue
                 delay=packet_time(pair)-origin-(time.monotonic()-start)
                 if delay>0:pump(delay)
                 assert views[-1]['phase']=='following',views[-1]
@@ -473,7 +487,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             assert not health['active'] and not health['dropped'] and not health['error']
             return dict(mode=mode,teleop_mode='independent_arms' if ordinary else 'bimanual_tool',checks=checks,accepted=len(accepted),vendor_packets=0,
                         recorded_capture_input_seq=segment['capture']['input_seq'],
-                        capture_input_missing=segment.get('capture_input_missing',False),gui=gui,
+                        capture_input_missing=segment.get('capture_input_missing',False),gui=gui,recording_gaps=recording_gaps,
                         source_log=str(replay['log']),input_seq=first['seq'],clock=replay['clock'],
                         source_packets=len(segment['pairs']),dataset_sha256=replay['sha256'],coupling=coupled)
         leases=node.create_client(Lease,ns+'/execution/lease')
@@ -724,6 +738,7 @@ def main():
     p.add_argument('--replay-seq',type=int)
     p.add_argument('--gui',action='store_true',help='Render the Isaac application in the existing desktop session')
     p.add_argument('--reanchor-recording',action='store_true',help='Explicitly reanchor sampled input at its first recorded complete pair')
+    p.add_argument('--review-recording',action='store_true',help='For sampled-data GUI review: stop and explicitly re-clutch across recorded gaps')
     p.add_argument('--collision-recovery',action='store_true',help='Recorded shallow self-collision: reject follow, release A, then hold A to recover')
     p.add_argument('--prepare-return',type=Path,nargs='?',const=ROOT/'tests/config/teleoperation/snowbot_prepare_offset.json',
                    help='Recorded measured joint map: test unknown/held A return, cancel and repeat in either mode')
@@ -762,7 +777,7 @@ def main():
         if args.teleop_mode!=expected:p.error('replay mode must match the recorded capture')
         if expected=='tool' and segment['capture']['grasp_mode']!='rigid':p.error('tool replay requires a rigid capture')
         import hashlib
-        replay=dict(log=args.replay_log,segment=segment,clocks=clocks,clock=args.clock,
+        replay=dict(log=args.replay_log,segment=segment,clocks=clocks,clock=args.clock,review_gaps=args.review_recording,
                     sha256=hashlib.sha256(json.dumps(segment['pairs'],sort_keys=True).encode()).hexdigest())
     if os.environ.get('ROS_LOCALHOST_ONLY')!='1' or not os.environ.get('ROS_DOMAIN_ID'):
         raise RuntimeError('Isolated localhost ROS domain required')
