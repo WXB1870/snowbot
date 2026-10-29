@@ -7,6 +7,7 @@ bindu_state="${BINDU_ISAAC_STATE:-${BINDU_FRAMEWORK_SOURCE:-$HOME/.cache/snowbot
 bindu_contracts_prefix="$(python3 -c 'from ament_index_python.packages import get_package_prefix; print(get_package_prefix("bindu_contracts"))')"
 bindu_hardware_prefix="$(python3 -c 'from ament_index_python.packages import get_package_prefix; print(get_package_prefix("bindu_hardware"))')"
 bindu_kinematics_prefix="$(python3 -c 'from ament_index_python.packages import get_package_prefix; print(get_package_prefix("bindu_kinematics"))')"
+snowbot_hardware_prefix="$(python3 -c 'from ament_index_python.packages import get_package_prefix; print(get_package_prefix("snowbot_hardware"))')"
 test -x "$bindu_sdk/python.sh"
 mkdir -p "$bindu_state"/{kit,xdg_cache,xdg_config,xdg_data,cuda_cache,tmp}
 unset PYTHONPATH PYTHONHOME PYTHONEXE LD_LIBRARY_PATH LD_PRELOAD
@@ -29,6 +30,7 @@ source "${BINDU_ISAAC_ROS_PREFIX:?VR physics requires the current bindu_interfac
 COLCON_CURRENT_PREFIX="$bindu_contracts_prefix" source "$bindu_contracts_prefix/share/bindu_contracts/package.bash"
 COLCON_CURRENT_PREFIX="$bindu_hardware_prefix" source "$bindu_hardware_prefix/share/bindu_hardware/package.bash"
 COLCON_CURRENT_PREFIX="$bindu_kinematics_prefix" source "$bindu_kinematics_prefix/share/bindu_kinematics/package.bash"
+COLCON_CURRENT_PREFIX="$snowbot_hardware_prefix" source "$snowbot_hardware_prefix/share/snowbot_hardware/package.bash"
 COLCON_CURRENT_PREFIX="${BINDU_ISAAC_APP_PREFIX:?VR physics requires the current Snowbot application install}" \
   source "$BINDU_ISAAC_APP_PREFIX/share/snowbot_bringup/package.bash"
 set -u
