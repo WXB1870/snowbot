@@ -70,6 +70,20 @@ def websocket_input(port, source, stop, errors):
                         frame_id='fixture-local',tracking_id=source['head_tracking_id'],mode='immersive-vr',
                         pose=[1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.],
                         controllers={side:value[side] for side in ('left','right')})])
+                    if source.get('raw_pair') is not None:
+                        import numpy as np
+                        d=source['raw_pair'][0]
+                        if d.get('head_pose'):
+                            head_seq=source['seq']
+                            if source.get('raw_replay'):
+                                offset=source.setdefault('head_seq_offset',head_seq+1-int(d['head_seq']))
+                                head_seq=int(d['head_seq'])+offset
+                            age=float(d.get('head_age_s',0.))*1000.
+                            head=dict(version=1,samples=[dict(seq=head_seq,age_ms=age,
+                                frame_time_ms=timing['perf_ms']-age,frame_id='recorded',
+                                tracking_id=d['head_source_id'],mode='immersive-vr',
+                                pose=np.array(d['head_pose']).reshape(4,4).ravel(order='F').tolist(),
+                                controllers={side:value[side] for side in ('left','right')})])
                     peer.send(packb(dict(etype='CONTROLLER_MOVE',key='motionControllers',value=value,
                         bindu_timing=timing,bindu_head=head),use_bin_type=True))
                     last_raw=source.get('raw_index')
@@ -81,7 +95,7 @@ def websocket_input(port, source, stop, errors):
         if not stop.is_set():errors.append(type(exc).__name__+':'+str(exc))
 
 
-def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=None, collision_recovery=False, prepare_return=None, stop_boundary=False):
+def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=None, collision_recovery=False, prepare_return=None, stop_boundary=False, gui=False):
     token=uuid.uuid4().hex[:8];ns='/position_'+token;vendor='/fixture_'+token
     node=rclpy.create_node('position_fixture_'+token)
     states=[];views=[];accepted=[];grippers={};packets=[]
@@ -182,6 +196,11 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     else:
         pp=out/'fixture-pico-simulation.json';pp.write_text(json.dumps(fixture))
         recipe['arguments']['pico_config']=str(pp)
+    if gui:
+        physics_cfg=json.loads((CFG/'snowbot_shovel_physics.json').read_text())
+        physics_cfg['live']['headless']=False
+        physics_path=out/'physics-gui.json';physics_path.write_text(json.dumps(physics_cfg))
+        recipe['arguments']['physics_config']=str(physics_path)
     path=out/(mode+'.json');path.write_text(json.dumps(recipe))
     log=(out/(mode+'.log')).open('w')
     command=['ros2','launch','bindu_runtime','teleop_only.launch.py','config:='+str(path)]
@@ -440,15 +459,20 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             for state in motion:
                 q=dict(zip(state.joints.name,state.joints.position));left,right=fk(q)
                 samples.append(dict(t=seconds(state.feedback_stamp),flanges={tool_cfg['left_frame']:left,tool_cfg['right_frame']:right}))
-            coupled=coupling_metrics(samples,tool_cfg,[dict(t=samples[0]['t'],mode='rigid')])
-            assert coupled['passed'],coupled
+            coupled=None
+            if not ordinary:
+                coupled=coupling_metrics(samples,tool_cfg,[dict(t=samples[0]['t'],mode='rigid')])
+                assert coupled['passed'],coupled
             checks.extend(['recorded raw hand packets follow through Vuer, ROS, native QP and measured PhysX feedback',
                            'recorded-motion release confirms explicit hold with no stop fault',
+                           'independent arms preserve measured feedback and stop checks' if ordinary else
                            'measured coupling stays inside configured position and rotation limits'])
             terminate(observer,node);observer=None
             health=json.loads((trace_dir/'diagnostics-health.json').read_text())
             assert not health['active'] and not health['dropped'] and not health['error']
-            return dict(mode=mode,teleop_mode='bimanual_tool',checks=checks,accepted=len(accepted),vendor_packets=0,
+            return dict(mode=mode,teleop_mode='independent_arms' if ordinary else 'bimanual_tool',checks=checks,accepted=len(accepted),vendor_packets=0,
+                        recorded_capture_input_seq=segment['capture']['input_seq'],
+                        capture_input_missing=segment.get('capture_input_missing',False),gui=gui,
                         source_log=str(replay['log']),input_seq=first['seq'],clock=replay['clock'],
                         source_packets=len(segment['pairs']),dataset_sha256=replay['sha256'],coupling=coupled)
         leases=node.create_client(Lease,ns+'/execution/lease')
@@ -697,6 +721,8 @@ def main():
     p.add_argument('--websocket-input',action='store_true')
     p.add_argument('--replay-log',type=Path,help='Replay one captured raw VR segment through the isolated physics stack')
     p.add_argument('--replay-seq',type=int)
+    p.add_argument('--gui',action='store_true',help='Render the Isaac application in the existing desktop session')
+    p.add_argument('--reanchor-recording',action='store_true',help='Explicitly reanchor sampled input at its first recorded complete pair')
     p.add_argument('--collision-recovery',action='store_true',help='Recorded shallow self-collision: reject follow, release A, then hold A to recover')
     p.add_argument('--prepare-return',type=Path,nargs='?',const=ROOT/'tests/config/teleoperation/snowbot_prepare_offset.json',
                    help='Recorded measured joint map: test unknown/held A return, cancel and repeat in either mode')
@@ -708,6 +734,7 @@ def main():
     prepare_return=json.loads(args.prepare_return.read_text()) if args.prepare_return else None
     if prepare_return:prepare_return=prepare_return.get('feedback',prepare_return)
     if args.prepare_return and (args.collision_recovery or args.replay_log):p.error('--prepare-return cannot combine with recovery/replay')
+    if args.gui and not args.physics:p.error('--gui requires --physics')
     if args.physics and (args.mode!='simulation' or not args.websocket_input):p.error('--physics requires --mode simulation --websocket-input')
     if args.stop_boundary and (not args.physics or not args.prepare_return):p.error('--stop-boundary requires --physics and --prepare-return')
     if args.collision_recovery and (args.mode!='simulation' or args.teleop_mode!='tool' or not args.websocket_input or args.replay_log):
@@ -715,12 +742,24 @@ def main():
     if not 1<=args.runs<=10:p.error('--runs must be 1..10')
     replay=None
     if args.replay_log:
-        if not args.physics or args.teleop_mode!='tool' or args.replay_seq is None:
-            p.error('--replay-log requires --physics --teleop-mode tool --replay-seq')
-        from tests.replay.replay_vr import dataset
-        segments,clocks=dataset(args.replay_log,args.until if args.until is not None else time.time())
+        if not args.physics or args.teleop_mode=='both' or args.replay_seq is None:
+            p.error('--replay-log requires --physics --teleop-mode ordinary|tool --replay-seq')
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('bindu_recorded_replay',BINDU_ROOT/'tests/replay/replay_vr.py')
+        helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+        bindings={}
+        for state in helper.records(args.replay_log/'teleop-state.jsonl'):
+            raw=state.get('vr_source_id') or state.get('source_id');coordinator=state.get('coordinator_id')
+            if raw and coordinator:
+                key=raw+':'+coordinator
+                if key in bindings and bindings[key]!=raw:raise ValueError('REPLAY_SOURCE_BINDING_CHANGED')
+                bindings[key]=raw
+        segments,clocks=helper.dataset(args.replay_log,args.until if args.until is not None else time.time(),
+            source_bindings=bindings,reanchor_missing_capture=args.reanchor_recording)
         segment=next(s for s in segments if s['capture']['input_seq']==args.replay_seq)
-        if segment['capture']['grasp_mode']!='rigid':p.error('recorded physics replay requires a rigid capture')
+        expected='ordinary' if segment['capture']['grasp_mode'].startswith('independent:') else 'tool'
+        if args.teleop_mode!=expected:p.error('replay mode must match the recorded capture')
+        if expected=='tool' and segment['capture']['grasp_mode']!='rigid':p.error('tool replay requires a rigid capture')
         import hashlib
         replay=dict(log=args.replay_log,segment=segment,clocks=clocks,clock=args.clock,
                     sha256=hashlib.sha256(json.dumps(segment['pairs'],sort_keys=True).encode()).hexdigest())
@@ -735,7 +774,7 @@ def main():
                 for ordinary in ((True,False) if args.teleop_mode=='both' else (args.teleop_mode=='ordinary',)):
                     out=args.output/(('ordinary-' if ordinary else 'tool-')+m+('' if args.runs==1 else f'-{run:02}'));out.mkdir()
                     case=scenario(out,m,args.websocket_input,ordinary,physics=args.physics,replay=replay,
-                                  collision_recovery=args.collision_recovery,prepare_return=prepare_return,stop_boundary=args.stop_boundary);result.append(case)
+                                  collision_recovery=args.collision_recovery,prepare_return=prepare_return,stop_boundary=args.stop_boundary,gui=args.gui);result.append(case)
                     (out/'verification.json').write_text(json.dumps(case,indent=2))
                     print(out.name+': '+str(len(case['checks']))+' checks passed',flush=True)
         (args.output/'verification.json').write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
