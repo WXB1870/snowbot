@@ -240,7 +240,7 @@ class PositionOperations:
         if not closed():
             if not allow_command:
                 raise RuntimeError('PICO_GRIPPERS_CLOSE_BEFORE_TOOL_MODE')
-            if not n.control.frames or any(f.trigger >= .3 for f in n.control.frames):
+            if not n.control.frames or any(f.trigger >= parameters_for(n,'pico')['trigger_release_threshold'] for f in n.control.frames):
                 raise RuntimeError('PICO_AUTO_CLOSE_REQUIRES_RELEASED_TRIGGER')
             n.control.reason = 'PICO_GRIPPERS_CLOSING'
             n.event('PICO_AUTO_CLOSE_STARTED', json.dumps(dict(operation=intent.operation)))

@@ -329,4 +329,4 @@ int replay_targets(bool rigid){
  if(rigid)assert(accepted>0&&accepted+fallback==count);
  std::cout<<"REPLAY_OK goals="<<count<<" rigid="<<rigid<<" geometric="<<accepted<<" fallback="<<fallback<<" samples="<<samples<<" maximum_dynamic_ratio="<<ratio<<" periodic_allocations="<<allocated<<" periodic_deletions="<<deleted<<" original_pause=1\n";return 0;
 }
-int main(int argc,char**){if(argc>1)return replay_targets(argc==2);tool_reference_reserve();rigid_reference_recipe();target_trend_history();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+int main(int argc,char**){if(argc>1)return replay_targets(argc==2);tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
