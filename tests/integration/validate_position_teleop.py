@@ -434,7 +434,9 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             segment=replay['segment'];clocks=replay['clocks'];first=segment['pairs'][0][0]
             def packet_time(pair):
                 d=pair[0]
-                return clocks[(d['source_id'],d['seq'])] if replay['clock']=='client' else seconds(d['stamp'])
+                stamp_value=d['stamp']
+                return (clocks[(d['source_id'],d['seq'])] if replay['clock']=='client' else
+                    stamp_value['sec']+stamp_value['nanosec']*1e-9)
             origin=packet_time(segment['pairs'][0]);start=time.monotonic();source['raw_replay']=True
             recording_gaps=[]
             for index,pair in enumerate(segment['pairs'][1:],1):
