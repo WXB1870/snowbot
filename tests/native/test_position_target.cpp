@@ -80,7 +80,7 @@ void stale_and_invalid(){
 }
 void target_pause_window(){
  using namespace bindu::execution;
- static_assert(maximum_ttl==200000000&&maximum_target_ttl==300000000&&maximum_target_pause_ttl==2000000000LL);
+ static_assert(maximum_ttl==200000000&&maximum_target_ttl==400000000&&maximum_target_pause_ttl==2000000000LL);
  const int64_t now=1000000000;Meta take{44,1,now,now+200000000,1};assert(fresh(take,now));
  auto over=take;++over.expires;assert(!fresh(over,now,maximum_target_pause_ttl));
  auto target=take;target.expires=target.stamp+maximum_target_ttl;
@@ -91,7 +91,7 @@ void target_pause_window(){
  Gate target_gate;assert(!target_gate.accepts(target,now,now,maximum_target_pause_ttl));
  assert(target_gate.accepts(target,now,now,maximum_target_pause_ttl,maximum_target_ttl));target_gate.commit(target,now,now);
  const auto target_deadline=target_gate.deadline();
- for(unsigned i=0;i<300;++i){assert(target_gate.live(now+i*1000000));assert(target_gate.deadline()==target_deadline);}
+ for(unsigned i=0;i<400;++i){assert(target_gate.live(now+i*1000000));assert(target_gate.deadline()==target_deadline);}
  assert(!target_gate.live(target_deadline));assert(!target_gate.accepts(target,now+10000000,now+10000000,maximum_target_pause_ttl,maximum_target_ttl));
  assert(target_gate.deadline()==target_deadline);
  Meta pause{44,2,now+20000000,now+2020000000,2};assert(!fresh(pause,pause.stamp));assert(fresh(pause,pause.stamp,maximum_target_pause_ttl));

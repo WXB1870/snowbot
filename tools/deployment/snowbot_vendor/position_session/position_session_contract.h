@@ -7,7 +7,7 @@
 namespace position_session {
 constexpr int64_t maximum_ttl=200000000;
 // Pure position target streams tolerate bounded source gaps; legacy stays 200 ms.
-constexpr int64_t maximum_target_ttl=300000000;
+constexpr int64_t maximum_target_ttl=400000000;
 // A target-stream PAUSE is a separate stop command, never a motion renewal.
 constexpr int64_t maximum_target_pause_ttl=2000000000;
 // ROS delivery and progress budget; the raw PDO age limit remains 20 ms.
