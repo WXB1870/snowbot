@@ -460,15 +460,23 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
                     continue
                 delay=packet_time(pair)-origin-(time.monotonic()-start)
                 if delay>0:pump(delay)
-                allowed=('following','tool_standby','standby','engaging') if replay.get('review_gaps') else ('following',)
+                allowed=('following','tool_standby','standby','engaging','gripper_control') if replay.get('review_gaps') else ('following',)
                 assert views[-1]['phase'] in allowed,views[-1]
                 source.update(raw_pair=pair,raw_index=index)
             pump(.04)
-            allowed=('following','tool_standby','standby','engaging') if replay.get('review_gaps') else ('following',)
+            allowed=('following','tool_standby','standby','engaging','gripper_control') if replay.get('review_gaps') else ('following',)
             assert views[-1]['phase'] in allowed,views[-1]
             assert len(accepted)>initial_count+5
-            motion=list(states[motion_start:]);source.update(raw_held=False,raw_replay=False)
-            phase('tool_standby')
+            motion=list(states[motion_start:])
+            if replay.get('review_gaps') and views[-1]['phase']=='gripper_control':
+                # A truncated held Trigger is not a recorded close request.
+                # End input and verify the normal input-loss hold instead.
+                source['stream']=False;phase('locked')
+                wait(lambda:all(not g.lease_active and g.state not in ('MOVING','STOPPING') for g in grippers.values()))
+                checks.append('recorded gripper operation ends in confirmed hold without inventing a Trigger release')
+            else:
+                source.update(raw_held=False,raw_replay=False)
+                phase('tool_standby')
             wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
             assert not states[-1].stop_failures
             sys.path.insert(0,str(ROOT))
@@ -495,7 +503,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             assert not health['active'] and not health['dropped'] and not health['error']
             return dict(mode=mode,teleop_mode='independent_arms' if ordinary else 'bimanual_tool',checks=checks,accepted=len(accepted),vendor_packets=0,
                         recorded_capture_input_seq=segment['capture']['input_seq'],
-                        capture_input_missing=segment.get('capture_input_missing',False),gui=gui,recording_gaps=recording_gaps,
+                        capture_input_missing=segment.get('capture_input_missing',False),gui=gui,recording_gaps=recording_gaps,ending_phase=views[-1]['phase'],
                         source_log=str(replay['log']),input_seq=first['seq'],clock=replay['clock'],
                         source_packets=len(segment['pairs']),dataset_sha256=replay['sha256'],coupling=coupled)
         leases=node.create_client(Lease,ns+'/execution/lease')
