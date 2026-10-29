@@ -479,10 +479,12 @@ class PositionSessionDevices:
         if self.health.reference_mode != 2 or not engine.active or engine.stopping:
             return
         sent = self.sent.get(self.envelopes.sequence)
+        lead_ns = round(self.trajectory_limits.get('target_stream_brake_lead_s',
+            TARGET_STREAM_LIMIT_DEFAULTS['target_stream_brake_lead_s'])*1e9)
         if sent and sent[0]['operation'] != 2:
             # Keep the ordinary execution path to one tick. The extra dispatch
             # is needed only when the preceding packet is about to be fenced.
-            if round(self.node.now()*1e9) < sent[0]['expires_at_ns']-120_000_000:
+            if round(self.node.now()*1e9) < sent[0]['expires_at_ns']-lead_ns:
                 return
             # A service can accept a replacement between executor ticks. Dispatch
             # it through the normal feedback/lease/limit checks before fencing
@@ -495,10 +497,10 @@ class PositionSessionDevices:
                 sent = self.sent.get(self.envelopes.sequence)
                 if not sent or sent[0]['operation'] == 2:
                     return
-            # 120 ms covers two executor ticks, the observed 56 ms transport/dispatch,
-            # 10 ms preparation and one tick of scheduling reserve.
+            # The configured lead reserves transport/dispatch, preparation and
+            # scheduling time before the original target deadline.
             # A stalled controller still falls under the native watchdog.
-            if round(self.node.now()*1e9) >= sent[0]['expires_at_ns']-120_000_000:
+            if round(self.node.now()*1e9) >= sent[0]['expires_at_ns']-lead_ns:
                 engine.halt(self.node.now(), 'COMMAND_TIMEOUT', revoke=True)
 
     def send(self, groups, target):
