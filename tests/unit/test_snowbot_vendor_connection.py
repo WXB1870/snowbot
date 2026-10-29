@@ -334,6 +334,7 @@ class DeploymentEntryTests(unittest.TestCase):
                 self.assertEqual(run(deploy.locked_bindu(None,acquire=True),'rev-parse','HEAD'),newer)
 
     def test_generated_vendor_reuses_cache_preserves_site_and_rejects_local_edits(self):
+        from unittest.mock import patch
         from tools.deployment import deploy
         from bindu_contracts.resources import package_share
         bindu=package_share('bindu_execution').parents[2]
@@ -343,6 +344,16 @@ class DeploymentEntryTests(unittest.TestCase):
             output=deploy.assemble(bindu,workspace)
             self.assertTrue((output/'src/servo_control/package.xml').is_file())
             self.assertEqual(deploy.assemble(bindu,workspace),output)
+            self.assertEqual(site.read_text(),'site-owned parameters')
+            digest=deploy.digest
+            with patch.object(deploy,'digest',side_effect=lambda p:'changed-lock' if p==deploy.ROOT/'dependencies.repos' else digest(p)), \
+                    patch.object(deploy.subprocess,'run') as generate:
+                self.assertEqual(deploy.assemble(bindu,workspace),output)
+                self.assertEqual(generate.call_count,0)
+            native=bindu/'src/control/bindu_execution/native/interpolation.hpp'
+            with patch.object(deploy,'digest',side_effect=lambda p:'changed-native' if p==native else digest(p)):
+                self.assertEqual(deploy.assemble(bindu,workspace),output)
+            self.assertEqual(len(list(workspace.glob('vendor-before-*'))),1)
             self.assertEqual(site.read_text(),'site-owned parameters')
             changed=output/'src/servo_control/src/main.cpp';changed.write_text('local maintenance')
             with self.assertRaisesRegex(ValueError,'Generated vendor changed'):

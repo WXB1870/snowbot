@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from snowbot_hardware.parameters import load_parameters
+from snowbot_hardware.parameters import load_parameters, validate_pico_timing
 
 
 class RuntimeParameterTests(unittest.TestCase):
@@ -33,6 +33,20 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertIs(type(cfg['pico']['pair_max_skew_s']),float)
         self.assertIs(type(cfg['pico']['rpc_timeout_s']),float)
         self.assertIs(type(cfg['display']['poll_ms']),int)
+
+    def test_selected_pico_timing_uses_actual_braking_and_lease_budgets(self):
+        cfg=load_parameters();validate_pico_timing(cfg,brake_lead_s=.12)
+        cfg['pico']['prepare_command_period_s']=.2
+        validate_pico_timing(cfg)  # Simulation has no target-stream pre-brake.
+        validate_pico_timing(cfg,brake_lead_s=.04)
+        with self.assertRaisesRegex(ValueError,'SNOWBOT_PREPARE_TIMING'):
+            validate_pico_timing(cfg,brake_lead_s=.12)
+        cfg=load_parameters();cfg['gripper']['lease_ttl_s']=.15
+        with self.assertRaisesRegex(ValueError,'SNOWBOT_PICO_RENEWAL_TIMING'):
+            validate_pico_timing(cfg)
+        cfg['gripper']['lease_ttl_s']=4.;cfg['pico']['renewal_period_s']=2.
+        with self.assertRaisesRegex(ValueError,'SNOWBOT_PICO_RENEWAL_TIMING'):
+            validate_pico_timing(cfg)
 
     def test_unknown_fields_types_and_nonfinite_values_are_rejected(self):
         for bad in ({'other':{}},{'schema_version':True},{'pico':{'other':1}},

@@ -96,6 +96,20 @@ def load_parameters(path=None):
     return result
 
 
+def validate_pico_timing(parameters, *, brake_lead_s=0.):
+    """Check the selected PICO timing before launching its control chain."""
+    p, g = parameters['pico'], parameters['gripper']
+    # ExecutionNode grants and Executor renews arm leases for two seconds.
+    arm_lease_s = 2.
+    for key, ttl in (('renewal_period_s', min(arm_lease_s, g['lease_ttl_s'])),
+                     ('stop_renewal_period_s', arm_lease_s)):
+        if p[key] >= ttl:
+            raise ValueError(f'SNOWBOT_PICO_RENEWAL_TIMING:{key} must be < {ttl:g}s')
+    if p['prepare_command_period_s'] + brake_lead_s >= p['prepare_command_ttl_s']:
+        raise ValueError('SNOWBOT_PREPARE_TIMING: prepare_command_period_s + '
+                         'target_stream_brake_lead_s must be < prepare_command_ttl_s')
+
+
 def parameters_for(owner, group):
     """Use the selected startup snapshot, including lightweight offline fixtures."""
     selected = getattr(owner, 'runtime_parameters', None)

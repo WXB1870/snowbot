@@ -413,6 +413,21 @@ class SimulationEntryTests(unittest.TestCase):
         revision=patch.object(entry.subprocess,'check_output',return_value='fixture_tool_revision\n')
         revision.start();self.addCleanup(revision.stop)
 
+    def test_incompatible_pico_timing_is_rejected_before_launch(self):
+        template=package_share('snowbot_bringup')/'config/deployments/snowbot_vr_real.json'
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);parameters=root/'parameters.json';site=root/'site.json'
+            recipe=json.loads(template.read_text());recipe['arguments']['parameters_config']=str(parameters)
+            site.write_text(json.dumps(recipe))
+            for values,code in (({'prepare_command_period_s':.2},'SNOWBOT_PREPARE_TIMING'),
+                                ({'renewal_period_s':3.},'SNOWBOT_PICO_RENEWAL_TIMING')):
+                parameters.write_text(json.dumps({'pico':values}))
+                with self.subTest(values=values),self.assertRaisesRegex(ValueError,code):
+                    entry.parse_args(['--config',str(site)])
+            parameters.write_text(json.dumps({'pico':{'prepare_command_period_s':.2}}))
+            recipe['arguments']['target_stream_brake_lead_s']=.04;site.write_text(json.dumps(recipe))
+            entry.parse_args(['--config',str(site)])
+
     def test_local_default_recipe_and_explicit_override(self):
         fallback=package_share("snowbot_bringup")/'config/deployments/snowbot_vr_sim.json'
         with tempfile.TemporaryDirectory() as directory:

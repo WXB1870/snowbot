@@ -76,7 +76,8 @@ def assemble(bindu, workspace):
     model = ROOT/'src/snowbot_description/urdf/snowbot_control_real.urdf'
     tool = robot/'bimanual_snowbot_real.json'
     native = bindu/'src/control/bindu_execution/native'
-    inputs = [Path(position.__file__), ROOT/'dependencies.repos', ROOT/'vendor/snowbot/baseline.json', model, tool,
+    # The receipt records paired revisions; generation depends on actual inputs.
+    inputs = [Path(position.__file__), ROOT/'vendor/snowbot/baseline.json', model, tool,
               *sorted(ASSETS.glob('*')), *(native/n for n in position.NATIVE_FILES),
               bindu/'src/capabilities/bindu_kinematics/bindu_kinematics/model_codegen.py']
     signature = hashlib.sha256(''.join(digest(p) for p in inputs if p.is_file()).encode()).hexdigest()

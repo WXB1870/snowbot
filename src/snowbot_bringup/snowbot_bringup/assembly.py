@@ -14,7 +14,7 @@ from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target
 
 def assemble(context):
     value = lambda name, default='': LaunchConfiguration(name, default=default).perform(context)
-    from snowbot_hardware.parameters import load_parameters
+    from snowbot_hardware.parameters import load_parameters, validate_pico_timing
     runtime_parameters = load_parameters(value('parameters_config') or None)
     input_settings = runtime_parameters['pico']
     def enabled(name, default='true'):
@@ -115,6 +115,8 @@ def assemble(context):
     if mode=='real' and value('position_protocol')=='session_v3':
         execution.update(target_stream_limits({key:value(key,str(default))
             for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}))
+    if pico and position_contract:
+        validate_pico_timing(runtime_parameters,brake_lead_s=execution.get('target_stream_brake_lead_s',0.))
     nodes.append(Node(package='snowbot_hardware', executable='snowbot_adapter' if mode=='real' else 'snowbot_position_sim' if position_contract else 'execution', namespace=ns,
                       output='screen', parameters=[execution]))
     if recorder_enabled:
