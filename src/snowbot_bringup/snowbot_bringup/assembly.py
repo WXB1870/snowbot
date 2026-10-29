@@ -14,6 +14,9 @@ from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target
 
 def assemble(context):
     value = lambda name, default='': LaunchConfiguration(name, default=default).perform(context)
+    from snowbot_hardware.parameters import load_parameters
+    runtime_parameters = load_parameters(value('parameters_config') or None)
+    input_settings = runtime_parameters['pico']
     def enabled(name, default='true'):
         raw=value(name,default)
         if raw not in ('true','false'):raise ValueError('TELEOP_BOOLEAN:'+name)
@@ -107,7 +110,7 @@ def assemble(context):
     if mode=='real' or position_contract:
         execution.update(command_enabled=enabled('command_enabled','false'),
             **{key:value(key,default) for key,default in (
-                ('execution_mode','position'),('gripper_config',''),('vendor_namespace','/snowbot'),('position_protocol','legacy_guard'),('arm_receiver_node',''),
+                ('execution_mode','position'),('gripper_config',''),('parameters_config',''),('vendor_namespace','/snowbot'),('position_protocol','legacy_guard'),('arm_receiver_node',''),
                 ('servo_receiver_node',''),('mid_receiver_node',''))})
     if mode=='real' and value('position_protocol')=='session_v3':
         execution.update(target_stream_limits({key:value(key,str(default))
@@ -128,6 +131,7 @@ def assemble(context):
                               'robot_description': robot.display_urdf.read_text(), 'publish_frequency': 30.}],
                           remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')]))
     tool = {'tool_config': str(robot.tool_config), 'input_source': value('tool_input_source')}
+    tool.update({key:input_settings[key] for key in ('grip_press_threshold','grip_release_threshold','trigger_release_threshold','pair_max_skew_s')})
     nodes.append(Node(package='bindu_runtime', executable='teleop_mode', namespace=ns,
                       output='screen', parameters=[{**common, **tool, 'initial_side': side,
                           'supported_sides': [side],
@@ -153,7 +157,7 @@ def assemble(context):
           for key in ('host', 'cert_file', 'key_file')}
     if pico:
         nodes.append(Node(package='snowbot_teleop',executable='pico_control',namespace=ns,output='screen',
-            parameters=[{**common,**model,'tool_config':str(robot.tool_config),
+            parameters=[{**common,**model,'parameters_config':value('parameters_config'),'tool_config':str(robot.tool_config),
                          'pico_config':pico_config,'device_backend':backend,'recording_enabled':recorder_enabled,
                          'gripper_config':value('gripper_config'),
                          'base_config':base_config, 'command_enabled':enabled('command_enabled','false'),
@@ -161,7 +165,7 @@ def assemble(context):
                          'simulation_demo':pico_demo}]))
     nodes.append(Node(package='bindu_runtime', executable='vr_input', namespace=ns,
                       condition=IfCondition(LaunchConfiguration('vr_enabled')), output='screen',
-                      parameters=[{**common, **vr, 'side': 'both', 'mapping': 'pico_snowbot_v1' if pico or mode=='real' else 'v34',
+                      parameters=[{**common, **vr, **{key:input_settings[key] for key in ('trigger_press_threshold','trigger_release_threshold','grip_release_threshold')}, 'side': 'both', 'mapping': 'pico_snowbot_v1' if pico or mode=='real' else 'v34',
                           'input_timing_enabled':ParameterValue(LaunchConfiguration('input_timing_enabled',default='false'),value_type=bool),
                           'simulation_demo':pico_demo,
                           'port': ParameterValue(LaunchConfiguration('port'), value_type=int)}],

@@ -95,6 +95,16 @@ struct PredictionTrace {
  bool rigid=false,accepted=false;double gain=0.;int attempts=0,projection_failures=0,geometry_rejections=0;
  const char* reason="ordinary_trend";
 };
+struct TargetTuning {
+ double trend_min_interval_s=.005,trend_max_interval_s=.1,trend_filter_s=.04,trend_velocity_fraction=.8;
+ double takeover_velocity_tolerance_rad_s=.01,takeover_position_tolerance_rad=.002,held_takeover_position_tolerance_rad=.25;
+ bool valid()const noexcept {
+  return std::isfinite(trend_min_interval_s)&&std::isfinite(trend_max_interval_s)&&std::isfinite(trend_filter_s)&&std::isfinite(trend_velocity_fraction)&&
+   std::isfinite(takeover_velocity_tolerance_rad_s)&&std::isfinite(takeover_position_tolerance_rad)&&std::isfinite(held_takeover_position_tolerance_rad)&&
+   trend_min_interval_s>0&&trend_min_interval_s<=trend_max_interval_s&&trend_filter_s>0&&trend_velocity_fraction>0&&trend_velocity_fraction<=1&&
+   takeover_velocity_tolerance_rad_s>0&&takeover_position_tolerance_rad>0&&held_takeover_position_tolerance_rad>0;
+ }
+};
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
  struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false,inner_reference=false;};
@@ -102,12 +112,15 @@ class TrajectoryQueue {
  static_assert(std::atomic<const Segment*>::is_always_lock_free,"lock-free retirement required");
  std::array<std::atomic<const Segment*>,8> retired_{};
  std::array<double,joint_count> velocity_{},acceleration_{},jerk_{};
+ TargetTuning tuning_{};
  const Entry* at(int64_t now)const noexcept {
   if(!count_)return nullptr;
   const Entry* e=&entries_[0];for(unsigned i=1;i<count_;++i)if(entries_[i].start<=now)e=&entries_[i];return e;
  }
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
 public:
+ void configure(const TargetTuning& value){require(!count_&&value.valid(),"target_tuning_invalid_or_active");tuning_=value;}
+ TargetTuning tuning()const noexcept{return tuning_;}
  struct Prepared {
   PredictionTrace prediction{};TargetTrend trend{};
   std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false,inner_reference=false;
@@ -177,13 +190,14 @@ public:
  }
  template<class Wire> static std::unique_ptr<Prepared> prepare_target(const Wire& wire,const Meta& source,
    const TargetSnapshot& snapshot,const std::array<double,joint_count>& goal,
-   double max_v=.25,double max_a=.5,double max_j=162.) {
+   double max_v=.25,double max_a=.5,double max_j=162.,TargetTuning tuning={}) {
   using namespace bindu::execution;
   require((wire.version==2||wire.version==3)&&wire.segment_id==source.sequence&&wire.effective_at_ns==0,"target_version_or_identity");
   require(source.operation!=2||wire.version==2,"rigid_pause_requires_original_stop_recipe");
   require(wire.duration.empty()&&wire.piece_start.empty()&&wire.source_duration.empty()&&wire.source_elapsed.empty()&&
     wire.control_count.empty()&&wire.controls.empty(),"target_contains_curve");
   require(snapshot.valid&&snapshot.effective_ros<source.expires,"target_snapshot_or_expired");
+  require(tuning.valid(),"target_tuning_invalid");
   auto result=std::make_unique<Prepared>();JointLimits limits;limits.reserve(joint_count);
   // A new ordinary takeover (explicit preparation/recovery) can leave the
   // tool scope. Continuations and PAUSE inherit its exact reference reserve.
@@ -201,12 +215,12 @@ public:
   if(source.operation!=2){
    result->trend.goal=goal;result->trend.stamp=source.stamp;result->trend.session=source.session;
    const double dt=(source.stamp-snapshot.trend.stamp)*1e-9;
-   if(source.operation==0&&snapshot.trend.session==source.session&&snapshot.trend.rigid==(wire.version==3)&&dt>=.005&&dt<=.1){
+   if(source.operation==0&&snapshot.trend.session==source.session&&snapshot.trend.rigid==(wire.version==3)&&dt>=tuning.trend_min_interval_s&&dt<=tuning.trend_max_interval_s){
     // Derive only from committed goals at their original source times. Reserve speed
     // headroom for catch-up; suppress timing noise in the derivative, not q.
     for(unsigned i=0;i<joint_count;++i){
-     const double raw=std::clamp((goal[i]-snapshot.trend.goal[i])/dt,-.8*limits[i].velocity,.8*limits[i].velocity);
-     hint[i]=goal[i]==snapshot.trend.goal[i]?0.:snapshot.trend.velocity[i]+dt/(dt+.04)*(raw-snapshot.trend.velocity[i]);
+     const double raw=std::clamp((goal[i]-snapshot.trend.goal[i])/dt,-tuning.trend_velocity_fraction*limits[i].velocity,tuning.trend_velocity_fraction*limits[i].velocity);
+     hint[i]=goal[i]==snapshot.trend.goal[i]?0.:snapshot.trend.velocity[i]+dt/(dt+tuning.trend_filter_s)*(raw-snapshot.trend.velocity[i]);
     }
    }
    std::copy(hint.begin(),hint.end(),result->trend.velocity.begin());
@@ -251,7 +265,7 @@ public:
        !old->segment->sample_into((start-old->start)*1e-9,held.data(),hv.data(),ha.data(),hj.data(),joint_count))return "trajectory_hold_takeover";
    }
    for(unsigned i=0;i<joint_count;++i){
-    if(std::abs(measured_v[i])>.01||std::abs(input.q[i]-measured_q[i])>(input.held_takeover?.25:.002)||
+    if(std::abs(measured_v[i])>tuning_.takeover_velocity_tolerance_rad_s||std::abs(input.q[i]-measured_q[i])>(input.held_takeover?tuning_.held_takeover_position_tolerance_rad:tuning_.takeover_position_tolerance_rad)||
        std::abs(input.v[i])>=1e-8||std::abs(input.a[i])>=1e-8)return "trajectory_takeover_seed";
     if(input.held_takeover&&std::abs(input.q[i]-held[i])>=1e-6)return "trajectory_hold_discontinuous";
    }
@@ -357,7 +371,7 @@ private:
    }
    auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
    const auto began=std::chrono::steady_clock::now();
-   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2]);else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
+   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
    result->prepare_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-began).count();
    // Observation-only callback; its failure cannot alter control acceptance.

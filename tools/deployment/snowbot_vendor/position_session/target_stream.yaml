@@ -6,3 +6,10 @@
     trajectory_max_velocity: 1.0
     trajectory_max_acceleration: 4.5
     trajectory_max_jerk: 259.2
+    target_trend_min_interval_s: 0.005
+    target_trend_max_interval_s: 0.1
+    target_trend_filter_s: 0.04
+    target_trend_velocity_fraction: 0.8
+    target_takeover_velocity_tolerance_rad_s: 0.01
+    target_takeover_position_tolerance_rad: 0.002
+    target_held_takeover_position_tolerance_rad: 0.25

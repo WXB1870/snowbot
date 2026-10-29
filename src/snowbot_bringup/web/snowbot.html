@@ -374,6 +374,7 @@ details[open]>summary:after { transform: rotate(225deg); }
 <script src="/static/main.min.js"></script>
 <script>
 'use strict';
+const displaySettings=__SNOWBOT_DISPLAY_CONFIG__;
 const $=id=>document.getElementById(id);
 const phases={checking:'连接检查',standby:'待命',preparing:'准备中',confirming_tool:'工具检查中',tool_standby:'已暂停',engaging:'正在接合',following:'跟随中',switching:'正在换握',locked:'控制已锁定',loading:'装卸操作中',load_check:'等待装卸确认'};
 Object.assign(phases,{selecting_mode:'模式切换中',gripper_control:'夹爪开合中'});
@@ -560,7 +561,7 @@ function connectModel(){
   viewer.connect();
   viewer.connection.addEventListener('open',()=>{meshConnected=true;styleModel();});
   viewer.connection.addEventListener('message',styleModel);
-  viewer.connection.addEventListener('close',()=>{meshConnected=false;clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connectModel,1500);});
+  viewer.connection.addEventListener('close',()=>{meshConnected=false;clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connectModel,displaySettings.reconnect_ms);});
   viewer.connection.addEventListener('error',()=>{meshConnected=false;});
 }
 try{
@@ -589,7 +590,7 @@ async function reportModel(){
   }catch(e){report.error=e.message;}}
   try{await fetch('/api/client',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)});}catch(e){}
 }
-setInterval(reportModel,3000);
+setInterval(reportModel,displaySettings.report_ms);
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 // Display-only, bounded history. Gaps and grasp generations are never joined.
 let errorHistory=[],errorRun=null;
@@ -780,15 +781,15 @@ function renderEvents(events){
   }box.replaceChildren(frag);
 }
 async function poll(){
-  try{const response=await fetch('/api/state',{cache:'no-store',signal:AbortSignal.timeout(1800)});if(!response.ok)throw Error(response.status);lastData=await response.json();lastPoll=performance.now();render(lastData,true);}catch(e){render(lastData||{},false);}finally{setTimeout(poll,150);}
+  try{const response=await fetch('/api/state',{cache:'no-store',signal:AbortSignal.timeout(displaySettings.request_timeout_ms)});if(!response.ok)throw Error(response.status);lastData=await response.json();lastPoll=performance.now();render(lastData,true);}catch(e){render(lastData||{},false);}finally{setTimeout(poll,displaySettings.poll_ms);}
 }
-setInterval(()=>{if(lastPoll&&performance.now()-lastPoll>1500)render(lastData||{},false);},500);
-async function view(action,enabled){if(!['grid','tool'].includes(action)){if(!viewer)throw Error('Model unavailable');cameraView(action);return;}const r=await fetch('/api/view',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,enabled}),signal:AbortSignal.timeout(1800)});if(!r.ok)throw Error(r.status);}
+setInterval(()=>{if(lastPoll&&performance.now()-lastPoll>displaySettings.stale_ms)render(lastData||{},false);},500);
+async function view(action,enabled){if(!['grid','tool'].includes(action)){if(!viewer)throw Error('Model unavailable');cameraView(action);return;}const r=await fetch('/api/view',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,enabled}),signal:AbortSignal.timeout(displaySettings.request_timeout_ms)});if(!r.ok)throw Error(r.status);}
 for(const b of document.querySelectorAll('[data-view]'))b.addEventListener('click',async()=>{try{await view(b.dataset.view);for(const other of document.querySelectorAll('[data-view]'))other.setAttribute('aria-pressed',String(other===b));text('notice','');}catch(e){text('notice','视角切换失败，请检查模型服务。');}});
 for(const id of ['grid','tool'])$(id).addEventListener('change',async e=>{try{await view(id,e.target.checked);text('notice','');}catch(err){e.target.checked=!e.target.checked;text('notice','显示设置失败，请重试。');}});
 $('pause').addEventListener('click',()=>{paused=!paused;$('pause').setAttribute('aria-pressed',String(paused));text('pause',paused?'恢复事件':'暂停事件');if(!paused&&lastData)renderEvents(lastData.events||[]);});
 $('event-filter').addEventListener('change',()=>{if(lastData)renderEvents(lastData.events||[]);});
-new ResizeObserver(()=>{if(lastData)renderErrorCharts(lastData,performance.now()-lastPoll<1500);}).observe($('error-panel'));
+new ResizeObserver(()=>{if(lastData)renderErrorCharts(lastData,performance.now()-lastPoll<displaySettings.stale_ms);}).observe($('error-panel'));
 for(const anchor of document.querySelectorAll('.capsule-nav a'))anchor.addEventListener('click',()=>{
   for(const link of document.querySelectorAll('.capsule-nav a'))link.removeAttribute('aria-current');
   anchor.setAttribute('aria-current','location');

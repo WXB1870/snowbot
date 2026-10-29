@@ -34,7 +34,8 @@ class SnowbotGrippers:
                            if node.robot_io.command_enabled and (cfg.get('calibrated') or
                                cfg.get('allow_uncalibrated_direct', False)) else {})
         self.core = GripperController(node.profile, cfg, self.send, self.health, node.now, self.arms_idle,
-                                      enabled=node.robot_io.command_enabled, require_driver_ack=False)
+                                      enabled=node.robot_io.command_enabled, require_driver_ack=False,
+                                      runtime_parameters=getattr(devices,'runtime_parameters',None))
         self.bind_services()
 
     def bind_services(self):

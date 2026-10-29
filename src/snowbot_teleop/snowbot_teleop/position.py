@@ -7,6 +7,7 @@ from pathlib import Path
 from bindu_interfaces.msg import GripperState
 from bindu_interfaces.srv import GripperControl, Lease
 from snowbot_hardware.gripper import SIDES, GROUPS, JOINTS, validate_config, target_position_tolerance
+from snowbot_hardware.parameters import parameters_for
 from bindu_runtime.common import seconds, stamp
 
 
@@ -65,7 +66,7 @@ class PositionOperations:
             epoch=states[0].epoch
             if any(s.epoch!=epoch for s in states):raise RuntimeError('PICO_GRIPPER_RECOVERY_EPOCH')
             reply=await n.wait(self.control.call_async(GripperControl.Request(operation='recover',
-                epoch=epoch,stamp=stamp(n.now()),valid_for=.25)))
+                epoch=epoch,stamp=stamp(n.now()),valid_for=parameters_for(n,'gripper')['request_ttl_s'])))
             n.current(intent)
             if not reply.accepted:raise RuntimeError(reply.code)
             end=time.monotonic()+self.config['feedback_max_age']*3
@@ -140,7 +141,7 @@ class PositionOperations:
         response = await n.wait(self.control.call_async(GripperControl.Request(
             operation=operation, side=side, lease_id=self.lease.lease_id,
             epoch=self.lease.epoch, sequence=self.sequence, stamp=stamp(n.now()),
-            valid_for=.25, **kwargs)))
+            valid_for=parameters_for(n,'gripper')['request_ttl_s'], **kwargs)))
         if not response.accepted:
             raise RuntimeError(response.code)
 
@@ -323,7 +324,7 @@ class PositionOperations:
                         lease_id=lease.lease_id, epoch=lease.epoch)))
                     if not response.ok:
                         raise RuntimeError(response.code)
-                    renew_at = time.monotonic()+.2
+                    renew_at = time.monotonic()+parameters_for(n,'pico')['renewal_period_s']
                 await n.pause()
         finally:
             if direct and not automatic:
@@ -362,7 +363,7 @@ class PositionOperations:
                         lease_id=lease.lease_id, epoch=lease.epoch)))
                     if not response.ok:
                         raise RuntimeError(response.code)
-                    renew_at = time.monotonic()+.2
+                    renew_at = time.monotonic()+parameters_for(n,'pico')['renewal_period_s']
                 await n.pause()
             raise RuntimeError('PICO_GRIPPER_FEEDBACK_TIMEOUT')
         finally:

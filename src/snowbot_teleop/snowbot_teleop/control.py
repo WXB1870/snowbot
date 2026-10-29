@@ -47,9 +47,9 @@ class PicoFeedback:
 
 
 class PicoControl:
-    def __init__(self, *, initial_load='unknown', max_age=.25, prepare_hold=1., simulation_demo=False,
+    def __init__(self, *, initial_load='unknown', max_age=.25, prepare_hold=None, simulation_demo=False,
                  guided_loading=False, dual_modes=False, direct_grippers=False, initial_mode='independent_arms',
-                 pose_jump_translation_m=.35, pose_jump_rotation_rad=1.2):
+                 pose_jump_translation_m=.35, pose_jump_rotation_rad=1.2, settings=None):
         if initial_load not in ('empty','held','unknown'):
             raise ValueError('PICO_LOAD_STATE')
         self.load, self.supported = initial_load, False
@@ -62,7 +62,10 @@ class PicoControl:
             raise ValueError('PICO_POSE_JUMP_CONFIG')
         self.last_pose_jump=None
         self.last_input_timeout=None
-        self.max_age, self.prepare_hold = max_age, prepare_hold
+        from snowbot_hardware.parameters import load_parameters
+        self.settings = dict(load_parameters()['pico'], **(settings or {}))
+        self.max_age = max_age
+        self.prepare_hold = self.settings['prepare_button_hold_s'] if prepare_hold is None else prepare_hold
         self.phase, self.reason = 'checking', 'WAITING_FOR_INPUT_AND_FEEDBACK'
         self.fault_active = False
         self.first_fault = self.stop_failure = self.request_failure = None
@@ -144,8 +147,8 @@ class PicoControl:
             feedback_fresh=bool(self.feedback and self.feedback.healthy and 0<=now-self.feedback.stamp<=self.max_age),
             motion_stopped=bool(self.feedback and self.feedback.stopped),
             input_fresh=bool(self.frames and 0<=now-self.stamp<=self.max_age),
-            left_squeeze_released=bool('left' in hands and hands['left'].grip<.3),
-            right_squeeze_released=bool('right' in hands and hands['right'].grip<.3))
+            left_squeeze_released=bool('left' in hands and hands['left'].grip<self.settings['grip_release_threshold']),
+            right_squeeze_released=bool('right' in hands and hands['right'].grip<self.settings['grip_release_threshold']))
 
     def record_fault(self, code, stamp, *, kind='fault', device=False):
         """Keep source-time first fault and independent stop/request failures."""
@@ -230,7 +233,7 @@ class PicoControl:
                 not all(math.isfinite(v) and 0<=v<=1 for v in (f.grip,f.trigger))
                 for f,side in zip(pair,('left','right'))) or
                 left.source_id != right.source_id or left.seq != right.seq or
-                abs(left.stamp-right.stamp) > .02):
+                abs(left.stamp-right.stamp) > self.settings['pair_max_skew_s']):
             self.lock('PICO_PAIR_INVALID',now);return
         if left.source_id in self.retired:return
         if self.source != left.source_id:
@@ -250,9 +253,9 @@ class PicoControl:
         if self.frames and self.phase in ('engaging','following','switching'):
             before=tuple(pose_matrix(f.pose) for f in self.frames)
             ordinary=self.dual_modes and self.teleop_mode=='independent_arms'
-            tool_held=all(f.grip>.7 for f in self.frames+pair)
+            tool_held=all(f.grip>self.settings['grip_press_threshold'] for f in self.frames+pair)
             for a,b,old,new in zip(poses,before,self.frames,pair):
-                if not (old.grip>.7 and new.grip>.7 and (ordinary or tool_held)):continue
+                if not (old.grip>self.settings['grip_press_threshold'] and new.grip>self.settings['grip_press_threshold'] and (ordinary or tool_held)):continue
                 distance=float(np.linalg.norm(a[:3,3]-b[:3,3]))
                 angle=math.acos(float(np.clip((np.trace(a[:3,:3] @ b[:3,:3].T)-1)/2,-1.,1.)))
                 if distance>self.pose_jump_translation_m or angle>self.pose_jump_rotation_rad:
@@ -274,11 +277,11 @@ class PicoControl:
             differences=[f.button_edges[2*i]-f.button_edges[2*i+1] for i in range(4)]
             if (any(v not in (0,1) for v in differences) or
                     any(v!=int(held) for v,held in zip(differences[:3],physical)) or
-                    f.trigger>.7 and differences[3]!=1 or f.trigger<.3 and differences[3]!=0):
+                    f.trigger>self.settings['trigger_press_threshold'] and differences[3]!=1 or f.trigger<self.settings['trigger_release_threshold'] and differences[3]!=0):
                 self.lock('PICO_BUTTON_STATE_COUNTER_MISMATCH',now);return
             states.extend(physical+[bool(differences[3])])
             counts.extend(f.button_edges)
-            if f.grip<.3:self.squeeze_released[side]=True
+            if f.grip<self.settings['grip_release_threshold']:self.squeeze_released[side]=True
         if self.previous is None:
             self.previous=tuple(counts)
             for i,held in enumerate(states):
@@ -297,12 +300,12 @@ class PicoControl:
             if not held:self.armed[i]=True
         if left.stop or right.stop or states[1] or delta[2]:
             self.lock('PICO_Y_STOP',now);return
-        squeeze=all(f.grip>.7 for f in pair)
-        release=any(f.grip<.3 for f in pair)
+        squeeze=all(f.grip>self.settings['grip_press_threshold'] for f in pair)
+        release=any(f.grip<self.settings['grip_release_threshold'] for f in pair)
         independent=self.dual_modes and self.teleop_mode=='independent_arms'
-        follow_release=(all(f.grip<.3 for f in pair) if independent else release or any(clutch_changed))
+        follow_release=(all(f.grip<self.settings['grip_release_threshold'] for f in pair) if independent else release or any(clutch_changed))
         if (self.phase=='standby' and self.reason=='PREPARE_HOLD_AFTER_GRIPPER_STOP' and
-                (any(f.grip>=.3 for f in pair) or any(clutch_changed))):
+                (any(f.grip>=self.settings['grip_release_threshold'] for f in pair) or any(clutch_changed))):
             self.a_since=None;self.prepare_blocked=True;self.reason='PREPARE_RELEASED'
             return
         mode_stop=self.dual_modes and presses[5]
@@ -310,9 +313,9 @@ class PicoControl:
             # A simultaneous release must not erase the operator's B request.
             # It still stops only; switching requires another released press.
             self.phase,self.reason='tool_standby',('MODE_SWITCH_REQUIRES_STOP' if mode_stop else 'SQUEEZE_RELEASED')
-            self.squeeze_released=[f.grip<.3 or changed for f,changed in zip(pair,clutch_changed)]
+            self.squeeze_released=[f.grip<self.settings['grip_release_threshold'] or changed for f,changed in zip(pair,clutch_changed)]
             self.emit('stop');return
-        if self.phase=='preparing' and (not states[4] or not all(f.grip<.3 for f in pair) or any(clutch_changed)):
+        if self.phase=='preparing' and (not states[4] or not all(f.grip<self.settings['grip_release_threshold'] for f in pair) or any(clutch_changed)):
             self.phase,self.reason='standby','PREPARE_RELEASED'
             self.prepare_blocked=True;self.emit('stop');return
         if not states[4]:
@@ -325,7 +328,7 @@ class PicoControl:
                                             else 'OPEN_REQUIRES_LOADING_AND_SUPPORT')
             self.prepare_blocked=True;self.emit('stop');return
         if self.phase=='locked':
-            if presses[5] and not self.pending and all(f.grip<.3 and f.trigger<.3 for f in pair):
+            if presses[5] and not self.pending and all(f.grip<self.settings['grip_release_threshold'] and f.trigger<self.settings['trigger_release_threshold'] for f in pair):
                 if self.rest(now) and not self.recovery_required and not self.stop_failure:
                     self.phase,self.reason='standby','RECOVERED_TO_STANDBY'
                     self.fault_active=False
@@ -337,7 +340,7 @@ class PicoControl:
                     self.reason='RECOVERY_CHECK'
                     self.emit('recover')
             return
-        if self.phase=='gripper_control' and (any(f.grip>=.3 for f in pair) or any(clutch_changed)):
+        if self.phase=='gripper_control' and (any(f.grip>=self.settings['grip_release_threshold'] for f in pair) or any(clutch_changed)):
             self.phase,self.reason='standby','GRIPPER_REQUIRES_STOP_AND_RELEASED_SQUEEZE'
             self.manual_targets=[None,None]
             self.armed[3]=not states[3];self.armed[7]=not states[7]
@@ -369,7 +372,7 @@ class PicoControl:
                 self.loading_goal='empty' if self.loading_goal=='held' else 'held'
                 self.reason='CONFIRM_SUPPORT_THEN_B'
                 return
-            if presses[5] and self.rest(now) and all(f.grip<.3 for f in pair):
+            if presses[5] and self.rest(now) and all(f.grip<self.settings['grip_release_threshold'] for f in pair):
                 if self.guided_loading:
                     if states[3] or states[7]:
                         self.reason='RELEASE_TRIGGERS_BEFORE_LOADING';return
@@ -394,7 +397,7 @@ class PicoControl:
                 self.desired=desired;self.emit('grippers',tuple(desired));return
             if presses[5] and not self.pending and self.rest(now):
                 if self.guided_loading:
-                    if not all(f.grip<.3 for f in pair):
+                    if not all(f.grip<self.settings['grip_release_threshold'] for f in pair):
                         self.reason='RELEASE_SQUEEZES_BEFORE_CONFIRM';return
                     if not all(self.loading_opened):
                         self.reason='OPEN_BOTH_GRIPPERS_BEFORE_CONFIRM';return
@@ -421,7 +424,7 @@ class PicoControl:
         if presses[3] or presses[7]:
             if self.direct_grippers:
                 if not any(presses[i] and states[i] for i in (3,7)):return
-                if self.phase in ('standby','tool_standby') and self.rest(now) and all(f.grip<.3 for f in pair):
+                if self.phase in ('standby','tool_standby') and self.rest(now) and all(f.grip<self.settings['grip_release_threshold'] for f in pair):
                     self.manual_targets=[None,None]
                     self.phase,self.reason='gripper_control','TRIGGERS_CONTROL_INDIVIDUAL_GRIPPERS'
                     self.manual_grippers(presses,releases,states)
@@ -440,7 +443,7 @@ class PicoControl:
         if self.phase in ('standby','tool_standby'):
             if self.dual_modes:
                 if presses[5]:
-                    if not self.rest(now) or not all(f.grip<.3 for f in pair):
+                    if not self.rest(now) or not all(f.grip<self.settings['grip_release_threshold'] for f in pair):
                         self.reason='MODE_SWITCH_REQUIRES_STOP'
                     else:
                         target='bimanual_tool' if independent else 'independent_arms'
@@ -454,9 +457,9 @@ class PicoControl:
                     self.last_prepare_check=dict(stamp=now,source_id=self.source,seq=self.seq,
                         load_state=self.load,load_source=self.load_source,checks=self.prepare_checks(now),
                         held_s=now-self.a_since,required_hold_s=self.prepare_hold,
-                        accepted=(self.guided_loading or self.load=='empty') and self.rest(now) and all(f.grip<.3 for f in pair),
+                        accepted=(self.guided_loading or self.load=='empty') and self.rest(now) and all(f.grip<self.settings['grip_release_threshold'] for f in pair),
                         squeeze=[f.grip for f in pair],feedback_stamp=self.feedback.stamp if self.feedback else None)
-                    if (self.guided_loading or self.load=='empty') and self.rest(now) and all(f.grip<.3 for f in pair):
+                    if (self.guided_loading or self.load=='empty') and self.rest(now) and all(f.grip<self.settings['grip_release_threshold'] for f in pair):
                         self.phase='preparing';self.emit('prepare')
                     else:self.reason=('PREPARE_REQUIRES_STOP_AND_RELEASED_SQUEEZE' if self.guided_loading else
                                       'PREPARE_REQUIRES_EMPTY_AND_RELEASED_SQUEEZE')
@@ -467,7 +470,7 @@ class PicoControl:
                 else:
                     self.phase='confirming_tool';self.emit('confirm_tool')
                 return
-            engage=(any(f.grip>.7 and armed for f,armed in zip(pair,self.squeeze_released)) if independent
+            engage=(any(f.grip>self.settings['grip_press_threshold'] and armed for f,armed in zip(pair,self.squeeze_released)) if independent
                     else squeeze and all(self.squeeze_released))
             if self.dual_modes and (states[4] or states[5]):return
             if (self.guided_loading or self.phase=='tool_standby') and engage and self.rest(now):
@@ -551,7 +554,7 @@ class PicoControl:
                 # releasing A, losing input or stopping never queues a return.
                 if (self.rest(now) and self.frames and 0<=now-self.stamp<=self.max_age and
                         self.armed[4] and self.frames[1].buttons&1 and
-                        all(f.grip<.3 and f.trigger<.3 for f in self.frames)):
+                        all(f.grip<self.settings['grip_release_threshold'] and f.trigger<self.settings['trigger_release_threshold'] for f in self.frames)):
                     self.prepare_blocked=False
                     self.a_since=now
                     self.reason='PREPARE_HOLD_AFTER_GRIPPER_STOP'
@@ -574,7 +577,7 @@ class PicoControl:
             self.phase,self.reason='tool_standby','GRASP_MODE_CONFIRMED'
             self.squeeze_released=[False,False]
             if (self.frames and 0<=now-self.stamp<=self.max_age and
-                    all(f.grip>.7 for f in self.frames)):
+                    all(f.grip>self.settings['grip_press_threshold'] for f in self.frames)):
                 desired=bool(self.frames[0].buttons&1)
                 if desired!=self.virtual:
                     self.phase='switching';self.emit('switch_grasp',desired)
@@ -590,7 +593,7 @@ class PicoControl:
         """An explicitly selected kinematic demo owns a virtual tool, never a physical grasp."""
         if (not self.simulation_demo or self.phase != 'standby' or self.pending or
                 not self.rest(now) or not self.frames or not 0 <= now-self.stamp <= self.max_age or
-                any(f.grip >= .3 for f in self.frames)):
+                any(f.grip >= self.settings['grip_release_threshold'] for f in self.frames)):
             return
         if self.load == 'unknown':
             load = self.fixture_load or ('held' if prepared else 'empty')

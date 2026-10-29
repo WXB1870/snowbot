@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <new>
+#include <limits>
 thread_local bool periodic=false;
 thread_local size_t allocated=0,deleted=0;
 void* operator new(std::size_t n){if(periodic)++allocated;if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
@@ -111,7 +112,7 @@ void target_pause_window(){
  }
  assert(feasible>1000&&impossible>0);
  TargetSnapshot unsafe;unsafe.q=seed();unsafe.q[0]=upper[0]-.0001;unsafe.v[0]=.25;unsafe.valid=true;unsafe.effective_ros=unsafe.effective_steady=pause.stamp+10000000;rejects([&]{TrajectoryQueue::prepare_target(w,pause,unsafe,unsafe.q);});
- std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 300ms, legacy 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
+ std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 400ms, legacy 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
 }
 
 void allowed_limit_seeds(){
@@ -137,6 +138,25 @@ void allowed_limit_seeds(){
   rejects([&]{TrajectoryQueue::prepare_target(wire,take,point,outside);});
  }
  std::cout<<"PASS all 16 expanded boundary seeds; beyond 0.1 degree rejected; actual R2 measurement retained; 0.03/0.3 limits\n";
+}
+void configurable_target_tuning(){
+ TargetTuning tuning;tuning.trend_velocity_fraction=.4;tuning.trend_filter_s=.02;
+ tuning.takeover_velocity_tolerance_rad_s=.004;
+ TrajectoryQueue queue;queue.configure(tuning);auto measured=seed(),goal=measured;
+ Wire wire;wire.segment_id=1;const int64_t base=1000000000;
+ Meta source{708,1,base,base+maximum_target_ttl,1};TargetSnapshot snapshot;
+ assert(queue.snapshot(base,base,1,10000000,measured,snapshot));
+ auto first=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,.25,.5,162.,queue.tuning());
+ std::array<double,16> speed{};speed[0]=.005;
+ assert(std::string(queue.commit(*first,base+1000000,base+1000000,measured,speed))=="trajectory_takeover_seed");
+ speed.fill(0.);assert(!queue.commit(*first,base+1000000,base+1000000,measured,speed));
+ bool rejected=false;try{queue.configure(tuning);}catch(const std::invalid_argument&){rejected=true;}assert(rejected);
+ goal[0]+=.004;wire.segment_id=2;source={708,2,base+20000000,base+maximum_target_ttl,0};
+ assert(queue.snapshot(source.stamp,source.stamp,0,10000000,measured,snapshot));
+ auto moving=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,.25,.5,162.,queue.tuning());
+ assert(std::abs(moving->trend.velocity[0]-.05)<1e-12);
+ tuning.trend_filter_s=std::numeric_limits<double>::quiet_NaN();assert(!tuning.valid());
+ std::cout<<"PASS configured trend fraction/filter and takeover gate; active reconfiguration rejected\n";
 }
 void target_trend_history(){
  TrajectoryQueue queue;auto measured=seed(),goal=measured;std::array<double,16> speed{};

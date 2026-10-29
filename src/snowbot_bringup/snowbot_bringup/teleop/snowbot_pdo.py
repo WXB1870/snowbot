@@ -282,10 +282,13 @@ class FaultWindow:
 
 class PdoObserver:
     """Subscribe only to the supplemental interface; absence stays explicit."""
-    def __init__(self, node, writer=None):
+    def __init__(self, node, writer=None, *, settings=None):
         self.node, self.writer = node, writer
         self.monitor = PdoMonitor()
-        self.window = FaultWindow(writer) if writer else None
+        from snowbot_hardware.parameters import load_parameters
+        settings = settings or load_parameters()['diagnostics']
+        self.window = FaultWindow(writer, before=settings['pdo_before_s'], after=settings['pdo_after_s'],
+            capacity=settings['pdo_capacity'], sample_hz=settings['pdo_sample_hz']) if writer else None
         self.last_summary = None
         self.publishers, self.graph_checked = (), None
         self.stop_signature = None

@@ -8,6 +8,7 @@ import re
 import sys
 import threading
 import time
+from snowbot_hardware.parameters import load_parameters
 
 VR_INPUT_STREAMS = ('vr-raw', 'vr-projected', 'vr-health')
 
@@ -33,16 +34,19 @@ def _sequence(value, name):
     return tuple(result) if result is not None else ()
 
 
-def _analog_state(value):
+def _analog_state(value, settings=None, kind='grip'):
     # Preserve the actual input contract's release/engage threshold crossings.
     if not isinstance(value, (int, float)) or not math.isfinite(value):return 'invalid'
-    return (value < .3, value > .7)
+    settings = settings or load_parameters()['pico']
+    return (value < settings[kind+'_release_threshold'], value > settings[kind+'_press_threshold'])
 
 
-def sampling_policy(stream, value):
+def sampling_policy(stream, value, settings=None, input_settings=None):
     """Small state keys only; do not serialize ROS arrays before sampling."""
     key = stream
-    period = .1
+    settings = settings or load_parameters()['diagnostics']
+    analog = lambda value, kind='grip': _analog_state(value, input_settings, kind)
+    period = settings['state_period_s']
     state = None
     if stream in ('vr-raw', 'vr-projected'):
         # A reconnect changes state, rather than creating unbounded sampler keys.
@@ -50,7 +54,7 @@ def sampling_policy(stream, value):
         key = (stream, side if side in ('left', 'right') else 'unknown')
         state = (_fields(value, 'source_id runtime_mode valid init stop clutch_seq mapping buttons virtual_grip'),
                  _sequence(value, 'button_edges'),
-                 _analog_state(_field(value, 'grip')), _analog_state(_field(value, 'trigger')))
+                 analog(_field(value, 'grip')), analog(_field(value, 'trigger'), 'trigger'))
     elif stream == 'execution-state':
         state = (_fields(value, 'instance_id state code lease_active lease_epoch'),
                  _sequence(value, 'missing_feedback_groups'),
@@ -58,7 +62,7 @@ def sampling_policy(stream, value):
     elif stream == 'teleop-state':
         state = (_fields(value, 'source_id generation phase reason teleop_mode load_state pending recording'),
                  tuple((_fields(hand, 'valid buttons'), _sequence(hand, 'button_edges'),
-                        _analog_state(hand.get('squeeze')), _analog_state(hand.get('trigger')))
+                        analog(hand.get('squeeze')), analog(hand.get('trigger'), 'trigger'))
                        for hand in (value.get('controller_states', {}).get(side, {}) for side in ('left', 'right'))))
     elif stream == 'gripper-state':
         side = _field(value, 'side')
@@ -76,20 +80,20 @@ def sampling_policy(stream, value):
         known=('controller_timing','websocket_handler','ros_input_publish',
                'ros_input_publish_duration','input_pipeline')
         key=(stream,stage if stage in known else 'unknown')
-        period=1.
+        period=settings['health_period_s']
         def over(name,limit):
             v=_field(value,name)
             return isinstance(v,(int,float)) and math.isfinite(v) and v>limit
         state=(_field(value,'source_id'),_field(value,'client_timing_available'),
-               over('event_interval_s',.1),over('event_loop_delay_max_s',.1),
-               over('server_controller_interval_s',.1),over('client_controller_interval_s',.1),
-               over('publish_wall_s',.02),
+               over('event_interval_s',settings['input_gap_warning_s']),over('event_loop_delay_max_s',settings['input_gap_warning_s']),
+               over('server_controller_interval_s',settings['input_gap_warning_s']),over('client_controller_interval_s',settings['input_gap_warning_s']),
+               over('publish_wall_s',settings['publish_warning_s']),
                _fields(value,'ready valid code reason'))
     elif stream in ('physics-health', 'pdo-health'):
-        period = 1.
+        period = settings['health_period_s']
         state = _fields(value, 'ready valid code reason reasons fault_mask valid_mask operation_enabled_mask')
     elif stream in ('wrench-left', 'wrench-right'):
-        period = .01
+        period = settings['wrench_period_s']
         state = _fields(value, 'frame_id finite publication_fresh')
     elif stream == 'diagnostics':
         state = _fields(value, 'valid execution code')
@@ -107,12 +111,14 @@ def sampling_policy(stream, value):
 
 
 class DiagnosticSampler:
-    def __init__(self):
+    def __init__(self, settings=None, input_settings=None):
+        self.settings = settings or load_parameters()['diagnostics']
+        self.input_settings = input_settings or load_parameters()['pico']
         self.last = {}
         self.sampled_out = 0
 
     def keep(self, stream, value, now):
-        period, key, state = sampling_policy(stream, value)
+        period, key, state = sampling_policy(stream, value, self.settings, self.input_settings)
         if not period:return True
         previous = self.last.get(key)
         if previous and previous[1] == state and 0 <= now-previous[0] < period:
@@ -284,12 +290,15 @@ class WrenchObserver:
 
 
 class DiagnosticWriter:
-    def __init__(self, path, *, capacity=8192, chunk_bytes=128*1024*1024, sampling=True,
-                 health_filename='diagnostics-health.json', echo=False, full_streams=()):
+    def __init__(self, path, *, capacity=None, chunk_bytes=None, sampling=True,
+                 health_filename='diagnostics-health.json', echo=False, full_streams=(), settings=None, input_settings=None):
+        settings = settings or load_parameters()['diagnostics']
+        capacity = settings['queue_capacity'] if capacity is None else capacity
+        chunk_bytes = settings['chunk_bytes'] if chunk_bytes is None else chunk_bytes
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
         self.queue=queue.Queue(capacity);self.chunk_bytes=chunk_bytes
         self.stop=threading.Event();self.error='';self.dropped=0;self.written=0
-        self.sampler=DiagnosticSampler() if sampling else None
+        self.sampler=DiagnosticSampler(settings, input_settings) if sampling else None
         self.full_streams=frozenset(full_streams)
         self.received_by_stream={};self.dropped_by_stream={};self.written_by_stream={}
         self.repeats=RepeatedLogs(self._emit_log)

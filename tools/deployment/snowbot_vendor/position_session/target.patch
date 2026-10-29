@@ -427,3 +427,22 @@
      obs.source_stamp_ns=applied.source_stamp_ns;obs.expires_at_ns=applied.expires_at_ns;obs.trajectory_phase=applied.trajectory_phase;
      obs.reference_position=applied.reference_position;obs.reference_speed=applied.reference_speed;obs.reference_acceleration=applied.reference_acceleration;
      obs.output_position=applied.q;obs.output_speed=applied.v;obs.output_torque=applied.torque;obs.output_kp=applied.kp;obs.output_kd=applied.kd;
+
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -150,4 +150,15 @@
+     trajectory_max_jerk_=declare_parameter<double>("trajectory_max_jerk",162.,reference_descriptor);
+     if(!std::isfinite(trajectory_max_velocity_)||!std::isfinite(trajectory_max_acceleration_)||!std::isfinite(trajectory_max_jerk_)||trajectory_max_velocity_<=0||trajectory_max_acceleration_<=0||trajectory_max_jerk_<=0)throw std::invalid_argument("trajectory dynamic limits");
++    if(position_reference_mode_==2){
++      position_session::TargetTuning tuning;
++      tuning.trend_min_interval_s=declare_parameter<double>("target_trend_min_interval_s",tuning.trend_min_interval_s,reference_descriptor);
++      tuning.trend_max_interval_s=declare_parameter<double>("target_trend_max_interval_s",tuning.trend_max_interval_s,reference_descriptor);
++      tuning.trend_filter_s=declare_parameter<double>("target_trend_filter_s",tuning.trend_filter_s,reference_descriptor);
++      tuning.trend_velocity_fraction=declare_parameter<double>("target_trend_velocity_fraction",tuning.trend_velocity_fraction,reference_descriptor);
++      tuning.takeover_velocity_tolerance_rad_s=declare_parameter<double>("target_takeover_velocity_tolerance_rad_s",tuning.takeover_velocity_tolerance_rad_s,reference_descriptor);
++      tuning.takeover_position_tolerance_rad=declare_parameter<double>("target_takeover_position_tolerance_rad",tuning.takeover_position_tolerance_rad,reference_descriptor);
++      tuning.held_takeover_position_tolerance_rad=declare_parameter<double>("target_held_takeover_position_tolerance_rad",tuning.held_takeover_position_tolerance_rad,reference_descriptor);
++      position_trajectory_.configure(tuning);
++    }
+     if(position_reference_mode_)position_admission_=std::make_unique<position_session::TrajectoryAdmission<snowbot_ctl_msgs::msg::PositionSessionServo>>(position_trajectory_,[this](auto& result){
+         if(result.packet->meta.reference_mode!=position_reference_mode_)throw std::invalid_argument("reference_mode_conflict");

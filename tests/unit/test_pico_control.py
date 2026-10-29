@@ -219,12 +219,13 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def production(*names):
         # Execute production methods with ROS/service/process boundaries inert.
         import ast
+        from snowbot_hardware.parameters import parameters_for
         from types import SimpleNamespace as S
         path=Path(find_spec('snowbot_teleop.node').origin)
         node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoNode')
         methods=[n for n in node.body if getattr(n,'name','') in names]
         module=ast.Module(body=[ast.ClassDef(name='Actual',bases=[],keywords=[],body=methods,decorator_list=[])],type_ignores=[])
-        namespace=dict(json=json,math=__import__('math'),time=S(monotonic=lambda:0.),
+        namespace=dict(json=json,math=__import__('math'),time=S(monotonic=lambda:0.),parameters_for=parameters_for,
             temporary_capture_refusal=temporary_capture_refusal,
             seconds=lambda stamp:stamp.sec+stamp.nanosec*1e-9,
             joints_at_rest=lambda joints,names,tol:all(abs(v)<=tol for n,v in zip(joints.name,joints.velocity) if n in names),
@@ -734,10 +735,32 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
-    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None):
+    @staticmethod
+    def move_module():
+        # Execute the production method with inert ROS messages and services.
+        import ast,types,math
+        from types import SimpleNamespace as S
+        from bindu_execution.interpolation import Curve,State
+        from snowbot_hardware.parameters import parameters_for
+        module=types.ModuleType('offline_prepare_move')
+        module.__dict__.update(json=json,math=math,time=__import__('time'),uuid=__import__('uuid'),Curve=Curve,State=State,
+            parameters_for=parameters_for,Lease=S(Request=lambda **kw:S(**kw)),
+            SubmitMotion=S(Request=lambda **kw:S(**kw)),MotionCommand=S,JointTrajectoryPoint=S,Duration=S,
+            stamp=lambda value:S(sec=int(value),nanosec=round((value-int(value))*1e9)),
+            seconds=lambda value:value.sec+value.nanosec/1e9,
+            joints_at_rest=lambda joints,names,tol:all(abs(v)<=tol for n,v in zip(joints.name,joints.velocity) if n in names))
+        path=Path(find_spec('snowbot_teleop.node').origin);tree=ast.parse(path.read_text())
+        node=next(x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='PicoNode')
+        helpers=[x for x in tree.body if getattr(x,'name','') in ('prepare_reference','prepare_start_tolerance')]
+        method=next(x for x in node.body if getattr(x,'name','')=='move')
+        exec(compile(ast.Module(body=helpers+[method],type_ignores=[]),str(path),'exec'),module.__dict__)
+        module.PicoNode=S(move=module.move)
+        return module
+
+    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=1.,position_contract=True):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock,patch
-        from snowbot_teleop import node as module
+        module=self.move_module()
         from bindu_contracts.profile import Profile
         from snowbot_teleop.control import PicoIntent
         from tests.support.paths import BINDU_ROOT as ROOT
@@ -750,19 +773,36 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         def reading():
             state.feedback_stamp=module.stamp(clock[0] if fresh else 0.)
             return state,{joint:target-error}
-        async def pause():clock[0]+=1.
+        async def pause():clock[0]+=tick_period
         async def wait(value):return value
         renewal=S(done=lambda:True,result=lambda:lease)
         node=S(current=Mock(),feedback=lambda:S(stopped=True),prepare_position_tolerance=.035,
             leases=S(call_async=lambda r:lease if r.operation=='acquire' else renewal),wait=wait,instance_id='test',groups=('left_arm',),
-            state=state,reading=reading,names=(joint,),position_contract=True,profile=profile,
+            state=state,reading=reading,names=(joint,),position_contract=position_contract,profile=profile,
             event=Mock(),simulation=False,now=lambda:clock[0],runtime_mode='real',pause=pause,
-            submit=S(call_async=lambda r:S(accepted=True,revision=0)),
+            runtime_parameters=parameters,submit=S(call_async=Mock(return_value=S(accepted=True,revision=0))),
             release_lease=AsyncMock(side_effect=stop_error))
         with patch.object(module,'time',S(monotonic=lambda:clock[0])):
             try:await module.PicoNode.move(node,PicoIntent(1,operation),{joint:target},2.)
             finally:node.release_lease.assert_awaited_once()
         return node
+
+    async def test_configured_prepare_period_and_ttl_reach_real_motion_messages(self):
+        from snowbot_hardware.parameters import load_parameters
+        parameters=load_parameters()
+        parameters['pico'].update(prepare_command_period_s=.02,prepare_command_ttl_s=.3)
+        node=await self.arrival(parameters=parameters,tick_period=.005)
+        commands=[call.args[0].command for call in node.submit.call_async.call_args_list]
+        self.assertGreater(len(commands),70)
+        self.assertTrue(all(command.valid_for==.3 for command in commands))
+        stamps=[command.stamp.sec+command.stamp.nanosec/1e9 for command in commands]
+        gaps=[b-a for a,b in zip(stamps,stamps[1:])]
+        self.assertGreaterEqual(min(gaps),.019999)
+        self.assertLessEqual(max(gaps),.025001)
+        parameters['pico']['reference_lookahead_s']=1.2
+        node=await self.arrival(parameters=parameters,position_contract=False)
+        point=node.submit.call_async.call_args_list[0].args[0].command.points[0]
+        self.assertEqual((point.time_from_start.sec,point.time_from_start.nanosec),(1,200000000))
 
     async def test_prepare_arrival_tolerance_is_separate_from_other_moves_and_stop(self):
         node=await self.arrival()

@@ -5,6 +5,7 @@ import math
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
 from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
+from .parameters import load_parameters, parameters_for
 
 
 def sampled_nominal_reference(state, names, epoch, now, max_age, *, wait_until=None, steady_now=None):
@@ -122,6 +123,7 @@ class PositionSessionDevices:
         if node.runtime_mode != 'real':
             raise ValueError('SNOWBOT_VENDOR_REQUIRES_REAL_MODE')
         self.node, self.grippers = node, None
+        self.runtime_parameters=load_parameters(node.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         node.device_backend = 'snowbot_vendor'
         node.declare_parameter('command_enabled', False, descriptor=ParameterDescriptor(read_only=True))
         node.declare_parameter('vendor_namespace', '/', descriptor=ParameterDescriptor(read_only=True))
@@ -155,7 +157,7 @@ class PositionSessionDevices:
         self.io.trajectory_reference = bool(self.health.reference_mode)
         self.io.target_stream = self.health.reference_mode == 2
         self.io.supports_rigid_reference = self.health.reference_mode == 2
-        self.io.stop_confirmation_window = .1 if self.health.reference_mode == 2 else 0.
+        self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s'] if self.health.reference_mode == 2 else 0.
         self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
         self.io.stop_requires_arrival = self.health.reference_mode != 2
         self.startup_hold_state = ('waiting' if self.io.command_enabled and
@@ -200,7 +202,7 @@ class PositionSessionDevices:
             # A may inspect a completed PAUSE before acquiring its own lease.
             # This remains a read-only snapshot, not an ownership grant.
             from snowbot_hardware.session import SLOTS
-            if any(not math.isfinite(obs.speed[SLOTS.index(n)]) or abs(obs.speed[SLOTS.index(n)])>.005
+            if any(not math.isfinite(obs.speed[SLOTS.index(n)]) or abs(obs.speed[SLOTS.index(n)])>parameters_for(self,'execution')['held_reference_velocity_tolerance_rad_s']
                    for n in CONTROL_NAMES):
                 raise RuntimeError('SNOWBOT_HELD_REFERENCE_NOT_STATIONARY')
             reply.success, reply.message = True, json.dumps(dict(
@@ -444,13 +446,13 @@ class PositionSessionDevices:
         if state == 'waiting':
             try:
                 lease, epoch = engine.acquire('snowbot_startup_hold',
-                    ('waist', 'left_arm', 'right_arm'), 2., now)
+                    ('waist', 'left_arm', 'right_arm'), parameters_for(self,'execution')['startup_lease_ttl_s'], now)
             except (Rejected, RuntimeError):
                 return  # Discovery/fresh measured feedback may not yet be ready.
             self.startup_hold_state = 'takeover'
             names = tuple(n for group in ('waist', 'left_arm', 'right_arm') for n in GROUPS[group])
             motion = Motion('startup_hold_'+lease, lease, epoch, self.io.profile.digest,
-                'startup_hold', '', 'joint_target', '', now, .2, names=names,
+                'startup_hold', '', 'joint_target', '', now, parameters_for(self,'execution')['startup_hold_ttl_s'], names=names,
                 positions=tuple(engine.feedback.positions[n] for n in names),
                 schema_version=2, resource_groups=('waist', 'left_arm', 'right_arm'), runtime_mode='real')
             try:

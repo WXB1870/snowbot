@@ -14,6 +14,12 @@ ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
 COMPONENTS=('observation','takeover','timing','session','receipt','target')
 NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp','rigid_prediction.hpp')
 
+def contract_ttl_ms(name):
+    text=(ASSETS/'position_session_contract.h').read_text()
+    match=re.search(r'constexpr int64_t '+re.escape(name)+r'=(\d+);',text)
+    if not match:raise ValueError('POSITION_CONTRACT_TTL_MISSING:'+name)
+    return int(match.group(1))//1_000_000
+
 def baseline_source():
     root=Path(__file__).resolve().parents[2]
     identity=json.loads((root/'vendor/snowbot/baseline.json').read_text())
@@ -200,7 +206,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 invalid_response_policy='refuse_initialization',velocity_command_scaled=False,
                 physical_units_verified=False,helper_sha256=digest(ASSETS/'position_waist_feedback.h') if feedback_units else None),
             stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only and not with_impedance,
-            session_wire_version=3,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=300,target_pause_ttl_ms=2000,
+            session_wire_version=3,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=contract_ttl_ms('maximum_target_ttl'),target_pause_ttl_ms=contract_ttl_ms('maximum_target_pause_ttl'),
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
             native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,

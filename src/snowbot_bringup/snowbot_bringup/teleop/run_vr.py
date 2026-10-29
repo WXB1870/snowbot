@@ -37,6 +37,8 @@ def commands(args):
         '--output', str(args.output/'web'), '--startup-timeout', str(args.startup_timeout)]
     if args.diagnostics:
         display += ['--trace-file', str(args.output/'diagnostics.jsonl')]
+    if args.deployment.get('parameters_config'):
+        display += ['--parameters-config', args.deployment['parameters_config']]
     if getattr(args,'record_inputs',False):
         display += ['--record-inputs']
     result=[control,display]
@@ -257,6 +259,7 @@ def run_session(args, manifest):
             if args.diagnostics:
                 from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
                 process_logs=DiagnosticWriter(args.output/'process-output.jsonl',
+                    settings=args.runtime_parameters['diagnostics'],input_settings=args.runtime_parameters['pico'],
                     health_filename='process-log-health.json',echo=True)
             names=('physics','control','display') if len(resolved_commands)==3 else ('control','display')
             for name,command in zip(names,resolved_commands):
@@ -369,6 +372,9 @@ def parse_args(argv=None):
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
     args.launch_package=json.loads(Path(args.config).read_text()).get('robot_package','bindu_runtime')
     d=args.deployment
+    from snowbot_hardware.parameters import default_path, load_parameters
+    d['parameters_config']=d.get('parameters_config') or str(default_path())
+    args.runtime_parameters=load_parameters(d['parameters_config'])
     if args.enable_commands:
         if (d.get('runtime_mode') != 'real' or d.get('device_backend') != 'snowbot_vendor' or
                 d.get('execution_mode', 'position') != 'position' or args.physics or args.declare_load):

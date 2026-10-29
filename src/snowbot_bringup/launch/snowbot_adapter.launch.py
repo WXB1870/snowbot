@@ -38,7 +38,7 @@ def assemble(context):
     if mode == 'real':
         parameters.update(command_enabled=enabled == 'true', vendor_namespace=value('vendor_namespace', '/snowbot'),
             position_protocol=value('position_protocol', 'legacy_guard'), execution_mode=value('execution_mode', 'position'),
-            **{key: value(key) for key in ('arm_receiver_node', 'servo_receiver_node', 'mid_receiver_node', 'gripper_config')})
+            **{key: value(key) for key in ('arm_receiver_node', 'servo_receiver_node', 'mid_receiver_node', 'gripper_config', 'parameters_config')})
         if value('position_protocol') == 'session_v3':
             parameters.update(target_stream_limits({key:value(key,str(default))
                 for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}))
@@ -55,7 +55,7 @@ def generate_launch_description():
     defaults = {'runtime_mode': '', 'simulation': '', 'device_backend': '', 'profile': '',
                 'namespace': 'bindu_snowbot', 'run_id': uuid.uuid4().hex, 'vendor_namespace': '/snowbot',
                 'arm_receiver_node': '', 'servo_receiver_node': '', 'mid_receiver_node': '',
-                'command_enabled': 'false', 'recording_mode': 'off', 'output': '/tmp/bindu-runs', 'gripper_config': '', 'position_protocol': 'legacy_guard', 'execution_mode': 'position'}
+                'command_enabled': 'false', 'recording_mode': 'off', 'output': '/tmp/bindu-runs', 'parameters_config': '', 'gripper_config': '', 'position_protocol': 'legacy_guard', 'execution_mode': 'position'}
     defaults.update({key:str(value) for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]
                              + [OpaqueFunction(function=assemble)])

@@ -78,8 +78,10 @@ def project_state(data, now, identity):
             for field in ('input_age_s','raw_input_age_s','feedback_age_s'):
                 if type(pico.get(field)) in (float,int):
                     pico[field] += elapsed
+            input_limit = pico.get('input_max_age_s', .25)
             pico['input_fresh'] = bool(pico.get('input_fresh') and
-                type(pico.get('input_age_s')) in (float,int) and 0 <= pico['input_age_s'] <= .25)
+                type(input_limit) in (float,int) and math.isfinite(input_limit) and input_limit > 0 and
+                type(pico.get('input_age_s')) in (float,int) and 0 <= pico['input_age_s'] <= input_limit)
             if not pico['input_fresh']:
                 for hand in pico.get('controller_states', {}).values():
                     hand.update(valid=False,squeeze=None,trigger=None,buttons=None,
@@ -117,10 +119,12 @@ def tool_display_pose(data, left_pose, mount, now):
 
 class EventLog:
     """Small local diagnostic stream, independent of control and training recording."""
-    def __init__(self, path=None):
+    def __init__(self, path=None, parameters=None):
+        from snowbot_hardware.parameters import load_parameters
+        self.parameters=parameters or load_parameters()
         self.path, self.events, self.previous, self.sequence = Path(path) if path else None, [], None, 0
         from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
-        self.writer=DiagnosticWriter(self.path,health_filename='web-log-health.json') if self.path else None
+        self.writer=DiagnosticWriter(self.path,health_filename='web-log-health.json',settings=self.parameters['diagnostics'],input_settings=self.parameters['pico']) if self.path else None
 
     def close(self):
         if self.writer:self.writer.close()
@@ -159,19 +163,22 @@ class EventLog:
                             add('input', ('左' if side=='left' else '右')+' '+keys[i//2]+
                                 (' 按下' if i%2==0 else ' 松开')+(f' ×{a-b}' if a-b>1 else ''))
                 a,b = current.get('squeeze'),before.get('squeeze')
-                if a is not None and b is not None and (a>.7) != (b>.7):
-                    add('input', ('左' if side=='left' else '右')+'侧握 '+('握紧' if a>.7 else '释放'))
+                threshold=self.parameters['pico']['grip_press_threshold']
+                if a is not None and b is not None and (a>threshold) != (b>threshold):
+                    add('input', ('左' if side=='left' else '右')+'侧握 '+('握紧' if a>threshold else '释放'))
         self.previous = (connection, key, hands)
 
 
-def _server(read_state, trace_file, output, port, ready, views, identity, stop, model_status):
+def _server(read_state, trace_file, output, port, ready, views, identity, stop, model_status, parameters=None):
     asyncio.set_event_loop(asyncio.new_event_loop())
     import tornado.web
     import tornado.ioloop
     from meshcat.servers.zmqserver import (ZMQWebSocketBridge, WebSocketHandler,
         StaticFileHandlerNoCache, VIEWER_ROOT, VIEWER_HTML)
     html = package_share('snowbot_bringup')/'web/snowbot.html'
-    log = EventLog(Path(output)/'events.jsonl' if trace_file else None)
+    from snowbot_hardware.parameters import load_parameters
+    parameters = parameters or load_parameters()
+    log = EventLog(Path(output)/'events.jsonl' if trace_file else None,parameters)
     latest = {}
     client_status = {}
     http_servers = []
@@ -201,7 +208,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
                 return super().get(*args, **kwargs)
             self.set_header('Content-Type','text/html; charset=utf-8')
             self.set_header('Cache-Control','no-store')
-            self.write(html.read_text())
+            self.write(html.read_text().replace('__SNOWBOT_DISPLAY_CONFIG__',json.dumps(parameters['display'])))
 
         def check_origin(self, origin):
             from urllib.parse import urlsplit
@@ -357,8 +364,9 @@ def serve(args, read_state=None, stop=None):
     failures = []
     def server_worker():
         try:
+            from snowbot_hardware.parameters import load_parameters
             _server(read_state, args.trace_file, str(args.output), args.port,
-                    ready, views, data, stop, model_status)
+                    ready, views, data, stop, model_status, load_parameters(getattr(args,'parameters_config',None)))
         except Exception as exc:
             failures.append(exc)
             stop.set()

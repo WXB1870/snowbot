@@ -25,6 +25,9 @@ def position_devices(node, profile):
         SynchronizedJointProgress(coupled,{n:profile.speed(n) for driver in coupled for n in driver.positions})
         node.position_progress_synchronized=True
     node.declare_parameter('command_enabled', False, descriptor=ParameterDescriptor(read_only=True))
+    from .parameters import load_parameters
+    node.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True))
+    node.runtime_parameters=load_parameters(node.get_parameter('parameters_config').value or None)
     node.commands_enabled = node.get_parameter('command_enabled').value
     io_type = SnowbotIO
     options = {}
@@ -61,7 +64,8 @@ class SimulatedGrippers(SnowbotGrippers):
         self.acks, self.holds, self.hold_mask = [0, 0], [0., 0.], 0
         self.pending = {}
         self.core = GripperController(node.profile, cfg, self.send, self.health,
-                                      node.now, self.arms_idle, enabled=node.commands_enabled)
+                                      node.now, self.arms_idle, enabled=node.commands_enabled,
+                                      runtime_parameters=getattr(node,'runtime_parameters',None))
         for side in SIDES:
             if node.physics_transport is None:
                 node.devices[GROUPS[side]].max_speed = cfg['grippers'][side]['max_speed']

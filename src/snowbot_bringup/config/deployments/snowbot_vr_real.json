@@ -8,6 +8,7 @@
     "device_backend": "snowbot_vendor",
     "command_enabled": false,
     "position_protocol": "session_v3",
+    "parameters_config": "package://snowbot_bringup/config/robots/snowbot/runtime_parameters.json",
     "target_stream_brake_lead_s": 0.12,
     "execution_mode": "position",
     "gripper_config": "package://snowbot_bringup/config/robots/snowbot/snowbot_grippers_real.json",

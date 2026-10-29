@@ -2,6 +2,7 @@
 import math
 import secrets
 import time
+from .parameters import load_parameters
 
 SIDES = ('left', 'right')
 GROUPS = {'left': 'left_tool_axis', 'right': 'right_tool_axis'}
@@ -68,7 +69,10 @@ def validate_config(config, profile):
 
 class GripperController:
     def __init__(self, profile, config, send, health, now, arms_idle, *, enabled=False, steady=time.monotonic,
-                 require_driver_ack=True):
+                 require_driver_ack=True, runtime_parameters=None):
+        self.runtime_parameters = runtime_parameters or load_parameters()
+        self.settings = self.runtime_parameters['gripper']
+        self.input_settings = self.runtime_parameters['pico']
         self.profile, self.cfg = profile, validate_config(config, profile)
         self.send, self.health, self.now, self.steady, self.arms_idle = send, health, now, steady, arms_idle
         self.enabled = enabled
@@ -190,7 +194,7 @@ class GripperController:
             if operation != 'renew':
                 raise RuntimeError('GRIPPER_LEASE_OPERATION')
             self.require_write()
-        self.expires, self.steady_expires = self.now()+2., self.steady()+2.
+        self.expires, self.steady_expires = self.now()+self.settings['lease_ttl_s'], self.steady()+self.settings['lease_ttl_s']
 
     def command(self, operation, side, lease_id, epoch, sequence, stamp, valid_for, *, position=0.,
                 load_state='unknown', external_support=False):
@@ -355,7 +359,7 @@ class GripperController:
 
     def tick(self):
         now, steady = self.now(), self.steady()
-        if self.last_tick is not None and (now < self.last_tick or now-self.last_tick > .1):
+        if self.last_tick is not None and (now < self.last_tick or now-self.last_tick > self.settings['max_tick_gap_s']):
             if self.busy:
                 self.stop('GRIPPER_CLOCK_OR_TICK_GAP', revoke=True)
         self.last_tick = now
@@ -368,8 +372,8 @@ class GripperController:
                 self.require_left_closed()
             except RuntimeError as exc:
                 self.stop(str(exc), revoke=True)
-        if self.lease_id and self.vr and now-self.authorized_at > .25:
-            if any(s not in self.vr or not 0 <= now-self.vr[s][3] <= .25 for s in SIDES if GROUPS[s] in self.groups):
+        if self.lease_id and self.vr and now-self.authorized_at > self.settings['vr_input_max_age_s']:
+            if any(s not in self.vr or not 0 <= now-self.vr[s][3] <= self.settings['vr_input_max_age_s'] for s in SIDES if GROUPS[s] in self.groups):
                 self.stop('GRIPPER_VR_INPUT_TIMEOUT', revoke=True)
         for side, c in self.channels.items():
             if c['state'] not in ('MOVING', 'STOPPING'):
@@ -439,13 +443,13 @@ class GripperController:
         counts=tuple(frame.button_edges[6:8])
         if (not frame.source_id or any(type(x) is not int or x<0 for x in counts) or
                 counts[0]-counts[1] not in (0,1) or
-                frame.trigger>.7 and counts[0]-counts[1]!=1 or
-                frame.trigger<.3 and counts[0]-counts[1]!=0 or
+                frame.trigger>self.input_settings['trigger_press_threshold'] and counts[0]-counts[1]!=1 or
+                frame.trigger<self.input_settings['trigger_release_threshold'] and counts[0]-counts[1]!=0 or
                 previous and frame.stamp<previous[3]):
             if self.lease_id:self.stop('GRIPPER_VR_COUNTER_INVALID',revoke=True)
             self.trigger_frames={}
             return
-        armed=bool(previous and previous[2]) or frame.trigger<.3
+        armed=bool(previous and previous[2]) or frame.trigger<self.input_settings['trigger_release_threshold']
         self.trigger_frames[frame.side]=(frame.seq,counts,armed,frame.stamp)
         # A held trigger on startup/reconnect is not a new command.
         if previous is None:return
@@ -458,11 +462,11 @@ class GripperController:
         if self.lease_id:
             # Refresh only with both fresh sides from this coordinator source.
             if all(side in self.trigger_frames and
-                   0<=self.now()-self.trigger_frames[side][3]<=.25 for side in SIDES):
-                self.expires,self.steady_expires=self.now()+.25,self.steady()+.25
+                   0<=self.now()-self.trigger_frames[side][3]<=self.settings['vr_input_max_age_s'] for side in SIDES):
+                self.expires,self.steady_expires=self.now()+self.settings['vr_input_max_age_s'],self.steady()+self.settings['vr_input_max_age_s']
         if not armed or not any(delta):return
         if not all(side in self.trigger_frames and
-                   0<=self.now()-self.trigger_frames[side][3]<=.25 for side in SIDES):return
+                   0<=self.now()-self.trigger_frames[side][3]<=self.settings['vr_input_max_age_s'] for side in SIDES):return
         try:
             if not self.lease_id:
                 self.lease('acquire',frame.source_id,tuple(GROUPS.values()))
@@ -470,7 +474,7 @@ class GripperController:
                              frame.stamp,self.cfg['command_ttl'])
             self.command('open' if delta[0] else 'close',frame.side,self.lease_id,self.epoch,
                          self.sequence+1,frame.stamp,self.cfg['command_ttl'])
-            self.expires,self.steady_expires=self.now()+.25,self.steady()+.25
+            self.expires,self.steady_expires=self.now()+self.settings['vr_input_max_age_s'],self.steady()+self.settings['vr_input_max_age_s']
         except RuntimeError as exc:
             self.last_request_rejection = dict(stamp=self.now(),side=frame.side,
                 source_id=frame.source_id,seq=frame.seq,code=str(exc))
@@ -492,7 +496,7 @@ class GripperController:
         if GROUPS[frame.side] not in self.groups:
             return
         if (not self.authorized or not frame.valid or frame.stop or frame.init or frame.mapping != 'pico_snowbot_v1'
-                or frame.buttons or frame.virtual_grip or frame.grip >= .3
+                or frame.buttons or frame.virtual_grip or frame.grip >= self.input_settings['grip_release_threshold']
                 or not 0 <= self.now()-frame.stamp <= self.cfg['feedback_max_age']
                 or len(frame.button_edges) != 8):
             if self.authorized:
@@ -509,9 +513,9 @@ class GripperController:
                 or not all(math.isfinite(x) and 0 <= x <= 1 for x in (frame.trigger, frame.grip))):
             self.stop('GRIPPER_VR_COUNTER_INVALID', revoke=True)
             return
-        armed = bool(previous and previous[2]) or frame.trigger < .3
+        armed = bool(previous and previous[2]) or frame.trigger < self.input_settings['trigger_release_threshold']
         self.vr[frame.side] = (frame.seq, counts, armed, frame.stamp)
-        self.expires, self.steady_expires = self.now()+.25, self.steady()+.25
+        self.expires, self.steady_expires = self.now()+self.settings['vr_input_max_age_s'], self.steady()+self.settings['vr_input_max_age_s']
         if previous:
             delta = tuple(a-b for a, b in zip(counts, previous[1]))
             if any(x < 0 or x > 1 for x in delta) or all(delta):
@@ -530,7 +534,7 @@ class GripperController:
             lease_active=bool(self.lease_id), owner=self.owner, epoch=self.epoch,
             control_sequence=max(0, self.sequence), loading_authorized=self.authorized and not self.direct_authorized,
             trigger_armed=bool(self.authorized and side in self.vr and self.vr[side][2]
-                and 0 <= self.now()-self.vr[side][3] <= .25),
+                and 0 <= self.now()-self.vr[side][3] <= self.settings['vr_input_max_age_s']),
             measured_position=self.q.get(JOINTS[side], 0.), measured_velocity=self.v.get(JOINTS[side], 0.),
             measured_current=self.current.get(side, 0.), target_position=c['target'],
             position_reached=c['state'] == 'SUCCEEDED', grasp_state='unknown',

@@ -8,6 +8,7 @@ import math
 import os
 import time
 import uuid
+from snowbot_hardware.parameters import parameters_for
 from copy import copy
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
@@ -73,6 +74,8 @@ class PicoNode(RuntimeNode):
             from bindu_runtime.teleop_base import TeleopBase
             self.base = TeleopBase(self, self.get_parameter('base_config').value,
                                   self.get_parameter('command_enabled').value)
+        from snowbot_hardware.parameters import load_parameters
+        self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         self.cfg=json.loads(Path(self.get_parameter('pico_config').value).read_text())
         self.position_contract = self.cfg.get('schema_version') == 2
         if self.cfg.get('schema_version') not in (1,2):
@@ -155,8 +158,9 @@ class PicoNode(RuntimeNode):
                                  dual_modes=self.position_contract,direct_grippers=self.position_contract,
                                  initial_mode=self.cfg.get('initial_teleop_mode','independent_arms'),
                                  pose_jump_translation_m=self.cfg.get('pose_jump_translation_m',.35),
-                                 pose_jump_rotation_rad=self.cfg.get('pose_jump_rotation_rad',1.2))
-        validation_cfg=dict(self.tool_cfg,worker_timeout=30.)
+                                 pose_jump_rotation_rad=self.cfg.get('pose_jump_rotation_rad',1.2),
+                                 settings=self.runtime_parameters['pico'])
+        validation_cfg=dict(self.tool_cfg,worker_timeout=self.runtime_parameters['pico']['validation_worker_timeout_s'])
         recovery=self.cfg.get('prepare_collision_recovery')
         if recovery is not None:
             if not self.simulation or not self.position_contract:
@@ -398,7 +402,8 @@ class PicoNode(RuntimeNode):
         self.control.tick(self.now())
         if not self.control.pending or self.control.pending.token!=intent.token:raise Superseded('PICO_OPERATION_SUPERSEDED')
 
-    async def wait(self,future,timeout=2.):
+    async def wait(self,future,timeout=None):
+        if timeout is None: timeout=parameters_for(self,'pico')['rpc_timeout_s']
         end=time.monotonic()+timeout
         while not future.done():
             if time.monotonic()>end:raise RuntimeError('PICO_RPC_TIMEOUT')
@@ -411,7 +416,7 @@ class PicoNode(RuntimeNode):
         self.confirmed_stop=None
         self.stop_diagnostic=None
         self.stop_request=dict(instance_id=instance_id,epoch=epoch,lease_active=lease_active,
-            requested=self.now(),deadline=time.monotonic()+6.,failed=False)
+            requested=self.now(),deadline=time.monotonic()+getattr(getattr(self,'profile',None),'stop_timeout',5.)+parameters_for(self,'pico')['stop_wait_margin_s'],failed=False)
         self.handoff_complete=False
         return self.stop_request
 
@@ -452,7 +457,7 @@ class PicoNode(RuntimeNode):
                 if not (reply.ok and reply.lease_id==lease.lease_id and
                         reply.epoch==lease.epoch and reply.profile_hash==self.profile.digest):
                     self.stop_unconfirmed(request,'LEASE_RENEW_REJECTED:'+reply.code)
-                next_renewal=time.monotonic()+.3
+                next_renewal=time.monotonic()+parameters_for(self,'pico')['stop_renewal_period_s']
             s=self.state
             if s and (s.stop_failures or 'EMERGENCY_STOP' in s.code or s.code=='STOP_FEEDBACK_TIMEOUT'):
                 self.stop_unconfirmed(request,'EXECUTION_STOP_FAILED')
@@ -588,7 +593,7 @@ class PicoNode(RuntimeNode):
                     not 0<=self.now()-data['stamp']<=self.tool_cfg['feedback_max_age'] or
                     set(data['positions'])!=set(self.names) or
                     any(type(data[k]) is not int or data[k]<=0 for k in ('boot_id','session','sequence')) or
-                    not joints_at_rest(s.joints,self.names,.005)):
+                    not joints_at_rest(s.joints,self.names,parameters_for(self,'execution')['held_reference_velocity_tolerance_rad_s'])):
                 raise ValueError('identity')
             if previous is not None and any(data[k]!=previous[k] for k in
                     ('instance_id','profile_hash','boot_id','session','sequence','positions')):
@@ -602,7 +607,7 @@ class PicoNode(RuntimeNode):
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
-        arrival_tolerance=self.prepare_position_tolerance if intent.operation=='prepare' else .002
+        arrival_tolerance=self.prepare_position_tolerance if intent.operation=='prepare' else self.profile.feedback_tolerances['joint_position']
         execution_instance_id=self.state.instance_id
         future=self.leases.call_async(Lease.Request(operation='acquire',
             owner=self.instance_id,resources=list(self.groups)))
@@ -633,7 +638,7 @@ class PicoNode(RuntimeNode):
                 from bindu_kinematics.bimanual_worker import prepare_limit_reference
                 held=await self.prepare_hold_reference(intent,lease=lease,previous=recovery)
                 s,q=self.reading()
-                if not joints_at_rest(s.joints,self.names,.005):
+                if not joints_at_rest(s.joints,self.names,parameters_for(self,'execution')['prepare_start_velocity_tolerance_rad_s']):
                     raise RuntimeError('PREPARE_REQUIRES_STATIONARY_START')
                 changed=max(self.names,key=lambda n:abs(q[n]-self.prepare_limit_start[n]))
                 tolerance=prepare_start_tolerance(self.profile,self.cfg)
@@ -676,7 +681,7 @@ class PicoNode(RuntimeNode):
                 duration_s=duration,position_tolerance_rad=arrival_tolerance,
                 fit_duration=fit_duration,simulated_actuator=self.simulation)))
             started=self.now();command_id=self.instance_id+'_'+str(intent.token)+'_'+uuid.uuid4().hex[:8]
-            deadline=time.monotonic()+duration+6.;renew_at=0.;next_submit=0.
+            deadline=time.monotonic()+duration+parameters_for(self,'pico')['motion_completion_grace_s'];renew_at=0.;next_submit=0.
             renewal=None;renewal_started=0.
             while time.monotonic()<deadline:
                 self.current(intent)
@@ -692,7 +697,7 @@ class PicoNode(RuntimeNode):
                         raise RuntimeError('PREPARE_LIMIT_RECOVERY_MOVED_OUTWARD:'+n)
                     recovery_progress[n]=(side,min(best,measured[n]) if side>0 else max(best,measured[n]))
                 if renewal is not None:
-                    if time.monotonic()-renewal_started>=2.:
+                    if time.monotonic()-renewal_started>=parameters_for(self,'pico')['renewal_timeout_s']:
                         raise RuntimeError('PICO_LEASE_RENEW_TIMEOUT')
                     if renewal.done():
                         reply=renewal.result()
@@ -700,7 +705,7 @@ class PicoNode(RuntimeNode):
                         if (reply.lease_id!=lease.lease_id or reply.epoch!=lease.epoch or
                                 reply.profile_hash!=self.profile.digest):
                             raise RuntimeError('PICO_EXECUTION_AUTHORITY_CHANGED')
-                        renewal=None;renew_at=time.monotonic()+.2
+                        renewal=None;renew_at=time.monotonic()+parameters_for(self,'pico')['renewal_period_s']
                 if (now>=started+duration and seconds(state.feedback_stamp)>=started+duration and
                         all(abs(measured[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
                         (recovery is None or all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1]
@@ -709,7 +714,7 @@ class PicoNode(RuntimeNode):
                             self.profile.limits[n][0]+self.profile.feedback_tolerances['joint_position']<=measured[n]<=
                             self.profile.limits[n][1]-self.profile.feedback_tolerances['joint_position']
                             for n in recovery_progress)) and
-                        joints_at_rest(state.joints,self.names,.005)):
+                        joints_at_rest(state.joints,self.names,parameters_for(self,'execution')['motion_arrival_velocity_tolerance_rad_s'])):
                     self.event('PICO_ACTUATOR_ARRIVED',json.dumps(dict(operation=intent.operation,
                         position_tolerance_rad=arrival_tolerance,
                         error_rad={n:float(v-measured[n]) for n,v in zip(self.names,end)},
@@ -722,19 +727,21 @@ class PicoNode(RuntimeNode):
                         lease_id=lease.lease_id,epoch=lease.epoch))
                     renewal_started=time.monotonic()
                 if now>=next_submit:
-                    sample=curve.sample(min(duration,max(0.,now-started)+(0. if self.position_contract else .12)))
+                    lookahead=parameters_for(self,'pico')['reference_lookahead_s']
+                    lookahead_sec,lookahead_ns=divmod(round(lookahead*1e9),1000000000)
+                    sample=curve.sample(min(duration,max(0.,now-started)+(0. if self.position_contract else lookahead)))
                     point=JointTrajectoryPoint(positions=list(sample.q),velocities=list(sample.v),
-                        accelerations=list(sample.a),time_from_start=Duration(nanosec=120000000))
+                        accelerations=list(sample.a),time_from_start=Duration(sec=lookahead_sec,nanosec=lookahead_ns))
                     msg=MotionCommand(schema_version=2,runtime_mode=self.runtime_mode,command_id=command_id+'_'+str(segment),
                         task_id='pico_'+intent.operation,expected_revision=revision,profile_hash=self.profile.digest,lease_id=lease.lease_id,
                         epoch=lease.epoch,mode='joint_target' if self.position_contract else 'joint_reference_segment',resource_groups=list(self.groups),
-                        stamp=stamp(now),valid_for=.25,joint_names=list(self.names),
+                        stamp=stamp(now),valid_for=parameters_for(self,'pico')['prepare_command_ttl_s'],joint_names=list(self.names),
                         positions=list(sample.q) if self.position_contract else [],points=[] if self.position_contract else [point])
                     self.current(intent)
                     response=await self.wait(self.submit.call_async(SubmitMotion.Request(command=msg)))
                     if not response.accepted:raise RuntimeError(response.code)
                     revision=response.revision;segment+=1
-                    next_submit=now+.04
+                    next_submit=now+parameters_for(self,'pico')['prepare_command_period_s']
                 await self.pause()
             state,measured=self.reading()
             errors={n:float(v-measured[n]) for n,v in zip(self.names,end)}
@@ -745,8 +752,8 @@ class PicoNode(RuntimeNode):
                 target=dict(zip(self.names,end)),measured={n:measured[n] for n in self.names},
                 reference=dict(zip(state.reference.name,state.reference.position)),
                 error_rad=errors,worst_joint=worst,position_tolerance_rad=arrival_tolerance,
-                measured_at_rest=joints_at_rest(state.joints,self.names,.005),
-                velocity_tolerance_rad_s=.005,arrival_confirmed=False)))
+                measured_at_rest=joints_at_rest(state.joints,self.names,parameters_for(self,'execution')['motion_arrival_velocity_tolerance_rad_s']),
+                velocity_tolerance_rad_s=parameters_for(self,'execution')['motion_arrival_velocity_tolerance_rad_s'],arrival_confirmed=False)))
             raise RuntimeError(f'PICO_ACTUATOR_FEEDBACK_TIMEOUT:{worst}:error_rad={errors[worst]:.6f}')
         finally:
             await self.release_lease()
@@ -759,7 +766,7 @@ class PicoNode(RuntimeNode):
         self.prepare_limit_start=None
         if targets is None and self.prepare_positions is None:
             raise RuntimeError('PICO_PREPARE_PRESET_REQUIRED')
-        if not joints_at_rest(s.joints,self.names,.005 if self.position_contract else 1e-6):raise RuntimeError('PREPARE_REQUIRES_STATIONARY_START')
+        if not joints_at_rest(s.joints,self.names,parameters_for(self,'execution')['prepare_start_velocity_tolerance_rad_s'] if self.position_contract else 1e-6):raise RuntimeError('PREPARE_REQUIRES_STATIONARY_START')
         gripper_move=targets is not None
         start_tolerance=prepare_start_tolerance(self.profile,self.cfg)
         target=targets if gripper_move else {n:self.prepare_positions[n]
@@ -819,7 +826,7 @@ class PicoNode(RuntimeNode):
         kind,token,value=self.validation_result
         if token!=intent.token or kind!='result':raise RuntimeError(str(value))
         current_state,current=self.reading()
-        if not joints_at_rest(current_state.joints,self.names,.005 if self.position_contract else 1e-6):
+        if not joints_at_rest(current_state.joints,self.names,parameters_for(self,'execution')['prepare_start_velocity_tolerance_rad_s'] if self.position_contract else 1e-6):
             raise RuntimeError('PREPARE_REQUIRES_STATIONARY_START')
         checked_names=self.names if gripper_move else names
         changed=max(checked_names,key=lambda n:abs(current[n]-q[n]))
@@ -1042,7 +1049,7 @@ class PicoNode(RuntimeNode):
                     self.current(intent)
             elif intent.operation=='manual_grippers':
                 if (not self.position_ops or self.control.phase!='gripper_control' or
-                        not self.control.frames or any(f.grip>=.3 for f in self.control.frames)):
+                        not self.control.frames or any(f.grip>=parameters_for(self,'pico')['grip_release_threshold'] for f in self.control.frames)):
                     raise RuntimeError('GRIPPER_REQUIRES_STOP_AND_RELEASED_SQUEEZE')
                 await self.position_ops.move_grippers(intent,direct=True)
             elif intent.operation=='grippers':

@@ -79,16 +79,19 @@ def observe(args, publish=None, stop=None):
     if args.trace_file:
         args.trace_file.parent.mkdir(parents=True, exist_ok=True)
     from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter, VR_INPUT_STREAMS
+    from snowbot_hardware.parameters import load_parameters
+    parameters = load_parameters(getattr(args, 'parameters_config', None))
     real_vendor = args.runtime_mode == 'real' and args.device_backend == 'snowbot_vendor'
-    # PDO prehistory is capped at 100 Hz; the monitor still checks every frame.
+    # Prehistory uses the startup sampling limit; the monitor checks every frame.
     diagnostics=DiagnosticWriter(args.trace_file,
+        settings=parameters['diagnostics'], input_settings=parameters['pico'],
         full_streams=VR_INPUT_STREAMS if getattr(args,'record_inputs',False) else ()) if args.trace_file else None
     pdo_observer = None
     ros_logs = None
     wrench_observer = None
     if real_vendor:
         from snowbot_bringup.teleop.snowbot_pdo import PdoObserver
-        pdo_observer = PdoObserver(node, diagnostics)
+        pdo_observer = PdoObserver(node, diagnostics, settings=parameters['diagnostics'])
         if diagnostics:
             from snowbot_bringup.teleop.snowbot_diagnostics import RosLogObserver, WrenchObserver
             ros_logs = RosLogObserver(node, diagnostics, args.run_id)
@@ -389,6 +392,7 @@ def main():
     parser.add_argument('--trace-file', type=Path, help='Sampled async diagnostics: 10 Hz states/inputs, 1 Hz health, plus transitions and command events')
     parser.add_argument('--record-inputs',action='store_true',
                         help='Retain every observed raw/projected VR message and timing report; requires --trace-file')
+    parser.add_argument('--parameters-config', type=Path, help='Shared Snowbot runtime parameters')
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--namespace', default='bindu_vr_sim')
     parser.add_argument('--robot-config', default=str(package_share("snowbot_bringup")/'config/robots/snowbot/robot_snowbot.json'))

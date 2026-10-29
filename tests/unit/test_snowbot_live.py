@@ -418,6 +418,7 @@ class SimulationEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory)
             recipe=json.loads(fallback.read_text())
+            recipe['arguments'].pop('parameters_config',None)
             recipe['arguments'].update(host='0.0.0.0',cert_file='server.crt',key_file='server.key')
             for name in ('server.crt','server.key'):
                 (base/name).touch()
@@ -425,12 +426,16 @@ class SimulationEntryTests(unittest.TestCase):
             config.write_text(json.dumps(recipe))
             with patch.dict(entry.os.environ,{'BINDU_VR_CONFIG':str(config)}):
                 args=entry.parse_args([])
-                control,_=entry.commands(args)
+                control,display=entry.commands(args)
                 self.assertEqual(args.config,config)
                 self.assertEqual(args.host,'0.0.0.0')
                 self.assertEqual(Path(args.cert_file),(base/'server.crt').resolve())
                 self.assertEqual(Path(args.key_file),(base/'server.key').resolve())
                 self.assertIn('host:=0.0.0.0',control)
+                selected=str(package_share('snowbot_bringup')/'config/robots/snowbot/runtime_parameters.json')
+                self.assertEqual(args.deployment['parameters_config'],selected)
+                self.assertIn('parameters_config:='+selected,control)
+                self.assertEqual(display[display.index('--parameters-config')+1],selected)
                 explicit=entry.parse_args(['--config',str(fallback)])
                 self.assertEqual(explicit.host,'127.0.0.1')
                 self.assertEqual(explicit.cert_file,'')
