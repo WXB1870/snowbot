@@ -1020,6 +1020,27 @@ class StateTests(unittest.TestCase):
         self.assertEqual((r.core.phase,r.core.reason),('standby','RECOVERED_TO_STANDBY'))
         self.assertIsNone(r.core.stop_failure)
 
+    def test_device_fault_b_rechecks_then_returns_only_to_standby(self):
+        r=Rig('unknown',guided=True,dual=True)
+        mode=r.core.teleop_mode
+        r.core.lock('SNOWBOT_PDO_STALE',r.now);r.core.drain();r.complete()
+        self.assertEqual(r.core.recovery_required,'device_inspection')
+        first=r.core.first_fault.copy()
+        r.click(1,1)
+        self.assertEqual(r.core.pending.operation,'recover')
+        self.assertEqual(r.core.phase,'locked')
+        r.complete(False,'PICO_RECOVERY_STOP_NOT_CONFIRMED')
+        self.assertEqual(r.core.phase,'locked')
+        self.assertEqual(r.core.recovery_required,'device_inspection')
+        self.assertEqual(r.core.first_fault,first)
+        r.click(1,1)
+        self.assertEqual(r.core.pending.operation,'recover')
+        r.complete(True)
+        self.assertEqual((r.core.phase,r.core.reason),('standby','RECOVERED_TO_STANDBY'))
+        self.assertFalse(r.core.fault_active);self.assertFalse(r.core.recovery_required)
+        self.assertEqual(r.core.teleop_mode,mode)
+        self.assertIsNone(r.core.pending);self.assertEqual(r.step(),[])
+
     def test_stop_failure_and_late_request_never_replace_first_fault(self):
         r=Rig();r.core.phase='following'
         r.core.lock('PICO_FEEDBACK_UNAVAILABLE',r.now)

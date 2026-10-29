@@ -64,6 +64,7 @@ assert.equal(modelViewState({valid:true,server_time:10},true,true,10),'waiting')
         self.assertIsNotNone(node, 'Node is required for this browser logic check')
         html=(package_share('snowbot_bringup')/'web/snowbot.html').read_text()
         js=html[html.index('function operatorState('):html.index('for(const [side,name,keys]')]
+        js+=html[html.index('function controlMode('):html.index('function renderControlMode(')]
         code="const phases={};const explainReason=r=>r;\n"+js+"""
 const assert=require('node:assert/strict');
 const p={phase:'locked',reason:'PICO_STOP_UNCONFIRMED',stop_confirmed:false};
@@ -79,11 +80,24 @@ const stream={...p,stop_confirmed:true,fault_active:true,first_fault:{code:'COMM
 assert.equal(operatorState(stream,true,true,true,true).reason,'COMMAND_TIMEOUT');
 assert.equal(operatorState(stream,true,true,true,true).key,'B');
 const device={...stream,recovery_required:'device_inspection'};
-assert.equal(operatorState(device,true,true,true,true).key,'');
-assert.match(operatorState(device,true,true,true,true).next,/现场排查/);
+assert.equal(operatorState(device,true,true,true,true).key,'B');
+assert.match(operatorState(device,true,true,true,true).next,/排除.*异常.*按 B.*复核/);
+assert.match(operatorState(device,true,true,true,true).next,/仅恢复待命/);
 const failed={...stream,stop_failure:{code:'STOP_UNCONFIRMED'}};
-assert.equal(operatorState(failed,true,true,true,true).key,'');
+assert.equal(operatorState(failed,true,true,true,true).key,'B');
+assert.match(operatorState(failed,true,true,true,true).next,/未确认时保持锁定/);
 assert.equal(operatorState(failed,true,true,true,true).reason,'COMMAND_TIMEOUT');
+for(const mode of ['independent_arms','bimanual_tool']){
+  for(const fault of [device,failed,{...device,stop_confirmed:false},
+      {...failed,stop_confirmed:false},{...stream,stop_confirmed:false,reason:'RECOVERY_BLOCKED:PICO_RECOVERY_STOP_NOT_CONFIRMED'}]){
+    const view=controlMode({...fault,teleop_mode:mode},true);
+    assert.equal(view.key,true);assert.match(view.hint,/按 B.*复核/);
+    assert.equal(controlMode({...fault,teleop_mode:mode},false).key,false);
+  }
+  const waiting=controlMode({phase:'locked',teleop_mode:mode,stop_confirmed:false},true);
+  assert.equal(waiting.key,false);
+  assert.match(waiting.hint,/等待停稳确认/);
+}
 """
         result=subprocess.run([node,'-e',code],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)

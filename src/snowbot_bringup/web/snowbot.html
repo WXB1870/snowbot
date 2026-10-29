@@ -467,8 +467,8 @@ function operatorState(p,online,fresh,pcFresh,tracked,execution={}){
   if(execution.execution==='FAILED'&&execution.task_id==='startup_hold')return {...result,status:'启动接管失败',reason:'关节反馈正常；启动接管未完成，停止尚未确认。',next:'保持双侧握松开，排查控制会话接纳与停止确认；当前不能进入准备。',key:'',tone:'bad'};
   if(p.phase==='locked'){
     if(p.reason?.startsWith('RECOVERY_BLOCKED:'))return {...result,status:'恢复条件未满足',reason:explainReason(p.reason.slice(17)),next:'松开握把和扳机，排除提示原因后按 B 重新复核。',key:'B',tone:'bad'};
-    if(p.recovery_required)return {...result,status:'设备／采样异常 · 锁定',next:'保持松握；排除异常后按 B 复核反馈与停止状态。',key:'B',tone:'bad'};
-    if(p.stop_failure)return {...result,status:'停止未确认',next:'松开握把和扳机，按 B 复核当前停稳状态；未确认时会说明原因。',key:'B',tone:'bad'};
+    if(p.recovery_required)return {...result,status:'设备／采样异常 · 锁定',next:'排除设备／采样异常，松开握把和扳机后按 B 复核；通过后仅恢复待命。',key:'B',tone:'bad'};
+    if(p.stop_failure)return {...result,status:'停止未确认',next:'松开握把和扳机后按 B 复核停止状态；未确认时保持锁定并显示原因。',key:'B',tone:'bad'};
     return {...result,status:p.stop_confirmed===true?'已停止（锁定）':'停止未确认',next:p.stop_confirmed===true?'排除原因，松开双侧握后按 B 恢复待命。':'保持双侧握松开，等待停稳确认。',key:p.stop_confirmed===true?'B':'',tone:'bad'};
   }
   if(p.idle_input_lost&&['standby','tool_standby','load_check'].includes(p.phase))return {...result,status:'等待手柄输入',reason:'手柄输入暂停，机器人已停稳，当前操作步骤已保留。',next:'保持松握，等待输入恢复后继续当前步骤。'};
@@ -660,7 +660,11 @@ function controlMode(p,fresh){
     hint:'松开双侧握，停稳后切换到'+(independent?'扫雪耦合':'普通双臂'),key:true,pending:''};
   if(p.phase==='selecting_mode'){
     result.pending=target?'正在切换 → '+target:'正在检查模式切换';result.hint='保持双侧握松开，等待切换确认';result.key=false;
-  }else if(p.phase==='locked'){result.hint=p.recovery_required?'设备／采样异常，需现场排查后重新建立会话':p.stop_failure?'停止请求失败，查看停止协议':p.stop_confirmed===true?'恢复待命；恢复后再切换模式':'等待停稳确认后恢复待命';result.key=p.stop_confirmed===true&&!p.recovery_required&&!p.stop_failure;}
+  }else if(p.phase==='locked'){
+    const blocked=p.reason?.startsWith('RECOVERY_BLOCKED:');
+    result.hint=p.recovery_required?'排除设备／采样异常，松开握把和扳机后按 B 复核；通过后仅恢复待命':p.stop_failure||blocked?'松开握把和扳机后按 B 复核停止状态；未通过时保持锁定':p.stop_confirmed===true?'松开握把和扳机后按 B 恢复待命；恢复后再切换模式':'等待停稳确认后恢复待命';
+    result.key=Boolean(p.recovery_required||p.stop_failure||blocked||p.stop_confirmed===true);
+  }
   else if(['loading','load_check'].includes(p.phase))result.hint='确认当前装卸步骤';
   else if(p.dual_modes!==true){result.hint='按右侧提示继续当前操作';result.key=false;}
   else if(p.tool_grasp_confirmation==='operator'&&independent&&result.key){result.hint='人工确认铲已握稳后，松握按 B 切扫雪；不依赖夹爪标定';}
