@@ -448,18 +448,24 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
                     delay=packet_time(pair)-origin-(time.monotonic()-start)
                     if delay>0:pump(delay)
                     source.update(raw_pair=pair,raw_index=index,raw_held=False)
-                    pump(.2);source['raw_held']=True;phase('following')
+                    pump(.2);source['raw_held']=True
+                    engaged=(any(d['grip']>.7 for d in pair) if ordinary else all(d['grip']>.7 for d in pair))
+                    if engaged:phase('following')
                     recording_gaps.append(dict(before_input_seq=pair[0]['seq'],gap_s=gap,
-                        action='confirmed stop and explicit fresh clutch; no interpolated hand frames'))
+                        action='confirmed stop and explicit fresh clutch' if engaged else
+                               'recorded hand release preserved; no re-clutch',
+                        interpolated_hand_frames=0))
                     start=time.monotonic()-(packet_time(pair)-origin)
                     source['raw_replay']=True
                     continue
                 delay=packet_time(pair)-origin-(time.monotonic()-start)
                 if delay>0:pump(delay)
-                assert views[-1]['phase']=='following',views[-1]
+                allowed=('following','tool_standby','standby','engaging') if replay.get('review_gaps') else ('following',)
+                assert views[-1]['phase'] in allowed,views[-1]
                 source.update(raw_pair=pair,raw_index=index)
             pump(.04)
-            assert views[-1]['phase']=='following',views[-1]
+            allowed=('following','tool_standby','standby','engaging') if replay.get('review_gaps') else ('following',)
+            assert views[-1]['phase'] in allowed,views[-1]
             assert len(accepted)>initial_count+5
             motion=list(states[motion_start:]);source.update(raw_held=False,raw_replay=False)
             phase('tool_standby')
