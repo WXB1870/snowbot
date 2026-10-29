@@ -201,6 +201,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         physics_cfg['live']['headless']=False
         physics_path=out/'physics-gui.json';physics_path.write_text(json.dumps(physics_cfg))
         recipe['arguments']['physics_config']=str(physics_path)
+        recipe['arguments']['device_backend']='external_simulation'
     path=out/(mode+'.json');path.write_text(json.dumps(recipe))
     log=(out/(mode+'.log')).open('w')
     command=['ros2','launch','bindu_runtime','teleop_only.launch.py','config:='+str(path)]
