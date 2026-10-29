@@ -27,7 +27,7 @@ Snowbot是基于[Bindu通用机器人框架](https://github.com/WXB1870/bindu)�
 | 厂商底层 | 提供准备器使用的通用原生执行代码 | 原始vendor基线、专属补丁、公共头及生成工具；构建servo、中层、topic上层与消息 |
 | 部署与使用 | 框架开发构建，以及供应用复用的`x86_real`上层构建工具 | 锁定Bindu、组织完整构建、现场配置、日常启动与设备问题记录 |
 
-`snowbot_hardware`负责厂商协议、会话和反馈适配；真正的servo程序来自vendor源码与补丁。Snowbot运行工具安装在`snowbot_bringup.teleop`与`snowbot_bringup.simulation`，页面安装在该包的`share/web/`。Bindu中的旧Snowbot导入、工具命令和launch保留兼容转发，正式应用实现维护在本仓四个包中。生成树、现场配置、证书私钥及构建产物保持本地。
+`snowbot_hardware`负责厂商协议、会话和反馈适配；真正的servo程序来自vendor源码与补丁。Snowbot运行工具安装在`snowbot_bringup.teleop`与`snowbot_bringup.simulation`，页面安装在该包的`share/web/`。运行检查、场景构造及VR物理启动器均随包安装，运行时不再导入源码目录的`tools`；源码环境变量仅用于已有工具选择、来源对比及记录。位置配方由`snowbot_teleop.tool_node`接入夹爪规则，`snowbot_hardware.physics_position`维护型号物理IO。Bindu中的旧Snowbot导入、工具命令和launch保留兼容转发，正式应用实现维护在本仓四个包中。生成树、现场配置、证书私钥及构建产物保持本地。
 
 ## 当前工程结构
 

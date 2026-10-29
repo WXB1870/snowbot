@@ -107,8 +107,8 @@ def main():
         from builtin_interfaces.msg import Time
         from bindu_contracts.profile import Profile
         from bindu_hardware.drivers.physics import PhysicsPositionState
-        from tools.simulation.run_shovel_physics import build_scene,quaternion,pose
-        from tools.simulation.shovel_physics import MeasuredJointVelocity
+        from snowbot_bringup.simulation.scene import build_scene,quaternion,pose
+        from snowbot_bringup.simulation.physics import MeasuredJointVelocity
         from isaacsim.core.utils.types import ArticulationAction
         from isaacsim.core.simulation_manager import SimulationManager
         from pxr import UsdGeom,UsdPhysics

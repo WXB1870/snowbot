@@ -6,6 +6,7 @@ import copy
 import importlib.util
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -459,9 +460,31 @@ class SimulationEntryTests(unittest.TestCase):
         args=entry.parse_args(['--physics','--run-id','physics_test'])
         physics,control,display=entry.commands(args)
         self.assertIn('--vr',physics)
+        self.assertEqual(Path(physics[1]),package_share('snowbot_bringup')/'launch/run_vr_physics.sh')
         self.assertIn('device_backend:=external_simulation',control)
         self.assertEqual(display[display.index('--device-backend')+1],'external_simulation')
         self.assertIn('--dashboard',display)
+
+    def test_runtime_helpers_import_without_repository_tools_or_source_selection(self):
+        code='''
+import importlib.abc,sys,tempfile
+from pathlib import Path
+class BlockTools(importlib.abc.MetaPathFinder):
+    def find_spec(self,fullname,path=None,target=None):
+        if fullname.split('.')[0]=='tools':raise ModuleNotFoundError('source tools import: '+fullname)
+sys.meta_path.insert(0,BlockTools())
+from snowbot_bringup.teleop import runtime_check
+from snowbot_bringup.simulation import scene,physics,kinematic_scene
+assert runtime_check.ROOT is None
+with tempfile.TemporaryDirectory() as directory:
+    share=Path(directory);selected=share/'installed.json';selected.write_text('{}')
+    runtime_check.check_installed_configs([selected],share)
+'''
+        env=dict(os.environ,PYTHONPATH=os.pathsep.join(sys.path))
+        env.pop('BINDU_FRAMEWORK_SOURCE',None);env.pop('BINDU_APPLICATION_SOURCE',None)
+        with tempfile.TemporaryDirectory() as directory:
+            result=subprocess.run([sys.executable,'-c',code],cwd=directory,env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     def test_real_recipe_cannot_enable_isaac(self):
         root=ROOT

@@ -8,4 +8,4 @@ data = [("share/"+NAME+"/"+str(parent), [str(p) for p in assets if p.parent == p
 setup(name=NAME, version="0.1.0", packages=find_packages(),
       data_files=[("share/ament_index/resource_index/packages", ["resource/"+NAME]), ("share/"+NAME, ["package.xml"]), *data],
       install_requires=["setuptools"], zip_safe=False,
-      entry_points={"console_scripts": ['pico_control = snowbot_teleop.node:main']})
+      entry_points={"console_scripts": ['pico_control = snowbot_teleop.node:main', 'teleop_tool = snowbot_teleop.tool_node:main']})

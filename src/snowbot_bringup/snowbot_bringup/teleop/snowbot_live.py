@@ -286,7 +286,7 @@ def display(args, app):
     from pxr import Gf, UsdGeom, UsdLux
     from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.core.utils.viewports import set_camera_view
-    from tools.simulation.isaac_kinematic_scene import build_scene
+    from snowbot_bringup.simulation.kinematic_scene import build_scene
     import omni.ui as ui
     data = json.loads(args.state_file.read_text())
     model = Path(data['display_urdf'])

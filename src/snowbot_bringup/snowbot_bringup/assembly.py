@@ -144,7 +144,7 @@ def assemble(context):
         nodes.append(Node(package='bindu_runtime', executable='teleop', namespace=ns,
                           output='screen', parameters=[{**common, **model,
                               'teleop_config': str(robot.single_arm[side]), 'require_mode_selection': True,'require_recording':recorder_enabled}]))
-    nodes.append(Node(package='bindu_runtime', executable='teleop_tool', namespace=ns,
+    nodes.append(Node(package='snowbot_teleop' if position_contract else 'bindu_runtime', executable='teleop_tool', namespace=ns,
                       output='screen', parameters=[{**common, **model, **tool,'require_recording':recorder_enabled,
                           'simulation_demo':pico_demo,
                           'position_contract':position_contract,

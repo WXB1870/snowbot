@@ -43,7 +43,7 @@ def commands(args):
         display += ['--record-inputs']
     result=[control,display]
     if args.deployment.get('device_backend')=='external_simulation':
-        result.insert(0,['bash',str(ROOT/'tools/run_shovel_physics.sh'),'--vr',
+        result.insert(0,['bash',str(package_share('snowbot_bringup')/'launch/run_vr_physics.sh'),'--vr',
                          '--session',str(args.output/'physics-session.json'),'--output',str(args.output/'physics')])
     return tuple(result)
 
@@ -81,9 +81,9 @@ def check(args):
             pico.get('simulation_only') is not simulation or
             grippers.get('simulation_only',False) is not simulation):
         raise ValueError('部署、工具、PICO 和夹爪配置范围不匹配')
-    from tools.deployment.runtime_check import check_runtime
+    from snowbot_bringup.teleop.runtime_check import check_runtime
     report = check_runtime(args.deployment, robot)
-    from tools.deployment.snowbot_teleop import ensure_stopped
+    from snowbot_bringup.teleop.runtime_check import ensure_stopped
     ensure_stopped(args.deployment)
     for host, port in ((args.host, args.vr_port), ('127.0.0.1', args.port)):
         with socket.socket() as probe:
@@ -97,7 +97,7 @@ def check(args):
         requested = getattr(args, 'check_robot', False)
         writing = not args.check and args.deployment.get('command_enabled') == 'true'
         if requested or writing:
-            from tools.deployment.runtime_check import check_robot_interface
+            from snowbot_bringup.teleop.runtime_check import check_robot_interface
             online = check_robot_interface(args.deployment, args.robot_check_timeout)
             report['online'] = online
             print(json.dumps(online, ensure_ascii=False))
@@ -423,7 +423,6 @@ def parse_args(argv=None):
 
 
 if __name__ == '__main__':
-    sys.path.insert(0, str(ROOT))
     try:
         raise SystemExit(run(parse_args()))
     except (OSError, ImportError, RuntimeError, ValueError) as exc:
