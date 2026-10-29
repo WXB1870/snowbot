@@ -160,7 +160,7 @@ from bindu_contracts.resources import package_share
 site=Path(sys.argv[1]);_,args=load_deployment(site,package_share('bindu_runtime'))
 robot=RobotSetup.load(args['robot_config'])
 paths={site,Path(args['robot_config']),robot.profile_path,robot.urdf,robot.display_urdf,robot.tool_config}
-paths.update(Path(args[k]) for k in ('pico_config','gripper_config','base_config','cert_file') if args.get(k))
+paths.update(Path(args[k]) for k in ('pico_config','gripper_config','base_config','parameters_config','cert_file') if args.get(k))
 print(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p is not None}))
 """
     configs = json.loads(subprocess.check_output(['bash', '--noprofile', '--norc', '-ec',
