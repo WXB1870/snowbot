@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>扫雪动作回放</title>
+<style>
+:root{color-scheme:light;--ink:#19313c;--muted:#70808a;--paper:#f4f6f4;--line:#dce4e4;--accent:#e7683c;--teal:#187b78}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:880px;margin:7vh auto;padding:0 26px 36px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:32px}
+.eyebrow{color:var(--teal);font-size:11px;letter-spacing:.18em;font-weight:700}h1{font-size:34px;letter-spacing:-.04em;line-height:1.3;margin:9px 0 8px;font-weight:650}.subtitle{margin:0;color:var(--muted);font-size:14px}
+.badge{flex:none;font-size:12px;background:#e4eeea;color:#397367;border:1px solid #d2e2dc;border-radius:20px;padding:7px 12px;margin-top:8px}
+.card{background:white;border:1px solid var(--line);border-radius:22px;padding:28px;box-shadow:0 8px 30px #203c4405}
+.label{font-size:12px;color:var(--muted);margin-bottom:13px}.clips{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+button{font:inherit;cursor:pointer;transition:background .16s,border-color .16s,transform .16s}button:active{transform:translateY(1px)}button:focus-visible{outline:3px solid #e7683c66;outline-offset:3px}
+.clip{display:flex;align-items:center;gap:17px;text-align:left;padding:22px 19px;background:#fff;border:1px solid var(--line);border-radius:15px;color:var(--ink)}
+.clip[aria-pressed=true]{border:2px solid var(--teal);padding:21px 18px;background:#f2f8f6}.icon{width:44px;height:44px;display:grid;place-items:center;border-radius:12px;background:#e9f0ee;color:var(--teal);flex:none}.icon svg{width:28px;height:28px}
+.clip strong{display:block;font-size:17px;font-weight:600}.clip small{display:block;color:var(--muted);font-size:12px;margin-top:3px}
+.speedrow{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:30px 0}.speedrow .label{margin:0}.speeds{display:flex;gap:6px;background:var(--paper);padding:5px;border-radius:12px}
+.speed{min-width:56px;border:0;background:transparent;padding:8px 10px;border-radius:8px;color:#6b7a81;font-variant-numeric:tabular-nums}
+.speed[aria-pressed=true]{color:var(--ink);background:white;box-shadow:0 2px 7px #1b393419;font-weight:650}
+.buttons{display:flex;gap:12px}.play{flex:1;border:0;background:var(--accent);color:white;border-radius:12px;padding:15px 20px;font-weight:600}.play:hover{background:#d95b30}
+.close{background:white;border:1px solid var(--line);color:var(--ink);border-radius:12px;padding:15px 22px}.close:hover{background:var(--paper)}button:disabled{opacity:.5;cursor:wait}
+.note{color:var(--muted);font-size:12px;margin:14px 0 0}.status{margin-top:18px;display:flex;gap:14px;align-items:flex-start;background:#eaf0ed;border:1px solid #dce5df;border-radius:16px;padding:19px 22px}
+.dot{width:9px;height:9px;background:var(--teal);border-radius:50%;margin-top:8px;flex:none}.status[data-phase=error] .dot,.status[data-phase=failed] .dot{background:#c44935}.status[data-phase=starting] .dot,.status[data-phase=playing] .dot{animation:pulse 1.2s infinite}
+.statusbody{flex:1;min-width:0}.status strong{display:block;font-size:14px;font-weight:600}.detail{color:var(--muted);font-size:12px;margin-top:4px}.track{height:3px;background:#d3dfd8;border-radius:3px;margin-top:12px;overflow:hidden}.bar{height:100%;background:var(--teal);width:0;transition:width 1s}
+footer{display:flex;justify-content:space-between;gap:15px;color:#82918f;font-size:11px;margin-top:23px}footer span:last-child{text-align:right}@keyframes pulse{50%{opacity:.25}}
+@media(max-width:600px){main{margin:32px auto;padding:0 18px}header{margin-bottom:22px}h1{font-size:28px}.card{padding:20px}.clips{grid-template-columns:1fr}.clip{padding:17px}.clip[aria-pressed=true]{padding:16px}.speedrow{align-items:flex-start;flex-direction:column;gap:10px}.speeds{width:100%}.speed{flex:1;min-width:0}.buttons{flex-wrap:wrap}.close{padding:14px 18px}footer{flex-direction:column;gap:3px}footer span:last-child{text-align:left}}
+</style>
+</head>
+<body><main>
+<header><div><div class="eyebrow">SNOWBOT / MOTION REPLAY</div><h1>扫雪动作回放</h1><p class="subtitle">选一个动作，在仿真窗口里看一遍。</p></div><span class="badge">116 · 仿真</span></header>
+<section class="card" aria-label="播放设置">
+<div class="label">选择动作</div>
+<div class="clips">
+<button class="clip" data-clip="sweep" aria-pressed="false"><span class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 4 13 20m-5 0 9 5-4 5-9-5zM23 12h6m-5 5h5M3 14h7"/></svg></span><span><strong>扫雪</strong><small>平面扫动 · 抬铲与转向</small></span></button>
+<button class="clip" data-clip="flip" aria-pressed="true"><span class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m21 4-8 17m-5-1 10 4-3 6-10-4zM23 12a8 8 0 0 1 3 13m-4-1 4 1 1-4"/></svg></span><span><strong>翻铲</strong><small>抬高 12 cm · 翻转 60° · 回正</small></span></button>
+</div>
+<div class="speedrow"><div class="label">演示速度 <span style="color:#9ba7aa">／相对原始轨迹</span></div><div class="speeds" role="group" aria-label="演示速度">
+<button class="speed" data-speed="1" aria-pressed="false">1×</button><button class="speed" data-speed="2" aria-pressed="false">2×</button><button class="speed" data-speed="4" aria-pressed="false">4×</button><button class="speed" data-speed="8" aria-pressed="true">8×</button>
+</div></div>
+<div class="buttons"><button class="play" id="play">▶&nbsp; 播放翻铲</button><button class="close" id="close">关闭仿真窗口</button></div>
+<p class="note">每次播放会替换上一轮回放。结束后保留画面，方便查看。</p>
+</section>
+<section class="status" id="status" data-phase="connecting" aria-live="polite"><span class="dot"></span><div class="statusbody"><strong id="message">正在连接 116…</strong><div class="detail" id="detail">画面显示在 116 的仿真窗口里。</div><div class="track"><div class="bar" id="bar"></div></div></div></section>
+<footer><span>空铲仿真回放 · 不录视频</span><span>8× 为刚才选定的演示节奏</span></footer>
+</main>
+<script>
+let clip='flip',speed=8,busy=false,last={phase:'connecting'};const $=id=>document.getElementById(id),names={flip:'翻铲',sweep:'扫雪'};
+function selection(){
+ document.querySelectorAll('[data-clip]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.clip===clip)));
+ document.querySelectorAll('[data-speed]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.speed)===speed)));
+ $('play').textContent='▶  '+((last.window_open&&last.clip===clip)?'重新播放':'播放')+names[clip];
+}
+document.querySelectorAll('[data-clip]').forEach(b=>b.addEventListener('click',()=>{clip=b.dataset.clip;selection()}));
+document.querySelectorAll('[data-speed]').forEach(b=>b.addEventListener('click',()=>{speed=Number(b.dataset.speed);selection()}));
+function render(s){
+ last=s;busy=!!s.busy;$('status').dataset.phase=s.phase;
+ const labels={connecting:'正在连接 116…',idle:'准备好了',starting:'正在启动仿真窗口…',playing:'正在播放',completed:'播放完成',closing:'正在关闭仿真窗口…',failed:'本轮回放未完成',error:'连接暂时中断'};
+ $('message').textContent=labels[s.phase]||'正在更新状态…';
+ $('detail').textContent=s.error||(s.clip?names[s.clip]+' · '+s.speed+'×'+(s.phase==='completed'?(s.window_open?' · 窗口已保留':' · 窗口已关闭'):(s.duration_s?' · 轨迹时长约 '+Number(s.duration_s).toFixed(1)+' 秒':' · 请稍候')):'选择动作和速度，点击播放。');
+ $('bar').style.width=(s.duration_s?Math.min(100,100*(s.progress_s||0)/s.duration_s):0)+'%';
+ $('play').disabled=busy;$('close').disabled=busy;selection();
+}
+async function action(action){
+ if(busy)return;busy=true;$('play').disabled=true;$('close').disabled=true;
+ try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,clip,speed})});const s=await r.json();if(!r.ok)throw Error(s.error||'操作未成功');render(s)}
+ catch(e){render({phase:'error',error:e.message})}
+}
+$('play').addEventListener('click',()=>action('play'));$('close').addEventListener('click',()=>action('close'));
+async function poll(){try{const r=await fetch('/api/state');if(!r.ok)throw Error();render(await r.json())}catch(e){render({phase:'error',error:'操作台连接中断，请刷新页面重试。'})}finally{setTimeout(poll,1000)}}
+poll();selection();
+</script></body></html>
