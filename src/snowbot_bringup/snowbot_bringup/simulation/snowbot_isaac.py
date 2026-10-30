@@ -113,7 +113,7 @@ def main():
         from bindu_contracts.profile import Profile
         from bindu_hardware.drivers.physics import PhysicsPositionState
         from tools.simulation.run_shovel_physics import build_scene,quaternion,pose
-        from tools.simulation.shovel_physics import MeasuredJointVelocity
+        from tools.simulation.shovel_physics import MeasuredJointVelocity,ActuatorResponse
         from isaacsim.core.utils.types import ArticulationAction
         from isaacsim.core.simulation_manager import SimulationManager
         from pxr import UsdGeom,UsdPhysics
@@ -132,6 +132,7 @@ def main():
         source['profile_velocity_limits_rad_s']=apply_velocity_limits(body,profile)
         initial=pico['device_initial_positions_rad']
         if set(initial)!=set(names):raise ValueError('PHYSICS_INITIAL_LAYOUT')
+        response=ActuatorResponse(cfg.get('joint_response',{}),initial)
         q0=np.array([initial[n] for n in names])
         body.set_joint_positions(q0);body.set_joint_velocities(np.zeros(len(names)))
         body.apply_action(ArticulationAction(joint_positions=q0))
@@ -179,6 +180,7 @@ def main():
         source.update(run_id=session['run_id'],profile_hash=profile.digest,simulator_id=simulator_id,
                       physics_dt_s=dt,feedback_hz=live['feedback_hz'],grasp_model='contact',
                       initial_positions_rad=initial,servo_and_friction_parameters='unvalidated simulation assumptions')
+        source['joint_response']=cfg.get('joint_response',{})
         (args.output/'source.json').write_text(json.dumps(source,indent=2))
         gc.collect();gc.freeze();gc.disable()
         def stamp(t):
@@ -219,8 +221,9 @@ def main():
                     for group in profile.groups:core.hold(group,measured)
                 stage=time.monotonic()
                 drive,drive_velocity=core.reference_step(dt)
-                body.apply_action(ArticulationAction(joint_positions=np.array([drive[n] for n in names]),
-                    joint_velocities=np.array([drive_velocity[n] for n in names])))
+                actuator,actuator_velocity=response.step(dt,drive,drive_velocity)
+                body.apply_action(ArticulationAction(joint_positions=np.array([actuator[n] for n in names]),
+                    joint_velocities=np.array([actuator_velocity[n] for n in names])))
                 timings['apply_action_s']=time.monotonic()-stage
                 before=SimulationManager.get_num_physics_steps()
                 stage=time.monotonic()
@@ -271,7 +274,7 @@ def main():
                     for key,value in timings.items():timing_max[key]=max(timing_max.get(key,0.),value)
                     health['timing_max_s']=dict(timing_max)
                     trace.record('physics-feedback',dict(health,joints=measured,velocities=velocity,
-                        drive_reference=drive,drive_velocity=drive_velocity))
+                        drive_reference=drive,drive_velocity=drive_velocity,actuator_reference=actuator))
                     if not ready_written and realtime.ready and publisher.ready.is_set():
                         (args.output/'ready.json').write_text(json.dumps(dict(simulator_id=simulator_id,profile_hash=profile.digest)))
                         print('SNOWBOT_ISAAC_READY '+simulator_id,flush=True)
