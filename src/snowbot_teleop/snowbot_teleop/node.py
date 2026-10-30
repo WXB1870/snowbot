@@ -98,8 +98,8 @@ class PicoNode(RuntimeNode):
         self.operator_grasp=confirmation=='operator'
         self.operator_grasp_positions={}
         if self.operator_grasp and not self.unheld_test and (not self.position_contract or
-                self.tool_cfg.get('grasp_reference_source')!='measured_rigid'):
-            raise ValueError('PICO_OPERATOR_GRASP_REQUIRES_MEASURED_RIGID')
+                self.tool_cfg.get('grasp_reference_source') not in ('measured_rigid','measured_axial')):
+            raise ValueError('PICO_OPERATOR_GRASP_REQUIRES_MEASURED_REFERENCE')
         if (not self.tool_cfg.get('right_axial_grasp') or self.tool_cfg.get('collision_scope')!='configured_tool_geometry' or
                 not self.position_contract and not self.tool_cfg.get('demo',{}).get('initial_positions_rad')):
             raise ValueError('PICO_REQUIRES_AXIAL_SHOVEL_CONFIG')
@@ -188,6 +188,7 @@ class PicoNode(RuntimeNode):
         self.independent_grippers=bool(self.position_ops and
             self.position_ops.config.get('independent_trigger_control',False))
         self.control.independent_grippers=self.independent_grippers
+        self.control.continuous_axial=self.tool_cfg.get('grasp_reference_source')=='measured_axial'
         self.leases=self.create_client(Lease,'execution/lease')
         self.submit=self.create_client(SubmitMotion,'execution/submit')
         self.stop_client=self.create_client(ControlExecution,'execution/control')
@@ -860,7 +861,7 @@ class PicoNode(RuntimeNode):
             self.control.virtual=False
             self.event('PICO_TOOL_GRASP_OPERATOR',json.dumps(dict(operation=intent.operation,
                 gripper_positions=self.operator_grasp_positions,grasp_sensor_confirmed=False,
-                reference_source='measured_rigid')))
+                reference_source=self.tool_cfg.get('grasp_reference_source','measured_rigid'))))
         elif mode=='bimanual_tool' and self.position_ops and not self.position_ops.config['calibrated']:
             raise RuntimeError('PICO_TOOL_GRASP_UNCONFIRMED_UNCALIBRATED')
         if mode=='bimanual_tool' and not self.position_contract and not getattr(self,'independent_grippers',False) and not self.unheld_test and not self.operator_grasp and (f.modes[0]!='closed' or f.modes[1] not in ('closed','virtual')):
@@ -1062,7 +1063,7 @@ class PicoNode(RuntimeNode):
                 await self.select_tool_mode(intent,intent.value)
             elif intent.operation=='switch_grasp':
                 if self.position_contract:
-                    if self.unheld_test or self.operator_grasp or not self.position_ops.axial_available:
+                    if getattr(self.control,'continuous_axial',False) or self.unheld_test or self.operator_grasp or not self.position_ops.axial_available:
                         raise RuntimeError('PICO_AXIAL_GRASP_UNAVAILABLE')
                     target=self.position_ops.grasp_target(intent.value)
                     await self.validate_prepare(intent,target)
@@ -1215,7 +1216,8 @@ class PicoNode(RuntimeNode):
                 capabilities=dict(prepare=self.prepare_positions is not None,
                     independent_arms=self.position_contract,mode_switch=self.position_contract,
                     grippers=bool(self.position_ops.config['calibrated'] or self.position_ops.config.get('allow_uncalibrated_direct', False)) if self.position_ops else True,
-                    axial_grasp=not self.unheld_test and (not self.operator_grasp and self.position_ops.axial_available if self.position_ops else True)),
+                    continuous_axial_grasp=getattr(self.control,'continuous_axial',False),
+                    axial_grasp=not getattr(self.control,'continuous_axial',False) and not self.unheld_test and (not self.operator_grasp and self.position_ops.axial_available if self.position_ops else True)),
                 measured_grasp_policy='unheld_test' if self.unheld_test else 'enforce',
                 tool_grasp_confirmation='unheld_test' if self.unheld_test else 'operator' if self.operator_grasp else 'calibrated',
                 direction_reference=getattr(self,'tool_cfg',{}).get('direction_reference','fixed'),
