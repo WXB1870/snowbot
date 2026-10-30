@@ -92,7 +92,7 @@ def websocket_input(port, source, stop, errors):
         if not stop.is_set():errors.append(type(exc).__name__+':'+str(exc))
 
 
-def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=None, collision_recovery=False, prepare_return=None, stop_boundary=False, gui=False):
+def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=None, collision_recovery=False, prepare_return=None, stop_boundary=False, gui=False, tool_config=None, profile_config=None, physics_config=None):
     token=uuid.uuid4().hex[:8];ns='/position_'+token;vendor='/fixture_'+token
     node=rclpy.create_node('position_fixture_'+token)
     states=[];views=[];accepted=[];grippers={};packets=[]
@@ -194,9 +194,15 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     else:
         pp=out/'fixture-pico-simulation.json';pp.write_text(json.dumps(fixture))
         recipe['arguments']['pico_config']=str(pp)
-    if gui:
-        physics_cfg=json.loads((CFG/'snowbot_shovel_physics.json').read_text())
-        physics_cfg['live']['headless']=False
+    if tool_config or profile_config:
+        robot_cfg=json.loads((CFG/'robot_snowbot_position_sim.json').read_text())
+        if tool_config:robot_cfg['teleop']['tool']=str(tool_config)
+        if profile_config:robot_cfg['profile']=str(profile_config)
+        robot_path=out/'fixture-robot.json';robot_path.write_text(json.dumps(robot_cfg))
+        recipe['arguments']['robot_config']=str(robot_path)
+    if gui or physics_config:
+        physics_cfg=json.loads((physics_config or CFG/'snowbot_shovel_physics.json').read_text())
+        if gui:physics_cfg['live']['headless']=False
         physics_path=out/'physics-gui.json';physics_path.write_text(json.dumps(physics_cfg))
         recipe['arguments']['physics_config']=str(physics_path)
         recipe['arguments']['device_backend']='external_simulation'
@@ -274,7 +280,9 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert all(n in initial and abs(initial[n]-v)<(.003 if physics else 1e-9)
                    for n,v in (q if mode=='real' else fixture['device_initial_positions_rad']).items()),'startup feedback differs from configured fixture'
         assert states[-1].simulated==(mode=='simulation') and states[-1].runtime_mode==mode
-        assert views[-1]['capabilities']['axial_grasp'] is True
+        active_tool=json.loads((tool_config or CFG/'bimanual_snowbot_position_sim.json').read_text())
+        continuous=active_tool.get('grasp_reference_source')=='measured_axial'
+        assert views[-1]['capabilities']['continuous_axial_grasp' if continuous else 'axial_grasp'] is True
         checks.append('same feedback contract, no startup commands, configured axial position capability explicit')
         pump(.3)
         if prepare_return:
@@ -482,7 +490,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             sys.path.insert(0,str(ROOT))
             from snowbot_bringup.teleop.snowbot_errors import pinocchio_fk
             from bindu_kinematics.tool_geometry import coupling_metrics
-            tool_cfg=json.loads((CFG/'bimanual_snowbot_real.json').read_text())
+            tool_cfg=active_tool
             robot_meta=json.loads((out/'unified-session/session.json').read_text())
             from bindu_runtime.robot_setup import RobotSetup
             robot=RobotSetup.load(robot_meta['configs']['robot_config']['path']);fk=pinocchio_fk(robot.urdf,tool_cfg)
@@ -492,7 +500,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
                 samples.append(dict(t=seconds(state.feedback_stamp),flanges={tool_cfg['left_frame']:left,tool_cfg['right_frame']:right}))
             coupled=None
             if not ordinary:
-                coupled=coupling_metrics(samples,tool_cfg,[dict(t=samples[0]['t'],mode='rigid')])
+                coupled=coupling_metrics(samples,tool_cfg,[dict(t=samples[0]['t'],mode='right_axial' if continuous else 'rigid')])
                 assert coupled['passed'],coupled
             checks.extend(['recorded raw hand packets follow through Vuer, ROS, native QP and measured PhysX feedback',
                            'recorded-motion release confirms explicit hold with no stop fault',
@@ -753,6 +761,9 @@ def main():
     p.add_argument('--replay-log',type=Path,help='Replay one captured raw VR segment through the isolated physics stack')
     p.add_argument('--replay-seq',type=int)
     p.add_argument('--gui',action='store_true',help='Render the Isaac application in the existing desktop session')
+    p.add_argument('--tool-config',type=Path,help='Explicit simulation tool config for recorded A/B replay')
+    p.add_argument('--profile-config',type=Path,help='Explicit simulation dynamics profile for recorded A/B replay')
+    p.add_argument('--physics-config',type=Path,help='Explicit simulation drive parameters for recorded A/B replay')
     p.add_argument('--reanchor-recording',action='store_true',help='Explicitly reanchor sampled input at its first recorded complete pair')
     p.add_argument('--review-recording',action='store_true',help='For sampled-data GUI review: stop and explicitly re-clutch across recorded gaps')
     p.add_argument('--collision-recovery',action='store_true',help='Recorded shallow self-collision: reject follow, release A, then hold A to recover')
@@ -763,6 +774,11 @@ def main():
     p.add_argument('--clock',choices=('client','received'),default='client')
     p.add_argument('--runs',type=int,default=1)
     args=p.parse_args()
+    if any((args.tool_config,args.profile_config,args.physics_config)) and args.mode!='simulation':
+        p.error('comparison configuration overrides require simulation')
+    for key in ('tool_config','profile_config','physics_config'):
+        value=getattr(args,key)
+        if value is not None:setattr(args,key,value.resolve(strict=True))
     prepare_return=json.loads(args.prepare_return.read_text()) if args.prepare_return else None
     if prepare_return:prepare_return=prepare_return.get('feedback',prepare_return)
     if args.prepare_return and (args.collision_recovery or args.replay_log):p.error('--prepare-return cannot combine with recovery/replay')
@@ -806,7 +822,8 @@ def main():
                 for ordinary in ((True,False) if args.teleop_mode=='both' else (args.teleop_mode=='ordinary',)):
                     out=args.output/(('ordinary-' if ordinary else 'tool-')+m+('' if args.runs==1 else f'-{run:02}'));out.mkdir()
                     case=scenario(out,m,args.websocket_input,ordinary,physics=args.physics,replay=replay,
-                                  collision_recovery=args.collision_recovery,prepare_return=prepare_return,stop_boundary=args.stop_boundary,gui=args.gui);result.append(case)
+                                  collision_recovery=args.collision_recovery,prepare_return=prepare_return,stop_boundary=args.stop_boundary,gui=args.gui,
+                                  tool_config=args.tool_config,profile_config=args.profile_config,physics_config=args.physics_config);result.append(case)
                     (out/'verification.json').write_text(json.dumps(case,indent=2))
                     print(out.name+': '+str(len(case['checks']))+' checks passed',flush=True)
         (args.output/'verification.json').write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
