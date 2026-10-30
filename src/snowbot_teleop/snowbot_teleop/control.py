@@ -87,6 +87,7 @@ class PicoControl:
         self.desired = ['closed','closed']
         self.direct_grippers = direct_grippers
         self.independent_grippers = False
+        self.continuous_axial = False
         self.gripper_update_token = None
         self.manual_targets = [None,None]
         self.effects = []
@@ -435,7 +436,7 @@ class PicoControl:
             self.phase,self.reason='standby','OPEN_REQUIRES_LOADING_AND_SUPPORT'
             self.emit('stop');return
         if presses[6]:self.effects.append(PicoIntent(self.generation,'record'));return
-        if not self.independent_grippers and self.phase=='following' and not independent and ((presses[0] and states[0]) or releases[0]):
+        if not self.independent_grippers and not self.continuous_axial and self.phase=='following' and not independent and ((presses[0] and states[0]) or releases[0]):
             desired=states[0]
             if desired!=self.virtual:
                 self.phase='switching';self.emit('switch_grasp',desired)
@@ -465,7 +466,7 @@ class PicoControl:
                                       'PREPARE_REQUIRES_EMPTY_AND_RELEASED_SQUEEZE')
                     return
             if not self.dual_modes and presses[5] and (self.load=='held' or self.guided_loading and self.load=='unknown') and self.rest(now):
-                if self.phase=='tool_standby' and states[0]!=self.virtual:
+                if self.phase=='tool_standby' and not self.continuous_axial and states[0]!=self.virtual:
                     self.phase='switching';self.emit('switch_grasp',states[0])
                 else:
                     self.phase='confirming_tool';self.emit('confirm_tool')
@@ -475,7 +476,7 @@ class PicoControl:
             if self.dual_modes and (states[4] or states[5]):return
             if (self.guided_loading or self.phase=='tool_standby') and engage and self.rest(now):
                 if not independent:self.squeeze_released=[False,False]
-                if not self.independent_grippers and not independent and states[0]!=self.virtual:
+                if not self.independent_grippers and not self.continuous_axial and not independent and states[0]!=self.virtual:
                     if self.guided_loading and self.armed[0]:
                         self.phase='switching';self.emit('switch_grasp',states[0])
                     else:self.reason='CONFIRM_GRASP_CHANGE_BEFORE_REENGAGE'
@@ -617,7 +618,7 @@ class PicoControl:
                     guided_loading=self.guided_loading,loading_goal=self.loading_goal,
                     direct_grippers=self.direct_grippers,gripper_targets=list(self.manual_targets),
                     loading_opened=list(self.loading_opened),idle_input_lost=self.idle_input_lost,
-                    grasp_requested='right_axial' if (self.pending.value if self.pending and self.pending.operation=='switch_grasp' else self.virtual) else 'rigid',
+                    grasp_requested='right_axial' if self.continuous_axial or (self.pending.value if self.pending and self.pending.operation=='switch_grasp' else self.virtual) else 'rigid',
                     pending=self.pending.operation if self.pending else None)
         if now is not None:
             age = now-self.stamp

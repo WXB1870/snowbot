@@ -14,6 +14,12 @@ from tests.support.pico import Rig
 
 
 class PicoHUDTests(unittest.TestCase):
+    def test_continuous_axial_operator_confirmation_does_not_claim_rigid_grasp(self):
+        from bindu_teleoperation.vr.hud import hud_spec
+        view={**self.view(teleop_mode='bimanual_tool',tool_grasp_confirmation='operator'),
+              'grasp_applied':'right_axial','capabilities':{'continuous_axial_grasp':True}}
+        self.assertEqual(hud_spec(view)['grip'],'人工确认 · 右手轴向释放')
+
     def test_device_barrier_or_stop_failure_never_offers_b_recovery(self):
         from bindu_teleoperation.vr.hud import hud_spec
         base=self.view('locked',stop_confirmed=True,fault_active=True)

@@ -96,6 +96,16 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.tick()
             self.assertEqual(node.control.lock.called,not temporary_capture_refusal(code,0))
 
+    def test_continuous_axial_ignores_x_without_changing_gripper_opening(self):
+        r=Rig(load='held',guided=True,dual=True,direct=True)
+        r.core.continuous_axial=True;r.core.teleop_mode='bimanual_tool'
+        r.core.phase='following';r.grips=[1.,1.];r.step()
+        self.assertEqual(r.click(0,0),[])
+        self.assertEqual(r.core.phase,'following')
+        self.assertFalse(r.core.virtual)
+        self.assertEqual(r.core.snapshot()['grasp_requested'],'right_axial')
+        self.assertEqual(r.modes,('closed','closed'))
+
     def test_independent_grippers_and_mode_switch_ignore_load_metadata(self):
         r=Rig(load='held',guided=True,dual=True,direct=True)
         r.core.independent_grippers=True;r.core.teleop_mode='bimanual_tool'
@@ -292,6 +302,12 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 collision_scope='configured_tool_geometry',**config),position_contract=True)
             exec(code,{'self':owner})
             self.assertIs(owner.unheld_test,unheld)
+        for source in ('measured_rigid','measured_axial'):
+            owner=S(tool_cfg=dict(right_axial_grasp={'configured':True},
+                collision_scope='configured_tool_geometry',tool_grasp_confirmation='operator',
+                grasp_reference_source=source),position_contract=True)
+            exec(code,{'self':owner})
+            self.assertTrue(owner.operator_grasp)
         for policy in (None,False,'disabled','unheld'):
             with self.subTest(policy=policy),self.assertRaisesRegex(ValueError,'MEASURED_GRASP_POLICY'):
                 exec(code,{'self':S(tool_cfg={'measured_grasp_policy':policy})})
@@ -534,14 +550,15 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_unheld_rejects_axial_switch_before_any_gripper_command(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock
-        node=self.production('perform');node.unheld_test=True;node.operator_grasp=False
-        node.position_contract=True;node.position_ops=S(axial_available=True,grasp_target=Mock())
-        node.cancel_tool=AsyncMock();node.current=Mock();node.now=lambda:0.;node.event=Mock();node.simulation=False
-        node.control=S(complete=Mock())
-        await node.perform(S(operation='switch_grasp',token=1,value=True))
-        node.position_ops.grasp_target.assert_not_called()
-        args=node.control.complete.call_args.args
-        self.assertFalse(args[1]);self.assertIn('PICO_AXIAL_GRASP_UNAVAILABLE',args[2])
+        for unheld,continuous in ((True,False),(False,True)):
+            node=self.production('perform');node.unheld_test=unheld;node.operator_grasp=False
+            node.position_contract=True;node.position_ops=S(axial_available=True,grasp_target=Mock())
+            node.cancel_tool=AsyncMock();node.current=Mock();node.now=lambda:0.;node.event=Mock();node.simulation=False
+            node.control=S(complete=Mock(),continuous_axial=continuous)
+            await node.perform(S(operation='switch_grasp',token=1,value=True))
+            node.position_ops.grasp_target.assert_not_called()
+            args=node.control.complete.call_args.args
+            self.assertFalse(args[1]);self.assertIn('PICO_AXIAL_GRASP_UNAVAILABLE',args[2])
 
     async def test_prepared_residual_inside_its_band_does_not_acquire_or_move_again(self):
         from types import SimpleNamespace as S
