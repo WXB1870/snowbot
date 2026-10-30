@@ -132,7 +132,10 @@ def main():
         source['profile_velocity_limits_rad_s']=apply_velocity_limits(body,profile)
         initial=pico['device_initial_positions_rad']
         if set(initial)!=set(names):raise ValueError('PHYSICS_INITIAL_LAYOUT')
-        response=ActuatorResponse(cfg.get('joint_response',{}),initial)
+        bounded=cfg.get('reference_dynamics',False)
+        if type(bounded) is not bool:raise ValueError('PHYSICS_REFERENCE_DYNAMICS')
+        dynamics={n:{'velocity':profile.speed(n),'acceleration':profile.acceleration(n)} for n in names} if bounded else {}
+        response=ActuatorResponse(cfg.get('joint_response',{}),initial,dynamics)
         q0=np.array([initial[n] for n in names])
         body.set_joint_positions(q0);body.set_joint_velocities(np.zeros(len(names)))
         body.apply_action(ArticulationAction(joint_positions=q0))
@@ -181,6 +184,7 @@ def main():
                       physics_dt_s=dt,feedback_hz=live['feedback_hz'],grasp_model='contact',
                       initial_positions_rad=initial,servo_and_friction_parameters='unvalidated simulation assumptions')
         source['joint_response']=cfg.get('joint_response',{})
+        source['reference_dynamics']=dynamics
         (args.output/'source.json').write_text(json.dumps(source,indent=2))
         gc.collect();gc.freeze();gc.disable()
         def stamp(t):
