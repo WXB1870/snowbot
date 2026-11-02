@@ -213,7 +213,6 @@
   "input_frame": "car_base_link",
   "tool_velocity_feedforward": true,
   "grasp_reference_source": "measured_axial",
-  "tool_grasp_confirmation": "operator",
   "rigid_reference_prediction": false,
   "direction_reference": "headset_on_engage",
   "limit_avoidance_margin": 0.15,

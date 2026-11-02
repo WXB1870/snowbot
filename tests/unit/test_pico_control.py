@@ -299,15 +299,19 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         code=compile(ast.Module(body=init.body[begin:end],type_ignores=[]),str(path),'exec')
         for config,unheld in (({},False),({'measured_grasp_policy':'unheld_test'},True)):
             owner=S(tool_cfg=dict(right_axial_grasp={'configured':True},
-                collision_scope='configured_tool_geometry',**config),position_contract=True)
+                collision_scope='configured_tool_geometry',**config),position_contract=True,
+                cfg={'tool_grasp_confirmation':'calibrated'})
             exec(code,{'self':owner})
             self.assertIs(owner.unheld_test,unheld)
         for source in ('measured_rigid','measured_axial'):
             owner=S(tool_cfg=dict(right_axial_grasp={'configured':True},
-                collision_scope='configured_tool_geometry',tool_grasp_confirmation='operator',
-                grasp_reference_source=source),position_contract=True)
+                collision_scope='configured_tool_geometry',
+                grasp_reference_source=source),position_contract=True,cfg={'tool_grasp_confirmation':'operator'})
             exec(code,{'self':owner})
             self.assertTrue(owner.operator_grasp)
+        owner.cfg={}
+        with self.assertRaisesRegex(ValueError,'TOOL_GRASP_CONFIRMATION_CONFIG'):
+            exec(code,{'self':owner})
         for policy in (None,False,'disabled','unheld'):
             with self.subTest(policy=policy),self.assertRaisesRegex(ValueError,'MEASURED_GRASP_POLICY'):
                 exec(code,{'self':S(tool_cfg={'measured_grasp_policy':policy})})

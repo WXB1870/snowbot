@@ -155,7 +155,7 @@ def scenario(output, name, enabled, calibrated, *, freeze=False, shutdown=False)
         assert all(p['data'][0]==held_q for p in packets[before:] if p['side']=='right')
         assert q['arm_r_joint_8']==held_q
         checks.append('explicitly leased Trigger control works; invalid input holds without synthetic close')
-        recipe=json.loads((package_share("snowbot_bringup")/'config/deployments/snowbot_real_teleop.json').read_text())
+        recipe=json.loads((package_share("snowbot_bringup")/'config/examples/snowbot/snowbot_real_teleop.json').read_text())
         recipe['arguments'].update(namespace=ns,vendor_namespace=vendor,command_enabled=True,gripper_config=str(path.resolve()))
         site=output/(name+'-site.json');site.write_text(json.dumps(recipe))
         with (output/(name+'-cli.log')).open('w') as cli_log:

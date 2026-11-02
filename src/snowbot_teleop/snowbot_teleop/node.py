@@ -61,8 +61,8 @@ class PicoNode(RuntimeNode):
         self.declare_parameter('recording_enabled',True,descriptor=ParameterDescriptor(read_only=True))
         self.recording_enabled=self.get_parameter('recording_enabled').value
         share=Path(get_package_share_directory('snowbot_bringup'))
-        self.declare_parameter('pico_config',str(share/'config/robots/snowbot/pico_snowbot_sim.json'),descriptor=ParameterDescriptor(read_only=True))
-        self.declare_parameter('tool_config',str(share/'config/robots/snowbot/bimanual_snowbot_shovel.json'),descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter('pico_config',str(share/'config/examples/snowbot/pico_snowbot_sim.json'),descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter('tool_config',str(share/'config/examples/snowbot/bimanual_snowbot_shovel.json'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('model_root',str(Path(get_package_share_directory('snowbot_description'))/'urdf'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('device_backend','kinematic',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('position_protocol','legacy_guard',descriptor=ParameterDescriptor(read_only=True))
@@ -97,7 +97,8 @@ class PicoNode(RuntimeNode):
         if policy not in ('enforce','unheld_test'):
             raise ValueError('PICO_MEASURED_GRASP_POLICY')
         self.unheld_test=policy=='unheld_test'
-        confirmation=self.tool_cfg.get('tool_grasp_confirmation','calibrated')
+        confirmation=(self.cfg.get('tool_grasp_confirmation') if self.position_contract else
+                      self.tool_cfg.get('tool_grasp_confirmation','calibrated'))
         if confirmation not in ('calibrated','operator'):
             raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
         self.operator_grasp=confirmation=='operator'

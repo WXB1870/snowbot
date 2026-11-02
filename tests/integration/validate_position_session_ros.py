@@ -33,7 +33,8 @@ def main():
         from snowbot_ctl_msgs.msg import PositionTrajectory
         from bindu_contracts.profile import Profile
         from bindu_hardware.snowbot_session import CONTROL_NAMES
-        profile=Profile.load(args.bindu_root/'src/integration/bindu_runtime/config/robots/snowbot/snowbot_vendor_position.json')
+        from bindu_contracts.resources import package_share
+        profile=Profile.load(package_share('snowbot_bringup')/'config/examples/snowbot/snowbot_vendor_position.json')
         from tools.teleop.snowbot_pdo import observation_payload
     rclpy.init()
     observer=rclpy.create_node('position_session_validation')

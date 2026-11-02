@@ -42,7 +42,7 @@ def main():
     if os.environ.get('ROS_LOCALHOST_ONLY') != '1' or not os.environ.get('ROS_DOMAIN_ID'):
         raise RuntimeError('An isolated localhost ROS domain is required')
     root = ROOT
-    profile_path = package_share('snowbot_bringup')/'config/robots/snowbot/snowbot_vendor_position.json'
+    profile_path = package_share('snowbot_bringup')/'config/examples/snowbot/snowbot_vendor_position.json'
     profile = Profile.load(profile_path)
     output = Path(args.output).resolve(); output.mkdir(parents=True, exist_ok=False)
     token = uuid.uuid4().hex[:8]

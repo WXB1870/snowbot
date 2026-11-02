@@ -48,7 +48,7 @@ class PicoGraspSwitchTests(unittest.TestCase):
 class GraspContinuationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.cfg=json.loads((package_share("snowbot_bringup")/'config/robots/snowbot/bimanual_snowbot_shovel.json').read_text())
+        cls.cfg=json.loads((package_share("snowbot_bringup")/'config/examples/snowbot/bimanual_snowbot_shovel.json').read_text())
 
     def feed(self,session,t,*,held=True,virtual=False,source='headset:coordinator',clutch=(0,0),mapping=PICO_MAPPING):
         frames=[]

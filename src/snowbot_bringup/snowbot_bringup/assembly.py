@@ -37,7 +37,7 @@ def assemble(context):
     if value('gripper_config') and mode != 'real' and not position_contract:
         raise ValueError('GRIPPER_REQUIRES_REAL_MODE')
     legacy = not value('robot_config')
-    selection = value('robot_config') or str(Path(get_package_share_directory('snowbot_bringup'))/'config/robots/snowbot/robot_snowbot.json')
+    selection = value('robot_config') or str(Path(get_package_share_directory('snowbot_bringup'))/'config/examples/snowbot/robot_snowbot.json')
     overrides = {'profile': value('profile'), 'tool': value('bimanual_config')} if legacy else None
     robot = RobotSetup.load(selection, overrides=overrides)
     if position_contract and (robot.robot_id!='snowbot' or single_enabled):
@@ -72,7 +72,7 @@ def assemble(context):
         raise ValueError('PICO_DEMO_REQUIRES_KINEMATIC_SIMULATION')
     if pico and (robot.robot_id != 'snowbot' or (backend != 'kinematic' and not position_contract) or value('tool_input_source') != 'vr'):
         raise ValueError('PICO_REQUIRES_SNOWBOT_KINEMATIC_VR')
-    pico_config = value('pico_config') or str(Path(get_package_share_directory('snowbot_bringup'))/'config/robots/snowbot/pico_snowbot_sim.json')
+    pico_config = value('pico_config') or str(Path(get_package_share_directory('snowbot_bringup'))/'config/examples/snowbot/pico_snowbot_sim.json')
     base_config = value('base_config')
     if base_config:
         if not pico or not position_contract or not enabled('vr_enabled','false'):

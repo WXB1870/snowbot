@@ -395,7 +395,7 @@ def main():
     parser.add_argument('--parameters-config', type=Path, help='Shared Snowbot runtime parameters')
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--namespace', default='bindu_vr_sim')
-    parser.add_argument('--robot-config', default=str(package_share("snowbot_bringup")/'config/robots/snowbot/robot_snowbot.json'))
+    parser.add_argument('--robot-config', default=str(package_share("snowbot_bringup")/'config/examples/snowbot/robot_snowbot.json'))
     parser.add_argument('--runtime-mode', choices=('simulation','real'), default='simulation')
     parser.add_argument('--device-backend', choices=('kinematic','snowbot_vendor','external_simulation'), default='kinematic')
     parser.add_argument('--output', type=Path)

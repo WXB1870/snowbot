@@ -24,7 +24,7 @@ class RuntimeParameterTests(unittest.TestCase):
     def test_shared_timing_preserves_standalone_defaults_and_selected_overrides(self):
         from bindu_contracts.resources import package_share
         base=package_share('snowbot_bringup')/'config/robots/snowbot'
-        for name in ('bimanual_snowbot_real.json','bimanual_snowbot_position_sim.json'):
+        for name in ('bimanual_snowbot_real.json',):
             original=json.loads((base/name).read_text())
             effective=apply_tool_timing(original,load_parameters())
             for key in ('input_max_age','feedback_max_age','command_max_age',
@@ -92,6 +92,27 @@ class RuntimeParameterTests(unittest.TestCase):
             self.assertEqual(node.cfg['solve_timeout_us'],100000)
             self.assertEqual(node.cfg['worker_timeout'],.4)
             self.assertEqual(node.runtime_parameters['solver']['timeout_s'],.1)
+
+    def test_primary_and_example_configurations_resolve_without_duplicate_tool_files(self):
+        from bindu_contracts.resources import package_share, resource_file
+        from bindu_runtime.robot_setup import RobotSetup
+        from bindu_runtime.teleop_deployment import load_deployment
+        share=package_share('snowbot_bringup');config=share/'config'
+        self.assertEqual(len(list((config/'robots/snowbot').glob('*.json'))),10)
+        self.assertEqual({p.name for p in (config/'deployments').glob('*.json')},
+                         {'snowbot_vr_real.json','snowbot_vr_sim.json'})
+        selections=[]
+        for name,policy in (('snowbot_vr_real.json','operator'),('snowbot_vr_sim.json','calibrated')):
+            _,args=load_deployment(config/'deployments'/name,package_share('bindu_runtime'))
+            robot=RobotSetup.load(args['robot_config'])
+            selections.append((robot.path,robot.profile_path,robot.tool_config))
+            pico=json.loads(Path(args['pico_config']).read_text())
+            self.assertEqual(pico['tool_grasp_confirmation'],policy)
+        self.assertEqual(selections[0],selections[1])
+        example=config/'examples/snowbot'
+        RobotSetup.load(example/'robot_snowbot.json')
+        for name in ('snowbot_real_teleop.json','teleop_pico_snowbot_sim.json'):
+            load_deployment(example/name,package_share('bindu_runtime'))
 
     def test_partial_override_and_independent_snapshots(self):
         cfg=self.load({'pico':{'prepare_command_period_s':.02},'display':{'poll_ms':250}})

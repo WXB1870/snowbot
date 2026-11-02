@@ -28,5 +28,6 @@
   },
   "pose_jump_translation_m": 0.35,
   "pose_jump_rotation_rad": 1.2,
-  "automatic_close_grippers": true
+  "automatic_close_grippers": true,
+  "tool_grasp_confirmation": "operator"
 }

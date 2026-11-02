@@ -56,5 +56,6 @@
     "head_joint_2": 0.0
   },
   "pose_jump_translation_m": 0.35,
-  "pose_jump_rotation_rad": 1.2
+  "pose_jump_rotation_rad": 1.2,
+  "tool_grasp_confirmation": "calibrated"
 }
