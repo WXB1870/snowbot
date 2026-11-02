@@ -434,6 +434,23 @@ class SimulationEntryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'SNOWBOT_BRAKE_LEAD_MOVED'):
                 entry.parse_args(['--config',str(site)])
 
+    def test_missing_or_invalid_grasp_confirmation_is_rejected_before_start(self):
+        from snowbot_hardware.parameters import load_mode_config
+        share=package_share('snowbot_bringup')
+        for suffix,mode in (('real','real'),('sim','simulation')):
+            recipe=json.loads((share/f'config/deployments/snowbot_vr_{suffix}.json').read_text())
+            selected=load_mode_config(share/'config/robots/snowbot/teleop.json',mode)
+            with tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);pico=root/'teleop.json';site=root/'site.json'
+                recipe['arguments']['pico_config']=str(pico);site.write_text(json.dumps(recipe))
+                for policy in (None,'unsupported'):
+                    bad=dict(selected)
+                    if policy is None:bad.pop('tool_grasp_confirmation')
+                    else:bad['tool_grasp_confirmation']=policy
+                    pico.write_text(json.dumps(bad))
+                    with self.subTest(mode=mode,policy=policy),self.assertRaisesRegex(ValueError,'PICO_TOOL_GRASP_CONFIRMATION_CONFIG'):
+                        entry.parse_args(['--config',str(site)])
+
     def test_local_default_recipe_and_explicit_override(self):
         fallback=package_share("snowbot_bringup")/'config/deployments/snowbot_vr_sim.json'
         with tempfile.TemporaryDirectory() as directory:

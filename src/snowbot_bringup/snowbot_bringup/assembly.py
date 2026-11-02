@@ -87,6 +87,8 @@ def assemble(context):
         if (settings.get('simulation_only') is not (mode=='simulation') or settings.get('mapping')!='pico_snowbot_v1' or
                 settings.get('schema_version') != (2 if position_contract else 1)):
             raise ValueError('PICO_CONFIG_UNAVAILABLE')
+        if position_contract and settings.get('tool_grasp_confirmation') not in ('calibrated','operator'):
+            raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
         if position_contract and not value('gripper_config'):
             raise ValueError('PICO_GRIPPER_CONFIG_REQUIRED')
         if position_contract:
