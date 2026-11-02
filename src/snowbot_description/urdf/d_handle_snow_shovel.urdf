@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="d_handle_snow_shovel">
+  <!-- Units: metres, radians, kilograms. Geometry prototype; all parts rigid. -->
+  <!-- left_grip_frame +Z is the D crossbar free-rotation axis; right_grip_frame +Z is the shaft free-rotation axis. These fixed reference frames do not enable controller freedoms. -->
+  <!-- Inertia: homogeneous 650 kg/m^3 proxy, including overlapping primitive joints; not a measured material or load model. -->
+  <link name="shovel_tool">
+    <inertial>
+      <origin xyz="-0.08124559353 -5.296994915e-08 0.3355950539" rpy="0 0 0" />
+      <mass value="1.854031007" />
+      <inertia ixx="0.3378857647" ixy="-2.456975407e-08" ixz="0.1559840999" iyy="0.4022006548" iyz="4.987525286e-08" izz="0.1067577817" />
+    </inertial>
+    <visual name="shaft">
+      <origin xyz="-0.182860464 -7.360508846e-08 0.465362279" rpy="1.472101769e-07 -0.3744072732 -0" />
+      <geometry>
+        <cylinder radius="0.018" length="1" />
+      </geometry>
+      <material name="shaft_material">
+        <color rgba="0.53 0.32 0.15 1" />
+      </material>
+    </visual>
+    <collision name="shaft">
+      <origin xyz="-0.182860464 -7.360508846e-08 0.465362279" rpy="1.472101769e-07 -0.3744072732 -0" />
+      <geometry>
+        <cylinder radius="0.018" length="1" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_crossbar">
+      <origin xyz="-0.4388651136 -1.766522123e-07 1.11686947" rpy="5.383784227e-08 -1.57079619 -1.570796327" />
+      <geometry>
+        <cylinder radius="0.018" length="0.22" />
+      </geometry>
+      <material name="d_handle_crossbar_material">
+        <color rgba="0.09 0.57 0.43 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_crossbar">
+      <origin xyz="-0.4388651136 -1.766522123e-07 1.11686947" rpy="5.383784227e-08 -1.57079619 -1.570796327" />
+      <geometry>
+        <cylinder radius="0.018" length="0.22" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_minus_0">
+      <origin xyz="-0.4342935959 -0.1140001748 1.105235397" rpy="-2.831889856 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.0262488095" />
+      </geometry>
+      <material name="d_handle_minus_0_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_minus_0">
+      <origin xyz="-0.4342935959 -0.1140001748 1.105235397" rpy="-2.831889856 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.0262488095" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_minus_1">
+      <origin xyz="-0.4196647587 -0.1150001689 1.068006415" rpy="3.032931291 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.05532630477" />
+      </geometry>
+      <material name="d_handle_minus_1_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_minus_1">
+      <origin xyz="-0.4196647587 -0.1150001689 1.068006415" rpy="3.032931291 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.05532630477" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_minus_2">
+      <origin xyz="-0.3968072017 -0.09600015972 1.009836132" rpy="2.802518793 -0.4565578704 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.07696752562" />
+      </geometry>
+      <material name="d_handle_minus_2_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_minus_2">
+      <origin xyz="-0.3968072017 -0.09600015972 1.009836132" rpy="2.802518793 -0.4565578704 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.07696752562" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_minus_3">
+      <origin xyz="-0.374863949 -0.04000015089 0.9539926664" rpy="2.946526272 -1.043939411 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.09433981132" />
+      </geometry>
+      <material name="d_handle_minus_3_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_minus_3">
+      <origin xyz="-0.374863949 -0.04000015089 0.9539926664" rpy="2.946526272 -1.043939411 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.09433981132" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_plus_0">
+      <origin xyz="-0.4342936081 0.1139998252 1.105235428" rpy="2.831889562 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.0262488095" />
+      </geometry>
+      <material name="d_handle_plus_0_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_plus_0">
+      <origin xyz="-0.4342936081 0.1139998252 1.105235428" rpy="2.831889562 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.0262488095" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_plus_1">
+      <origin xyz="-0.4196647711 0.1149998311 1.068006446" rpy="-3.032931585 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.05532630477" />
+      </geometry>
+      <material name="d_handle_plus_1_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_plus_1">
+      <origin xyz="-0.4196647711 0.1149998311 1.068006446" rpy="-3.032931585 0.3744072732 3.141592654" />
+      <geometry>
+        <cylinder radius="0.012" length="0.05532630477" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_plus_2">
+      <origin xyz="-0.396807212 0.09599984028 1.009836159" rpy="2.802518746 0.4565575623 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.07696752562" />
+      </geometry>
+      <material name="d_handle_plus_2_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_plus_2">
+      <origin xyz="-0.396807212 0.09599984028 1.009836159" rpy="2.802518746 0.4565575623 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.07696752562" />
+      </geometry>
+    </collision>
+    <visual name="d_handle_plus_3">
+      <origin xyz="-0.3748639533 0.03999984911 0.9539926774" rpy="2.946526178 1.043939127 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.09433981132" />
+      </geometry>
+      <material name="d_handle_plus_3_material">
+        <color rgba="0.18 0.23 0.26 1" />
+      </material>
+    </visual>
+    <collision name="d_handle_plus_3">
+      <origin xyz="-0.3748639533 0.03999984911 0.9539926774" rpy="2.946526178 1.043939127 1.570796327" />
+      <geometry>
+        <cylinder radius="0.012" length="0.09433981132" />
+      </geometry>
+    </collision>
+    <visual name="pan_bottom">
+      <origin xyz="0.12 0 -0.006" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.28 0.45 0.008" />
+      </geometry>
+      <material name="pan_bottom_material">
+        <color rgba="0.12 0.4 0.59 1" />
+      </material>
+    </visual>
+    <collision name="pan_bottom">
+      <origin xyz="0.12 0 -0.006" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.28 0.45 0.008" />
+      </geometry>
+    </collision>
+    <visual name="pan_side_minus">
+      <origin xyz="0.12 -0.221 0.0215" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.28 0.008 0.047" />
+      </geometry>
+      <material name="pan_side_minus_material">
+        <color rgba="0.12 0.4 0.59 1" />
+      </material>
+    </visual>
+    <collision name="pan_side_minus">
+      <origin xyz="0.12 -0.221 0.0215" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.28 0.008 0.047" />
+      </geometry>
+    </collision>
+    <visual name="pan_side_plus">
+      <origin xyz="0.12 0.221 0.0215" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.28 0.008 0.047" />
+      </geometry>
+      <material name="pan_side_plus_material">
+        <color rgba="0.12 0.4 0.59 1" />
+      </material>
+    </visual>
+    <collision name="pan_side_plus">
+      <origin xyz="0.12 0.221 0.0215" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.28 0.008 0.047" />
+      </geometry>
+    </collision>
+    <visual name="pan_back">
+      <origin xyz="-0.016 0 0.0215" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.008 0.434 0.047" />
+      </geometry>
+      <material name="pan_back_material">
+        <color rgba="0.12 0.4 0.59 1" />
+      </material>
+    </visual>
+    <collision name="pan_back">
+      <origin xyz="-0.016 0 0.0215" rpy="0 -0 0" />
+      <geometry>
+        <box size="0.008 0.434 0.047" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_grip_frame" />
+  <joint name="left_grip_reference" type="fixed">
+    <parent link="shovel_tool" />
+    <child link="left_grip_frame" />
+    <origin xyz="-0.4388651136 -1.766522123e-07 1.11686947" rpy="1.570795952 -1.196389054 -3.141592251" />
+  </joint>
+  <link name="right_grip_frame" />
+  <joint name="right_grip_reference" type="fixed">
+    <parent link="shovel_tool" />
+    <child link="right_grip_frame" />
+    <origin xyz="-0.3145199981 -1.266007522e-07 0.8004231199" rpy="-0.3744072732 -1.370121269e-07 1.570796381" />
+  </joint>
+</robot>

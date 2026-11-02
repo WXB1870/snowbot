@@ -49,6 +49,8 @@ snowbot/
 
 配置模板的唯一维护目录为 `src/snowbot_bringup/config/`：`deployments/` 选择装配，`robots/snowbot/` 保存本体索引、profile、工具、PICO、夹爪及可选底盘参数。默认实机参数以最后部署证据为基础，跟踪与回零使用2026-10-29确认的较宽口径，具体数值见[现场配置](运行与验证.md#首次现场配置)；单机覆盖保留在现场配方。部署配方用 `robot_package=snowbot_bringup` 选择应用 launch，资源通过 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 解析。现场 `site.json` 保存实际选择与网络、设备、标定条件；未知字段及无效组合仍拒绝。
 
+D 型把手雪铲的几何原型见 [d_handle_snow_shovel.urdf](src/snowbot_description/urdf/d_handle_snow_shovel.urdf)：保留 28×45 cm 浅铲，杆尾增加 22 cm 横把，左右握点间距 34 cm。`left_grip_frame` 的 +Z 沿横把，`right_grip_frame` 的 +Z 沿杆，两轴垂直；这两个是固定参考坐标，模型本身为刚体，尚未接入双轴释放求解。
+
 厂商原始基线已逐字节迁至 `vendor/snowbot/original/`，由 `vendor/snowbot/baseline.json` 固定其清单身份；日常修改在准备器、补丁与公共头文件维护，生成目录只作输出，不再作为第二个维护源。原始文件与同事资产不改写，`artifacts/`、`vendor/snowbot/`、`releases/`、`deployments/`、`backups/`中的 `COLCON_IGNORE` 防止外层构建误装配历史源码或原始驱动。Bindu原导入入口为兼容转发，新实现只维护一次。
 
 生成与历史产物按[产物存放约定](运行与验证.md#基线与可复现边界)维护。已有本地工作区的候选、部署及历史位置分别由`releases/index.json`、`deployments/index.json`和`artifacts/index.json`索引；这些机器资料不随Git分发。索引标注盘点日期及证据状态；历史回执不证明机器人当前在线版本。生成目录只作输出，不直接修改。
