@@ -172,6 +172,9 @@ def check_runtime(args, robot):
     for module in ('pinocchio', 'casadi', 'vuer', 'bindu_execution.interpolation'):
         importlib.import_module(module)
     tool = json.loads(robot.tool_config.read_text())
+    if args.get('position_contract') in (True,'true'):
+        from snowbot_hardware.parameters import load_parameters, apply_tool_timing
+        tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))
     from bindu_runtime.teleop_deployment import apply_execution_tracking
     tool = apply_execution_tracking(tool, args.get('execution_mode','position'),
                                     real=args['runtime_mode']=='real',

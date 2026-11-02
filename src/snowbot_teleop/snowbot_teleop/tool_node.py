@@ -8,9 +8,17 @@ def load_grippers(config, profile):
     return validate_config(config, profile), dict(JOINTS)
 
 
+def load_tool(node, config):
+    from rcl_interfaces.msg import ParameterDescriptor
+    from snowbot_hardware.parameters import load_parameters, apply_tool_timing
+    node.runtime_parameters = load_parameters(node.declare_parameter(
+        'parameters_config', '', descriptor=ParameterDescriptor(read_only=True)).value or None)
+    return apply_tool_timing(config, node.runtime_parameters)
+
+
 class SnowbotToolNode(BimanualToolNode):
     def __init__(self):
-        super().__init__(gripper_config_loader=load_grippers)
+        super().__init__(gripper_config_loader=load_grippers, tool_config_loader=load_tool)
 
 
 def main(args=None):

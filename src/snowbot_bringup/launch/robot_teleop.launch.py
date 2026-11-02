@@ -21,6 +21,7 @@ def generate_launch_description():
                 'arm_receiver_node':'','servo_receiver_node':'','mid_receiver_node':'',
                 'vr_enabled': 'false', 'input_timing_enabled':'false', 'host': '127.0.0.1', 'port': '8012',
                 'cert_file': '', 'key_file': ''}
-    defaults.update({key:str(value) for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
+    defaults.update({key:('' if key=='target_stream_brake_lead_s' else str(value))
+                     for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]
                              + [OpaqueFunction(function=assemble)])

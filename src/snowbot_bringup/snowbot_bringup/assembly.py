@@ -14,7 +14,7 @@ from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target
 
 def assemble(context):
     value = lambda name, default='': LaunchConfiguration(name, default=default).perform(context)
-    from snowbot_hardware.parameters import load_parameters, validate_pico_timing
+    from snowbot_hardware.parameters import load_parameters, validate_pico_timing, braking_lead, apply_tool_timing
     runtime_parameters = load_parameters(value('parameters_config') or None)
     input_settings = runtime_parameters['pico']
     def enabled(name, default='true'):
@@ -52,6 +52,8 @@ def assemble(context):
     if mode=='real' and (robot.robot_id!='snowbot' or single_enabled):
         raise ValueError('REAL_REQUIRES_SNOWBOT_BIMANUAL_POSITION')
     tool_settings=json.loads(robot.tool_config.read_text())
+    if position_contract:
+        apply_tool_timing(tool_settings,runtime_parameters)
     if tool_settings.get('simulation_only') is not (mode=='simulation' and not position_contract):
         raise ValueError('BIMANUAL_CONFIG_RUNTIME_MODE_MISMATCH')
     if value('tool_input_source') not in ('tool_pose', 'vr'):
@@ -113,8 +115,9 @@ def assemble(context):
                 ('execution_mode','position'),('gripper_config',''),('parameters_config',''),('vendor_namespace','/snowbot'),('position_protocol','legacy_guard'),('arm_receiver_node',''),
                 ('servo_receiver_node',''),('mid_receiver_node',''))})
     if mode=='real' and value('position_protocol')=='session_v3':
-        execution.update(target_stream_limits({key:value(key,str(default))
-            for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}))
+        limits={key:value(key,str(default)) for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}
+        limits['target_stream_brake_lead_s']=braking_lead(runtime_parameters,value('target_stream_brake_lead_s'))
+        execution.update(target_stream_limits(limits))
     if pico and position_contract:
         validate_pico_timing(runtime_parameters,brake_lead_s=execution.get('target_stream_brake_lead_s',0.))
     nodes.append(Node(package='snowbot_hardware', executable='snowbot_adapter' if mode=='real' else 'snowbot_position_sim' if position_contract else 'execution', namespace=ns,
@@ -148,6 +151,7 @@ def assemble(context):
                       output='screen', parameters=[{**common, **model, **tool,'require_recording':recorder_enabled,
                           'simulation_demo':pico_demo,
                           'position_contract':position_contract,
+                          **({'parameters_config':value('parameters_config')} if position_contract else {}),
                           'execution_mode':execution_mode,
                           'position_protocol':value('position_protocol','legacy_guard'),
                           'gripper_config':value('gripper_config') if position_contract else '',

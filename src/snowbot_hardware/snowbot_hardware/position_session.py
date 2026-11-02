@@ -5,7 +5,7 @@ import math
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
 from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
-from .parameters import load_parameters, parameters_for
+from .parameters import load_parameters, parameters_for, braking_lead
 
 
 from bindu_runtime.stop_evidence import sampled_nominal_reference
@@ -126,8 +126,10 @@ class PositionSessionDevices:
                                    reference_mode=getattr(node, 'snowbot_reference_mode', 0))
         if self.health.reference_mode == 2:
             self.trajectory_limits = target_stream_limits({
-                key: node.declare_parameter(key, default, descriptor=ParameterDescriptor(read_only=True)).value
+                key: node.declare_parameter(key, braking_lead(self.runtime_parameters) if key=='target_stream_brake_lead_s' else default,
+                                            descriptor=ParameterDescriptor(read_only=True)).value
                 for key, default in TARGET_STREAM_LIMIT_DEFAULTS.items()})
+            braking_lead(self.runtime_parameters,self.trajectory_limits['target_stream_brake_lead_s'])
         self.envelopes = SourceEnvelope(new_session_id(node.now()), node.now,
                                        target_stream=self.health.reference_mode == 2)
         self.sent = {}

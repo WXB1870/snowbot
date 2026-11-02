@@ -426,8 +426,13 @@ class SimulationEntryTests(unittest.TestCase):
                 with self.subTest(values=values),self.assertRaisesRegex(ValueError,code):
                     entry.parse_args(['--config',str(site)])
             parameters.write_text(json.dumps({'pico':{'prepare_command_period_s':.2}}))
-            recipe['arguments']['target_stream_brake_lead_s']=.04;site.write_text(json.dumps(recipe))
-            entry.parse_args(['--config',str(site)])
+            parameters.write_text(json.dumps({'pico':{'prepare_command_period_s':.2},
+                                               'execution':{'target_stream_brake_lead_s':.04}}))
+            parsed=entry.parse_args(['--config',str(site)])
+            self.assertEqual(parsed.deployment['target_stream_brake_lead_s'],'0.04')
+            recipe['arguments']['target_stream_brake_lead_s']=.12;site.write_text(json.dumps(recipe))
+            with self.assertRaisesRegex(ValueError,'SNOWBOT_BRAKE_LEAD_MOVED'):
+                entry.parse_args(['--config',str(site)])
 
     def test_local_default_recipe_and_explicit_override(self):
         fallback=package_share("snowbot_bringup")/'config/deployments/snowbot_vr_sim.json'

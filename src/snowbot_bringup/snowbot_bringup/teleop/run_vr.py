@@ -373,7 +373,7 @@ def parse_args(argv=None):
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
     args.launch_package=json.loads(Path(args.config).read_text()).get('robot_package','bindu_runtime')
     d=args.deployment
-    from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing
+    from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, braking_lead
     d['parameters_config']=d.get('parameters_config') or str(default_path())
     args.runtime_parameters=load_parameters(d['parameters_config'])
     if args.enable_commands:
@@ -391,8 +391,11 @@ def parse_args(argv=None):
     if (args.launch!='robot_teleop.launch.py' or d.get('position_contract')!='true' or
             d.get('pico_enabled')!='true' or d.get('vr_enabled')!='true'):
         parser.error('此入口要求启用 position_contract、PICO 和 VR 的部署配置')
-    lead=(target_stream_limits(d)['target_stream_brake_lead_s']
-          if d.get('runtime_mode')=='real' and d.get('position_protocol')=='session_v3' else 0.)
+    lead=0.
+    if d.get('runtime_mode')=='real' and d.get('position_protocol')=='session_v3':
+        lead=braking_lead(args.runtime_parameters,d.get('target_stream_brake_lead_s'))
+        d['target_stream_brake_lead_s']=str(lead)
+        target_stream_limits(d)
     validate_pico_timing(args.runtime_parameters,brake_lead_s=lead)
     for key,attribute,default in (('namespace','namespace','bindu_snowbot'),('host','host','127.0.0.1'),
             ('port','vr_port','8012'),('cert_file','cert_file',''),('key_file','key_file','')):

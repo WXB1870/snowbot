@@ -47,7 +47,7 @@ snowbot/
 
 - `deployments/`：实机与仿真运行配方。
 - `robots/snowbot/`：本体、动态限制、工具、PICO、夹爪和可选底盘参数。
-- `robots/snowbot/runtime_parameters.json`：输入、执行、诊断与显示参数。
+- `robots/snowbot/runtime_parameters.json`：输入／反馈有效期、求解超时、命令时序、执行、诊断与显示参数。
 
 资源使用 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 路径。机器配置保存在部署目录的 `upper/site.json`，底层参数保存在 `vendor-position.yaml`；配置方法见[运行指南](运行与验证.md#首次现场配置)。
 

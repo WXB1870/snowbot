@@ -74,7 +74,7 @@ class PicoNode(RuntimeNode):
             from bindu_runtime.teleop_base import TeleopBase
             self.base = TeleopBase(self, self.get_parameter('base_config').value,
                                   self.get_parameter('command_enabled').value)
-        from snowbot_hardware.parameters import load_parameters
+        from snowbot_hardware.parameters import load_parameters, apply_tool_timing
         self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         self.cfg=json.loads(Path(self.get_parameter('pico_config').value).read_text())
         self.position_contract = self.cfg.get('schema_version') == 2
@@ -88,6 +88,8 @@ class PicoNode(RuntimeNode):
                                      ('kinematic',) if self.simulation else ('snowbot_vendor',))):
             raise ValueError('PICO_ACTUATOR_BACKEND_UNAVAILABLE:'+self.backend)
         self.tool_cfg=json.loads(Path(self.get_parameter('tool_config').value).read_text())
+        if self.position_contract:
+            self.tool_cfg=apply_tool_timing(self.tool_cfg,self.runtime_parameters)
         self.automatic_close_grippers=self.cfg.get('automatic_close_grippers',False)
         if type(self.automatic_close_grippers) is not bool or (self.automatic_close_grippers and not self.position_contract):
             raise ValueError('PICO_AUTO_CLOSE_CONFIG')

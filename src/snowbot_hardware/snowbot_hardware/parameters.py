@@ -6,7 +6,9 @@ from pathlib import Path
 from functools import lru_cache
 
 
-_FIELDS = {'pico': ('prepare_button_hold_s',
+_FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
+ 'solver': ('timeout_s', 'worker_timeout_s', 'startup_timeout_s'),
+ 'pico': ('prepare_button_hold_s',
           'pair_max_skew_s',
           'grip_press_threshold',
           'grip_release_threshold',
@@ -23,7 +25,7 @@ _FIELDS = {'pico': ('prepare_button_hold_s',
           'motion_completion_grace_s',
           'validation_worker_timeout_s'),
  'gripper': ('vr_input_max_age_s', 'max_tick_gap_s', 'lease_ttl_s', 'request_ttl_s'),
- 'execution': ('stop_confirmation_window_s',
+ 'execution': ('target_stream_brake_lead_s', 'stop_confirmation_window_s',
                'held_reference_velocity_tolerance_rad_s',
                'startup_hold_ttl_s',
                'startup_lease_ttl_s',
@@ -83,6 +85,15 @@ def load_parameters(path=None):
                 raise ValueError('SNOWBOT_PARAMETER:'+group+'.'+key)
             if key not in _INTEGER_FIELDS:
                 values[key] = float(value)
+    t, s = result['teleop'], result['solver']
+    if not t['input_max_age_s'] <= t['command_ttl_s'] <= .4:
+        raise ValueError('SNOWBOT_TELEOP_FRESHNESS')
+    if (not math.isfinite(s['timeout_s']*1e6) or round(s['timeout_s']*1e6) < 1 or
+            s['timeout_s'] >= s['worker_timeout_s']):
+        raise ValueError('SNOWBOT_SOLVER_TIMING')
+    lead = result['execution']['target_stream_brake_lead_s']
+    if lead >= .4 or not 0 < round(lead*1e9) < 400_000_000:
+        raise ValueError('SNOWBOT_TARGET_BRAKE_LEAD')
     p, g, d = (result[name] for name in ('pico', 'gripper', 'diagnostics'))
     for name in ('grip', 'trigger'):
         if not 0 < p[name+'_release_threshold'] < p[name+'_press_threshold'] < 1:
@@ -99,6 +110,8 @@ def load_parameters(path=None):
 def validate_pico_timing(parameters, *, brake_lead_s=0.):
     """Check the selected PICO timing before launching its control chain."""
     p, g = parameters['pico'], parameters['gripper']
+    if brake_lead_s and brake_lead_s >= parameters['teleop']['command_ttl_s']:
+        raise ValueError('SNOWBOT_TARGET_BRAKE_LEAD_EXCEEDS_TTL')
     # ExecutionNode grants and Executor renews arm leases for two seconds.
     arm_lease_s = 2.
     for key, ttl in (('renewal_period_s', min(arm_lease_s, g['lease_ttl_s'])),
@@ -114,3 +127,34 @@ def parameters_for(owner, group):
     """Use the selected startup snapshot, including lightweight offline fixtures."""
     selected = getattr(owner, 'runtime_parameters', None)
     return selected[group] if isinstance(selected, dict) else load_parameters()[group]
+
+
+def apply_tool_timing(config, parameters):
+    """Use one startup snapshot for PICO, sessions and the solver worker.
+
+    Tool files retain standalone/offline defaults; position teleoperation
+    selects its timing exclusively through parameters_config.
+    """
+    t, s = parameters['teleop'], parameters['solver']
+    result = dict(config, input_max_age=t['input_max_age_s'],
+        feedback_max_age=t['feedback_max_age_s'], command_max_age=t['command_ttl_s'],
+        worker_timeout=s['worker_timeout_s'], worker_startup_timeout=s['startup_timeout_s'],
+        solve_timeout_us=round(s['timeout_s']*1e6))
+    gap = result.get('integration_max_sample_gap', result.get('max_integration_interval', .1))
+    if gap > result['input_max_age']:
+        raise ValueError('BIMANUAL_SAMPLE_GAP_EXCEEDS_INPUT_TIMEOUT')
+    return result
+
+
+def braking_lead(parameters, legacy=None):
+    """Read shared timing; accept an old deployment key only if it agrees."""
+    selected = parameters['execution']['target_stream_brake_lead_s']
+    if legacy not in (None, ''):
+        try:
+            value = float(legacy) if type(legacy) in (str, float, int) else float('nan')
+        except (ValueError, OverflowError):
+            value = float('nan')
+        if value != selected:
+            raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s '
+                             'in parameters_config and remove target_stream_brake_lead_s from the deployment')
+    return selected

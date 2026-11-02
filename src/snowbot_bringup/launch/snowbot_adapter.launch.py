@@ -40,8 +40,11 @@ def assemble(context):
             position_protocol=value('position_protocol', 'legacy_guard'), execution_mode=value('execution_mode', 'position'),
             **{key: value(key) for key in ('arm_receiver_node', 'servo_receiver_node', 'mid_receiver_node', 'gripper_config', 'parameters_config')})
         if value('position_protocol') == 'session_v3':
-            parameters.update(target_stream_limits({key:value(key,str(default))
-                for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}))
+            from snowbot_hardware.parameters import load_parameters, braking_lead
+            limits={key:value(key,str(default)) for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}
+            limits['target_stream_brake_lead_s']=braking_lead(load_parameters(value('parameters_config') or None),
+                                                            value('target_stream_brake_lead_s'))
+            parameters.update(target_stream_limits(limits))
     else:
         parameters['device_backend'] = backend
     return [Node(package='snowbot_hardware' if mode == 'real' else 'bindu_runtime', executable='snowbot_adapter' if mode == 'real' else 'execution',
@@ -56,6 +59,7 @@ def generate_launch_description():
                 'namespace': 'bindu_snowbot', 'run_id': uuid.uuid4().hex, 'vendor_namespace': '/snowbot',
                 'arm_receiver_node': '', 'servo_receiver_node': '', 'mid_receiver_node': '',
                 'command_enabled': 'false', 'recording_mode': 'off', 'output': '/tmp/bindu-runs', 'parameters_config': '', 'gripper_config': '', 'position_protocol': 'legacy_guard', 'execution_mode': 'position'}
-    defaults.update({key:str(value) for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
+    defaults.update({key:('' if key=='target_stream_brake_lead_s' else str(value))
+                     for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]
                              + [OpaqueFunction(function=assemble)])
