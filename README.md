@@ -1,82 +1,65 @@
 # Snowbot
 
-Snowbot是基于[Bindu通用机器人框架](https://github.com/WXB1870/bindu)的扫雪机器人应用，也是完整机器人的部署入口。本仓维护型号实现、场景参数、厂商底层维护源和现场流程；Bindu维护通用契约、求解、执行与ROS节点。两个仓库分别保留源码，通过`dependencies.repos`锁定配对，不要求它们处于固定的相邻目录。
+Snowbot 是基于 [Bindu](https://github.com/WXB1870/bindu) 开发的扫雪机器人应用，提供机器人模型、双臂遥操作、底层驱动适配、仿真和部署工具。通用运动求解与执行能力由 Bindu 提供，配对版本通过 [dependencies.repos](dependencies.repos) 固定。
 
-新用户从[运行与验证](运行与验证.md#首次准备与构建)开始：获取Snowbot后执行`python3 -m tools.deployment.deploy prepare`，由工具获取匹配Bindu并完成底层与上层构建。支持条件、首次现场配置和人工启动顺序由该文档统一维护。
+## 快速开始
 
-- [代理规范](AGENTS.md)：本项目协作与执行边界。
-- [当前进度](当前进度.md)：原版恢复、改进版保全及未完成项。
-- [位置遥操作修改目标](位置遥操作修改目标.md)：能力复用、阻抗隔离边界、修改目标与完成条件。
-- [运行与验证](运行与验证.md)：本机准备工具、现场流程和验收边界。
-- [底层驱动问题记录](底层驱动问题记录.md)：接口差异、问题证据和修复历史。
-已有工作区可另有本地`TODO.md`和未入库的`过程记录/`条目，保存待办及现场证据；这些材料不作为新克隆的部署前提。
+完整部署环境为 Ubuntu 24.04、ROS 2 Jazzy、Python 3.12 和 x86_64。依赖安装见[运行指南](运行与验证.md#支持条件)。
 
-底层原始源码基线位于 [baseline](vendor/snowbot/original/)，包含上层、中层、servo、消息、头腰、力传感器和模型包；配套位置会话源码由[prepare_position_session.py](tools/deployment/prepare_position_session.py)生成，补丁与共用头在`tools/deployment/snowbot_vendor/position_session/`，离线测试在`tests/`。早期`development-src`、完整恢复归档与现场证据仅保留在本地，不随Git分发；旧`prepare_snowbot_vendor.py`用于复现历史补丁。
+```bash
+git clone https://github.com/WXB1870/snowbot.git
+cd snowbot
+python3 -m tools.deployment.deploy prepare
+```
 
-选定本机候选、最近已有部署回执、未完成项及验收边界统一见[当前进度](当前进度.md)。此前原版恢复、各轮部署、JSON、源码归档和bundle保留为历史证据；旧版本和绝对路径只用于溯源，不代表当前在线设备状态。
+`prepare` 获取匹配的 Bindu，生成底层源码并构建底层和上层软件。后续更新使用 `python3 -m tools.deployment.deploy build`。
 
-本目录不自动连接、同步或启动机器人。机器人运动禁令及本机修改后同步的协作边界见[本项目规范](AGENTS.md#3-机器人软件工程约束)。
+完成构建后，按[现场配置](运行与验证.md#首次现场配置)设置设备、标定和 PICO 网络，再按[启动顺序](运行与验证.md#日常启动)运行。开发和仿真见[仿真与浏览器操作台](运行与验证.md#仿真与浏览器操作台)。
 
-## 两仓职责
+## 功能
 
-| 内容 | Bindu | Snowbot |
-|---|---|---|
-| 公共契约与控制 | 消息、控制权、动作期限、动态限制、插值、停止及故障语义 | 选择设备后端并提供场景参数 |
-| 算法与输入 | 通用FK／IK、双臂QP、VR输入与映射、通用ROS节点 | PICO准备、普通／耦合切换、虚握及夹爪操作流程 |
-| 型号与配置 | 通用本体／设备接口及资源解析 | 模型、profile、准备位、工具几何、夹爪标定与配方模板 |
-| 厂商底层 | 提供准备器使用的通用原生执行代码 | 原始vendor基线、专属补丁、公共头及生成工具；构建servo、中层、topic上层与消息 |
-| 部署与使用 | 框架开发构建，以及供应用复用的`x86_real`上层构建工具 | 锁定Bindu、组织完整构建、现场配置、日常启动与设备问题记录 |
+- **双臂遥操作**：PICO 手柄输入、独立双臂与工具耦合模式、准备位和夹爪操作。
+- **运动执行**：通过 Bindu 统一处理运动求解、控制权、目标期限、动态限制和停止反馈。
+- **设备适配**：底层位置会话、关节与设备反馈、夹爪及型号配置。
+- **仿真与可视化**：轻量运动学显示、Isaac 物理后端和浏览器操作台。
+- **部署工具**：依赖锁定、底层补丁生成、增量构建和配置清单。
 
-`snowbot_hardware`负责厂商协议、会话和反馈适配；真正的servo程序来自vendor源码与补丁。Snowbot运行工具安装在`snowbot_bringup.teleop`与`snowbot_bringup.simulation`，页面安装在该包的`share/web/`。运行检查、场景构造及VR物理启动器均随包安装，运行时不再导入源码目录的`tools`；源码环境变量仅用于已有工具选择、来源对比及记录。位置配方由`snowbot_teleop.tool_node`接入夹爪规则，`snowbot_hardware.physics_position`维护型号物理IO。Bindu中的旧Snowbot导入、工具命令和launch保留兼容转发，正式应用实现维护在本仓四个包中。生成树、现场配置、证书私钥及构建产物保持本地。
-
-## 当前工程结构
+## 目录结构
 
 ```text
 snowbot/
 ├── src/
-│   ├── snowbot_bringup/       launch、配置、仿真／操作台运行工具及页面
-│   ├── snowbot_description/   URDF、CAD及来源声明
-│   ├── snowbot_hardware/      厂商消息、会话、反馈、夹爪及设备节点
-│   └── snowbot_teleop/        PICO准备、装卸、操作状态机及协调节点
-├── vendor/snowbot/            original/原始输入、baseline.json与SHA身份
-├── tools/deployment/         统一部署入口、底层准备器与补丁维护源
-├── tests/                    PICO、操作台、设备／底层检查及两仓集成回归
-├── releases/                 唯一命名的生成候选与index.json（本地）
-├── deployments/118/          已有部署批次与回执；index.json标明记录状态（本地）
-├── artifacts/                dependencies/锁定依赖、robot/部署产物及历史归档（本地）
-└── backups/                  本机恢复材料（本地）
+│   ├── snowbot_bringup/       launch、配置、仿真工具与浏览器页面
+│   ├── snowbot_description/   URDF、CAD 与模型资源
+│   ├── snowbot_hardware/      设备协议、位置会话与反馈适配
+│   └── snowbot_teleop/        PICO 操作流程与协调节点
+├── vendor/snowbot/            底层驱动源码与基线清单
+├── tools/deployment/         部署入口、源码准备器与补丁
+├── tests/                    单元测试与集成检查
+└── dependencies.repos        Bindu 版本锁
 ```
 
-配置模板的唯一维护目录为 `src/snowbot_bringup/config/`：`deployments/` 选择装配，`robots/snowbot/` 保存本体索引、profile、工具、PICO、夹爪及可选底盘参数。默认实机参数以最后部署证据为基础，跟踪与回零使用2026-10-29确认的较宽口径，具体数值见[现场配置](运行与验证.md#首次现场配置)；单机覆盖保留在现场配方。部署配方用 `robot_package=snowbot_bringup` 选择应用 launch，资源通过 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 解析。现场 `site.json` 保存实际选择与网络、设备、标定条件；未知字段及无效组合仍拒绝。
+运行工具安装在 `snowbot_bringup.teleop` 和 `snowbot_bringup.simulation`，页面位于该包的 `share/web/`。
 
-D 型把手雪铲的几何原型见 [d_handle_snow_shovel.urdf](src/snowbot_description/urdf/d_handle_snow_shovel.urdf)：保留 28×45 cm 浅铲，杆尾增加 22 cm 横把，左右握点间距 34 cm。`left_grip_frame` 的 +Z 沿横把，`right_grip_frame` 的 +Z 沿杆，两轴垂直；这两个是固定参考坐标，模型本身为刚体，尚未接入双轴释放求解。
+## 配置与模型
 
-厂商原始基线已逐字节迁至 `vendor/snowbot/original/`，由 `vendor/snowbot/baseline.json` 固定其清单身份；日常修改在准备器、补丁与公共头文件维护，生成目录只作输出，不再作为第二个维护源。原始文件与同事资产不改写，`artifacts/`、`vendor/snowbot/`、`releases/`、`deployments/`、`backups/`中的 `COLCON_IGNORE` 防止外层构建误装配历史源码或原始驱动。Bindu原导入入口为兼容转发，新实现只维护一次。
+配置模板位于 [src/snowbot_bringup/config/](src/snowbot_bringup/config/)：
 
-生成与历史产物按[产物存放约定](运行与验证.md#基线与可复现边界)维护。已有本地工作区的候选、部署及历史位置分别由`releases/index.json`、`deployments/index.json`和`artifacts/index.json`索引；这些机器资料不随Git分发。索引标注盘点日期及证据状态；历史回执不证明机器人当前在线版本。生成目录只作输出，不直接修改。
+- `deployments/`：实机与仿真运行配方。
+- `robots/snowbot/`：本体、动态限制、工具、PICO、夹爪和可选底盘参数。
+- `robots/snowbot/runtime_parameters.json`：输入、执行、诊断与显示参数。
 
-## 部署与使用入口
+资源使用 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 路径。机器配置保存在部署目录的 `upper/site.json`，底层参数保存在 `vendor-position.yaml`；配置方法见[运行指南](运行与验证.md#首次现场配置)。
 
-统一入口位于[deploy.py](tools/deployment/deploy.py)，配对版本以[dependencies.repos](dependencies.repos)为准。
+[D 型把手雪铲](src/snowbot_description/urdf/d_handle_snow_shovel.urdf)包含 28×45 cm 浅铲、22 cm 横把和名义间距 34 cm 的左右握点，右手握杆位置可用于不同握距评估。`left_grip_frame` 的 +Z 沿横把，`right_grip_frame` 的 +Z 沿杆。固定握点坐标用于标定，离线双轴握持通过 Bindu 的 `left_axial_grasp`、`right_axial_grasp` 求解，工具跟踪完整六维目标；CAD 与物理形状共用该 URDF。
 
-| 阶段 | 从Snowbot执行 | 作用 |
-|---|---|---|
-| 首次准备 | `python3 -m tools.deployment.deploy prepare` | 获取锁定Bindu、准备依赖，构建包含servo的vendor及两仓上层 |
-| 更新后构建 | `python3 -m tools.deployment.deploy build` | 按新依赖锁选择Bindu，复用环境与构建缓存 |
-| 日常上层启动 | `python3 -m tools.deployment.deploy start --enable-commands` | 由现场人员先按指南启动servo→中层→topic上层，再复用现场配方及既有预检启动上层 |
+## 开发
 
-准备和构建不启动设备。以上命令的系统前提、源码保护、产物路径与完整启动顺序见[运行指南](运行与验证.md)，不在README另维护一套操作步骤。
+通用契约、求解与执行逻辑在 Bindu 维护；型号配置、底层适配和操作流程在 Snowbot 维护。底层代码以 `vendor/snowbot/original/` 为基线，在 `tools/deployment/snowbot_vendor/position_session/` 维护补丁与公共头，通过 [prepare_position_session.py](tools/deployment/prepare_position_session.py) 生成构建源码。
 
-默认控制行为以118最后部署的df2645a及配套底层、现场覆盖为对照；当前持续轴向握持及跟踪／双臂回零判据是用户要求的明确差异，轴向握持以运行指南为准，跟踪／回零以`baseline.json`中的`default_policy`为准，历史部署身份保留在`deployment_reference`。旧单仓安装保留原样，本机软件整理未更新118，也未完成目标环境完整构建或实机验收。现场配置、私钥及构建产物保持本地。
+应用测试从仓库根目录执行，例如 `python -m unittest tests.unit.test_pico_control`。ROS 与原生依赖的加载方式、仿真构建及集成检查见[运行指南](运行与验证.md#仿真与浏览器操作台)。
 
-已有开发机使用[仿真与浏览器操作台](运行与验证.md#仿真与浏览器操作台)的独立构建与回归命令，仍按同一依赖锁取得Bindu。
+## 文档
 
-## 未实现项
-
-姿态优化保存在两仓的`xavier/posture-optimization`开发分支。它未部署、未完成实体效果验收，不作为main或实机运行指南中的已实现能力。
-
-## 现场条件与待确认项
-
-- 118为Ubuntu 24.04.5／ROS 2 Jazzy／Python 3.12.3／x86_64；现场工作区分别为 `/home/cc/snowbot_ws` 和 `/home/cc/bindu`。`/home/sun/snowbot`为历史环境路径，118使用上述工作区。
-- 25电机与20逻辑轴对应、物理轴序／零点、夹爪／握点／六维力标定和持载停止仍待现场确认。
-- 恢复原版及其后改进部署均有历史记录；反馈能力与通过结果须按具体版本和采集时间核对，不据旧恢复记录推断当前底层状态。
+- [运行与验证](运行与验证.md)：依赖、构建、配置、PICO 操作与仿真。
+- [Bindu](https://github.com/WXB1870/bindu)：通用框架与模块文档。
