@@ -76,6 +76,13 @@ def wooden_parts(recipe, material):
                   rotation=basis, center=left+axis*np.mean(ends), mass=mass,
                   inertia=basis @ np.diag([radial, radial, axial]) @ basis.T)]
     if kind=='rod':return parts
+    if recipe.get('d_handle_urdf'):
+        from bindu_kinematics.tool_geometry import d_handle_parts
+        for part in d_handle_parts(recipe):
+            r,l=part['radius'],part['length']
+            m=density*np.pi*r*r*l
+            local=m*np.diag([(3*r*r+l*l)/12]*2+[r*r/2])
+            parts.append(dict(part,mass=m,inertia=part['rotation'] @ local @ part['rotation'].T))
     def box(name, dims, offset):
         dims = np.asarray(dims)
         m = density*np.prod(dims)
