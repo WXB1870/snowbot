@@ -59,9 +59,9 @@ def wooden_parts(recipe, material):
     radius = float(recipe['shaft_radius_m'])
     ends = np.asarray(recipe['shaft_from_left_grip_m'], dtype=float)
     axis = np.asarray(recipe['shaft_axis_in_tool'], dtype=float)
-    left = np.asarray(recipe['left_grip_in_tool_m'], dtype=float)
+    left = np.asarray(recipe.get('shaft_reference_in_tool_m',recipe['left_grip_in_tool_m']), dtype=float)
     if (not np.isfinite(np.r_[density, wall, size, center, radius, ends, axis, left]).all() or
-            density <= 0 or radius <= 0 or wall <= 0 or np.any(size <= 2*wall) or
+            density <= 0 or radius <= 0 or wall <= 0 or left.shape != (3,) or np.any(size <= 2*wall) or
             ends.shape != (2,) or ends[1] <= ends[0] or not np.isclose(np.linalg.norm(axis), 1.)):
         raise ValueError('INVALID_WOOD_GEOMETRY')
     reference = np.eye(3)[np.argmin(abs(axis))]
