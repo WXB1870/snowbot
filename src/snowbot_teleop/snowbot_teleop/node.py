@@ -74,9 +74,9 @@ class PicoNode(RuntimeNode):
             from bindu_runtime.teleop_base import TeleopBase
             self.base = TeleopBase(self, self.get_parameter('base_config').value,
                                   self.get_parameter('command_enabled').value)
-        from snowbot_hardware.parameters import load_parameters, apply_tool_timing
+        from snowbot_hardware.parameters import load_parameters, apply_tool_timing, load_mode_config
         self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
-        self.cfg=json.loads(Path(self.get_parameter('pico_config').value).read_text())
+        self.cfg=load_mode_config(self.get_parameter('pico_config').value,self.runtime_mode)
         self.position_contract = self.cfg.get('schema_version') == 2
         if self.cfg.get('schema_version') not in (1,2):
             raise ValueError('PICO_CONFIG_SCHEMA')

@@ -48,7 +48,11 @@ snowbot/
 - `deployments/`：当前实机与位置仿真两份运行配方。
 - `robots/snowbot/`：当前本体、动态限制、工具、PICO、夹爪和可选底盘参数；实机与位置仿真共用本体和工具配置。
 - `examples/snowbot/`：单臂、独立适配和较早仿真入口使用的示例配置。
+- `robots/snowbot/teleop.json`：操作流程、准备姿态与握持确认。
+- `robots/snowbot/grippers.json`：夹爪开闭、增益、速度、标定与到位参数。
 - `robots/snowbot/runtime_parameters.json`：输入／反馈有效期、求解超时、命令时序、执行、诊断与显示参数。
+
+`teleop.json` 和 `grippers.json` 的公共字段位于顶层，`modes.real`／`modes.simulation` 保存各环境差异，运行时按配方的 `runtime_mode` 合并。
 
 资源使用 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 路径。机器配置保存在部署目录的 `upper/site.json`，底层参数保存在 `vendor-position.yaml`；配置方法见[运行指南](运行与验证.md#首次现场配置)。
 

@@ -4,8 +4,9 @@ from bindu_runtime.common import spin
 from snowbot_hardware.gripper import validate_config, JOINTS
 
 
-def load_grippers(config, profile):
-    return validate_config(config, profile), dict(JOINTS)
+def load_grippers(config, profile, mode):
+    from snowbot_hardware.parameters import select_mode_config
+    return validate_config(select_mode_config(config,mode), profile), dict(JOINTS)
 
 
 def load_tool(node, config):
@@ -18,7 +19,8 @@ def load_tool(node, config):
 
 class SnowbotToolNode(BimanualToolNode):
     def __init__(self):
-        super().__init__(gripper_config_loader=load_grippers, tool_config_loader=load_tool)
+        super().__init__(gripper_config_loader=lambda config,profile: load_grippers(config,profile,self.runtime_mode),
+                         tool_config_loader=load_tool)
 
 
 def main(args=None):

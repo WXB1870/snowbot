@@ -86,7 +86,8 @@ def main():
     if session['runtime_mode']!='simulation':raise ValueError('PHYSICS_SIMULATION_ONLY')
     cfg=json.loads(Path(session['physics_config']).read_text())
     tool=json.loads(Path(session['tool_config']).read_text())
-    pico=json.loads(Path(session['pico_config']).read_text())
+    from snowbot_hardware.parameters import load_mode_config
+    pico=load_mode_config(session['pico_config'],session['runtime_mode'])
     live=validate_live_config(cfg);cfg['physics_dt_s']=float(live['physics_dt_s'])
     cfg['joint_limit_inset_rad']=live['joint_limit_inset_rad']
     cfg['contact_grasp']=dict(cfg['contact_grasp'],

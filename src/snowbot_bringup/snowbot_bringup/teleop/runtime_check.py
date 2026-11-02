@@ -363,7 +363,8 @@ def assess_robot_interface(args, node, messages, now, health):
         # Historical custom-wire guards reject the native five-element topics.
         if 'gripper_control_enabled' in health.messages.get('servo', {}):
             errors.append('GRIPPER_NATIVE_PROTOCOL_GUARD_UNVERIFIED')
-        cfg = json.loads(Path(args['gripper_config']).read_text())
+        from snowbot_hardware.parameters import load_mode_config
+        cfg = load_mode_config(args['gripper_config'],args['runtime_mode'])
         if not cfg['calibrated']:
             errors.append('GRIPPER_CALIBRATION_REQUIRED')
     return dict(robot_interface='available' if not errors else 'unavailable',

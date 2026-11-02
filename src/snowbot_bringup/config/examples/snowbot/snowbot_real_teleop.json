@@ -7,7 +7,7 @@
     "namespace": "bindu_snowbot",
     "device_backend": "snowbot_vendor",
     "command_enabled": false,
-    "gripper_config": "package://snowbot_bringup/config/robots/snowbot/snowbot_grippers_real.json",
+    "gripper_config": "package://snowbot_bringup/config/robots/snowbot/grippers.json",
     "vendor_namespace": "/snowbot",
     "side": "left",
     "tool_input_source": "vr",

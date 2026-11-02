@@ -1,5 +1,6 @@
 """Shared startup parameters; loading never contacts hardware or starts services."""
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -158,3 +159,39 @@ def braking_lead(parameters, legacy=None):
             raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s '
                              'in parameters_config and remove target_stream_brake_lead_s from the deployment')
     return selected
+
+
+def select_mode_config(config, mode):
+    """Expand a shared teleop/device file for one explicit runtime mode."""
+    if mode not in ('real', 'simulation') or not isinstance(config, dict):
+        raise ValueError('SNOWBOT_CONFIG_RUNTIME_MODE')
+    result = copy.deepcopy(config)
+    has_modes = 'modes' in result
+    modes = result.pop('modes', None)
+    if has_modes:
+        if (not isinstance(modes, dict) or set(modes) != {'real', 'simulation'} or
+                any(not isinstance(v, dict) or 'modes' in v for v in modes.values())):
+            raise ValueError('SNOWBOT_CONFIG_MODES')
+        def merge(base, changes):
+            for key, value in changes.items():
+                if isinstance(value, dict) and isinstance(base.get(key), dict):
+                    merge(base[key], value)
+                else:
+                    base[key] = value
+        merge(result, modes[mode])
+    if result.get('simulation_only', False) is not (mode == 'simulation'):
+        raise ValueError('SNOWBOT_CONFIG_MODE_MISMATCH')
+    return result
+
+
+def load_mode_config(path, mode):
+    return select_mode_config(json.loads(Path(path).read_text()), mode)
+
+
+def mode_config_digest(config, mode):
+    """Bind device feedback to the resolved values and their runtime mode."""
+    if mode not in ('real', 'simulation') or 'modes' in config:
+        raise ValueError('SNOWBOT_CONFIG_RUNTIME_MODE')
+    raw = json.dumps({'runtime_mode': mode, 'configuration': config},
+                     sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(raw.encode()).hexdigest()

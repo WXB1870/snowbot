@@ -1,5 +1,4 @@
 """PICO operations against the shared arm-target and gripper service contract."""
-import hashlib
 import json
 import math
 import time
@@ -7,7 +6,7 @@ from pathlib import Path
 from bindu_interfaces.msg import GripperState
 from bindu_interfaces.srv import GripperControl, Lease
 from snowbot_hardware.gripper import SIDES, GROUPS, JOINTS, validate_config, target_position_tolerance
-from snowbot_hardware.parameters import parameters_for
+from snowbot_hardware.parameters import parameters_for, load_mode_config, mode_config_digest
 from bindu_runtime.common import seconds, stamp
 
 
@@ -15,8 +14,8 @@ class PositionOperations:
     def __init__(self, node, path):
         self.node = node
         path = Path(path)
-        self.config_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        self.config = validate_config(json.loads(path.read_text()), node.profile)
+        self.config = validate_config(load_mode_config(path,node.runtime_mode), node.profile)
+        self.config_hash = mode_config_digest(self.config,node.runtime_mode)
         if self.config.get('simulation_only', False) is not node.simulation:
             raise ValueError('PICO_GRIPPER_CONFIG_MODE_MISMATCH')
         self.states = {}

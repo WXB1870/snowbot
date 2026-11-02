@@ -24,6 +24,7 @@ from bindu_interfaces.srv import Lease, SubmitMotion, PicoContext
 from bindu_runtime.common import stamp, seconds
 from bindu_contracts.teleoperation import VRFrame
 from bindu_teleoperation.vr.receiver import ButtonCounters
+from snowbot_hardware.parameters import load_mode_config
 from snowbot_hardware.protocol import GROUPS
 from tests.support.snowbot import until, call, terminate
 
@@ -92,7 +93,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     source=dict(buttons=[0,0],trigger=[0.,0.],grip=0.,grips=None,delta=0.,deltas=[0.,0.],stream=False,seq=0,head_tracking_id=token)
     counters=[ButtonCounters(),ButtonCounters()]
     vr=node.create_publisher(VRInput,ns+'/teleop/vr/raw',10)
-    fixture=json.loads((CFG/'pico_snowbot_position_sim.json').read_text())
+    fixture=load_mode_config(CFG/'teleop.json','simulation')
     # Exercise an invalid startup posture even if the deployment example is
     # later calibrated to a valid grasp. Keep this override in the fixture only.
     fixture['device_initial_positions_rad']={n:0. for n in fixture['device_initial_positions_rad']}
@@ -172,9 +173,9 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         recipe['arguments'].update(host='127.0.0.1',port=port)
     if mode=='real':
         # This is explicitly synthetic calibration, written only under test output.
-        gc=json.loads((CFG/'snowbot_grippers_real.json').read_text());gc['calibrated']=True
+        gc=load_mode_config(CFG/'grippers.json','real');gc['calibrated']=True
         gp=out/'fixture-grippers.json';gp.write_text(json.dumps(gc))
-        pc=json.loads((CFG/'pico_snowbot_position_real.json').read_text());pc['prepare_positions_rad']=fixture['prepare_positions_rad']
+        pc=load_mode_config(CFG/'teleop.json','real');pc['prepare_positions_rad']=fixture['prepare_positions_rad']
         pc['initial_teleop_mode']=fixture['initial_teleop_mode']
         pp=out/'fixture-pico.json';pp.write_text(json.dumps(pc))
         recipe['arguments'].update(gripper_config=str(gp),pico_config=str(pp),vendor_namespace=vendor,
@@ -586,7 +587,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         source['buttons'][0]=1
         wait(lambda:views[-1]['phase']=='following' and views[-1]['grasp_applied']=='right_axial' and
              views[-1]['tool_phase']=='follow:right_axial',20.)
-        expected_virtual=json.loads((CFG/'snowbot_grippers_sim.json').read_text())['grippers']['right']['virtual']
+        expected_virtual=load_mode_config(CFG/'grippers.json','simulation')['grippers']['right']['virtual']
         assert abs(grippers['right'].measured_position-expected_virtual)<.003
         assert abs(grippers['left'].measured_position-left_position)<(.003 if physics else 1e-9)
         assert all(g.grasp_state=='unknown' for g in grippers.values())

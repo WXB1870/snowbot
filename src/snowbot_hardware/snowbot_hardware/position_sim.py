@@ -3,7 +3,6 @@
 The gripper state machine is shared with the hardware adapter. Only device IO
 and acknowledgement generation live here; no controller/vendor topics exist.
 """
-import hashlib
 import json
 from pathlib import Path
 from rcl_interfaces.msg import ParameterDescriptor
@@ -11,6 +10,7 @@ from bindu_execution.delegated_position import DelegatedPositionExecutor
 from snowbot_hardware.protocol import SnowbotIO
 from snowbot_hardware.gripper import GripperController, SIDES, JOINTS, GROUPS, MASKS
 from bindu_runtime.execution_node import ExecutionNode, run_execution
+from .parameters import load_mode_config, mode_config_digest
 from .gripper_node import SnowbotGrippers
 from bindu_runtime.device_assembly import assemble_devices
 
@@ -56,10 +56,10 @@ class SimulatedGrippers(SnowbotGrippers):
         self.node = node
         node.declare_parameter('gripper_config', '', descriptor=ParameterDescriptor(read_only=True))
         path = Path(node.get_parameter('gripper_config').value)
-        cfg = json.loads(path.read_text())
+        cfg = load_mode_config(path,node.runtime_mode)
         if cfg.get('simulation_only') is not True:
             raise ValueError('SIM_GRIPPER_CONFIG_REQUIRED')
-        self.config_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.config_hash = mode_config_digest(cfg,node.runtime_mode)
         self.sample = 0
         self.acks, self.holds, self.hold_mask = [0, 0], [0., 0.], 0
         self.pending = {}

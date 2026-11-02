@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from snowbot_hardware.parameters import load_parameters, validate_pico_timing, apply_tool_timing, braking_lead
+from snowbot_hardware.parameters import load_parameters, validate_pico_timing, apply_tool_timing, braking_lead, load_mode_config, select_mode_config, mode_config_digest
 
 
 class RuntimeParameterTests(unittest.TestCase):
@@ -98,7 +98,7 @@ class RuntimeParameterTests(unittest.TestCase):
         from bindu_runtime.robot_setup import RobotSetup
         from bindu_runtime.teleop_deployment import load_deployment
         share=package_share('snowbot_bringup');config=share/'config'
-        self.assertEqual(len(list((config/'robots/snowbot').glob('*.json'))),10)
+        self.assertEqual(len(list((config/'robots/snowbot').glob('*.json'))),8)
         self.assertEqual({p.name for p in (config/'deployments').glob('*.json')},
                          {'snowbot_vr_real.json','snowbot_vr_sim.json'})
         selections=[]
@@ -106,13 +106,81 @@ class RuntimeParameterTests(unittest.TestCase):
             _,args=load_deployment(config/'deployments'/name,package_share('bindu_runtime'))
             robot=RobotSetup.load(args['robot_config'])
             selections.append((robot.path,robot.profile_path,robot.tool_config))
-            pico=json.loads(Path(args['pico_config']).read_text())
+            pico=load_mode_config(args['pico_config'],args['runtime_mode'])
             self.assertEqual(pico['tool_grasp_confirmation'],policy)
         self.assertEqual(selections[0],selections[1])
         example=config/'examples/snowbot'
         RobotSetup.load(example/'robot_snowbot.json')
         for name in ('snowbot_real_teleop.json','teleop_pico_snowbot_sim.json'):
             load_deployment(example/name,package_share('bindu_runtime'))
+
+    def test_shared_mode_configs_preserve_device_values_and_operation_policy(self):
+        from bindu_contracts.resources import package_share
+        from bindu_contracts.profile import Profile
+        from snowbot_hardware.gripper import validate_config
+        base=package_share('snowbot_bringup')/'config/robots/snowbot'
+        profile=Profile.load(base/'snowbot_real_position.json')
+        for mode,closed,speed,policy,calibrated,duration in (
+                ('real',.26,.5,'operator',False,4.),('simulation',0.,.2,'calibrated',True,8.)):
+            operations=load_mode_config(base/'teleop.json',mode)
+            grippers=validate_config(load_mode_config(base/'grippers.json',mode),profile)
+            self.assertEqual(operations['tool_grasp_confirmation'],policy)
+            self.assertEqual(operations['prepare_duration'],duration)
+            self.assertIs(grippers['calibrated'],calibrated)
+            self.assertEqual(grippers['grippers']['left']['closed'],closed)
+            self.assertEqual(grippers['grippers']['left']['max_speed'],speed)
+            self.assertEqual(grippers['grippers']['left']['kp'],100.)
+            self.assertNotIn('modes',operations)
+            self.assertNotIn('modes',grippers)
+        real=load_mode_config(base/'grippers.json','real')
+        sim=load_mode_config(base/'grippers.json','simulation')
+        self.assertNotEqual(mode_config_digest(real,'real'),mode_config_digest(sim,'simulation'))
+        real['grippers']['left']['kp']=1.
+        self.assertEqual(load_mode_config(base/'grippers.json','real')['grippers']['left']['kp'],100.)
+
+    def test_mode_selection_rejects_missing_wrong_or_malformed_scope(self):
+        for config,mode in (({},'auto'),({'simulation_only':True},'real'),
+                            ({},'simulation'),({'modes':None},'real'),
+                            ({'modes':{'real':{}}},'real'),
+                            ({'modes':{'real':{},'simulation':5}},'real')):
+            with self.subTest(config=config,mode=mode),self.assertRaisesRegex(ValueError,'SNOWBOT_CONFIG_'):
+                select_mode_config(config,mode)
+        self.assertEqual(select_mode_config({'schema_version':1},'real'),{'schema_version':1})
+        self.assertEqual(select_mode_config({'simulation_only':True},'simulation'),{'simulation_only':True})
+
+    def test_device_and_operation_config_identities_match_for_selected_mode(self):
+        import ast
+        from importlib.util import find_spec
+        from types import SimpleNamespace as S
+        from bindu_contracts.resources import package_share
+        from bindu_contracts.profile import Profile
+        from snowbot_hardware.gripper import validate_config
+        base=package_share('snowbot_bringup')/'config/robots/snowbot'
+        profile=Profile.load(base/'snowbot_real_position.json')
+        sources=[('snowbot_teleop','position.py','PositionOperations'),
+                 ('snowbot_hardware','gripper_node.py','SnowbotGrippers'),
+                 ('snowbot_hardware','position_sim.py','SimulatedGrippers')]
+        codes=[]
+        for package,file,cls in sources:
+            source=Path(find_spec(package).origin).parent/file
+            definition=next(n for n in ast.parse(source.read_text()).body if getattr(n,'name','')==cls)
+            init=next(n for n in definition.body if getattr(n,'name','')=='__init__')
+            assignments=[n for n in init.body if isinstance(n,ast.Assign) and any(
+                isinstance(t,ast.Name) and t.id=='cfg' or
+                isinstance(t,ast.Attribute) and t.attr in ('config','config_hash') for t in n.targets)]
+            codes.append(compile(ast.Module(body=assignments,type_ignores=[]),str(source),'exec'))
+        hashes=[]
+        for mode,index in (('real',1),('simulation',2)):
+            node=S(runtime_mode=mode,profile=profile);values=[]
+            for code in (codes[0],codes[index]):
+                owner=S()
+                exec(code,dict(self=owner,node=node,path=base/'grippers.json',
+                     validate_config=validate_config,load_mode_config=load_mode_config,
+                     mode_config_digest=mode_config_digest))
+                values.append(owner.config_hash)
+            self.assertEqual(*values)
+            hashes.append(values[0])
+        self.assertNotEqual(*hashes)
 
     def test_partial_override_and_independent_snapshots(self):
         cfg=self.load({'pico':{'prepare_command_period_s':.02},'display':{'poll_ms':250}})

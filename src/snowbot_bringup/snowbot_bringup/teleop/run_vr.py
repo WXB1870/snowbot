@@ -67,8 +67,9 @@ def check(args):
     import json
     robot=RobotSetup.load(args.deployment['robot_config'])
     tool=json.loads(robot.tool_config.read_text())
-    pico=json.loads(Path(args.deployment['pico_config']).read_text())
-    grippers=validate_config(json.loads(Path(args.deployment['gripper_config']).read_text()),robot.profile)
+    from snowbot_hardware.parameters import load_mode_config
+    pico=load_mode_config(args.deployment['pico_config'],args.deployment['runtime_mode'])
+    grippers=validate_config(load_mode_config(args.deployment['gripper_config'],args.deployment['runtime_mode']),robot.profile)
     simulation=args.deployment['runtime_mode']=='simulation'
     if args.deployment.get('device_backend')=='external_simulation':
         sdk=Path(os.environ.get('ISAAC_SIM_PATH',str(Path.home()/'isaacsim-6.2.0')))

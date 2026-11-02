@@ -1,0 +1,58 @@
+{
+  "command_ttl": 0.2,
+  "feedback_max_age": 0.2,
+  "grippers": {
+    "left": {
+      "kd": 30.0,
+      "kp": 100.0
+    },
+    "right": {
+      "kd": 30.0,
+      "kp": 100.0
+    }
+  },
+  "motion_timeout": 5.0,
+  "position_tolerance": 0.003,
+  "schema_version": 1,
+  "settle_time": 0.1,
+  "stop_timeout": 2.0,
+  "velocity_tolerance": 0.01,
+  "modes": {
+    "real": {
+      "allow_uncalibrated_direct": true,
+      "calibrated": false,
+      "direct_position_tolerance": 0.03,
+      "grippers": {
+        "left": {
+          "closed": 0.26,
+          "max_speed": 0.5,
+          "open": -0.8
+        },
+        "right": {
+          "closed": -0.26,
+          "max_speed": 0.5,
+          "open": 0.8,
+          "virtual": -0.24
+        }
+      },
+      "independent_trigger_control": true
+    },
+    "simulation": {
+      "calibrated": true,
+      "grippers": {
+        "left": {
+          "closed": 0.0,
+          "max_speed": 0.2,
+          "open": -0.4
+        },
+        "right": {
+          "closed": 0.0,
+          "max_speed": 0.2,
+          "open": 0.4,
+          "virtual": 0.02
+        }
+      },
+      "simulation_only": true
+    }
+  }
+}

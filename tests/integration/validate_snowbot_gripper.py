@@ -78,7 +78,8 @@ def scenario(output, name, enabled, calibrated, *, freeze=False, shutdown=False)
                     pose=[1.,0.,0.,float(i),0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.],
                     button_edges=[0,0,0,0,0,0,*control['edges'][i]]))
     node.create_timer(.01,publish)
-    config=json.loads((package_share("snowbot_bringup")/'config/robots/snowbot/snowbot_grippers_real.json').read_text())
+    from snowbot_hardware.parameters import load_mode_config
+    config=load_mode_config(package_share('snowbot_bringup')/'config/robots/snowbot/grippers.json','real')
     config['calibrated']=calibrated
     path=output/(name+'.json');path.write_text(json.dumps(config))
     log=(output/(name+'.log')).open('w')

@@ -1,11 +1,11 @@
 """Native Snowbot gripper commands; measured state comes from RetInformation."""
 import json
-import hashlib
 import time
 from pathlib import Path
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import qos_profile_sensor_data
 from snowbot_hardware.gripper import GripperController, SIDES, GROUPS, JOINTS, MASKS, native_command
+from snowbot_hardware.parameters import load_mode_config, mode_config_digest
 from bindu_contracts.teleoperation import VRFrame
 from bindu_interfaces.msg import GripperState, VRInput
 from bindu_interfaces.srv import GripperControl, Lease
@@ -21,8 +21,8 @@ class SnowbotGrippers:
         path = node.get_parameter('gripper_config').value
         if not path:
             return
-        self.config_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        cfg = json.loads(Path(path).read_text())
+        cfg = load_mode_config(path,node.runtime_mode)
+        self.config_hash = mode_config_digest(cfg,node.runtime_mode)
         if cfg.get('simulation_only', False) is not False:
             raise ValueError('REAL_GRIPPER_CONFIG_REQUIRED')
         prefix = node.get_parameter('vendor_namespace').value.rstrip('/')
