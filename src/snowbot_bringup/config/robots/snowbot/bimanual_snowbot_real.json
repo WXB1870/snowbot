@@ -43,6 +43,24 @@
   "max_integration_interval": 0.1,
   "integration_max_sample_gap": 0.25,
   "max_reference_error": 0.15,
+  "impedance_reference_limits": {
+    "joint_reference_error_limits": {
+      "arm_l_joint_1": 0.25,
+      "arm_l_joint_2": 0.25,
+      "arm_l_joint_3": 0.25,
+      "arm_l_joint_4": 0.25,
+      "arm_l_joint_5": 0.25,
+      "arm_l_joint_6": 0.25,
+      "arm_l_joint_7": 0.25,
+      "arm_r_joint_1": 0.25,
+      "arm_r_joint_2": 0.25,
+      "arm_r_joint_3": 0.25,
+      "arm_r_joint_4": 0.25,
+      "arm_r_joint_5": 0.25,
+      "arm_r_joint_6": 0.25,
+      "arm_r_joint_7": 0.25
+    }
+  },
   "worker_timeout": 0.23,
   "worker_startup_timeout": 30.0,
   "relative_gain": 12.0,
