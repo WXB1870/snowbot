@@ -489,18 +489,13 @@ class SimulationEntryTests(unittest.TestCase):
 
     def test_runtime_helpers_import_without_repository_tools_or_source_selection(self):
         code='''
-import importlib.abc,sys,tempfile
-from pathlib import Path
+import importlib.abc,sys
 class BlockTools(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
         if fullname.split('.')[0]=='tools':raise ModuleNotFoundError('source tools import: '+fullname)
 sys.meta_path.insert(0,BlockTools())
 from snowbot_bringup.teleop import runtime_check
 from snowbot_bringup.simulation import scene,physics,kinematic_scene
-assert runtime_check.ROOT is None
-with tempfile.TemporaryDirectory() as directory:
-    share=Path(directory);selected=share/'installed.json';selected.write_text('{}')
-    runtime_check.check_installed_configs([selected],share)
 '''
         env=dict(os.environ,PYTHONPATH=os.pathsep.join(sys.path))
         env.pop('BINDU_FRAMEWORK_SOURCE',None);env.pop('BINDU_APPLICATION_SOURCE',None)

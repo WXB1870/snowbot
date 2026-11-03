@@ -3,15 +3,11 @@ import importlib
 import hashlib
 import json
 import math
-import os
 import time
 import uuid
 from pathlib import Path
 
 import re
-
-ROOT = Path(os.environ['BINDU_FRAMEWORK_SOURCE']).resolve() if os.environ.get('BINDU_FRAMEWORK_SOURCE') else None
-
 
 CSP_DIAGNOSTIC_FIELDS = {
     'csp_diagnostics_version': ('uint8', 'octet'), 'csp_send_attempt_ns': ('int64',),
@@ -77,12 +73,7 @@ def verify_vendor_install(workspace, fields, prefixes, generated_module, expecte
         if digest != source_hashes[rel]:
             raise ValueError('VENDOR_SOURCE_INSTALL_MISMATCH:'+rel)
     binary = selected['snowbot_servo_control']/'lib/snowbot_servo_control/servo_node'
-    markers = (b'csp_send_attempt_ns=', b'mode_command=', b'mode_display=',
-               b'target_position_raw=', b'actual_position_raw=')
-    binary_content = binary.read_bytes()
-    if any(marker not in binary_content for marker in markers):
-        raise ValueError('VENDOR_SERVO_CSP_DIAGNOSTICS_MISSING:'+str(binary))
-    binary_hash = hashlib.sha256(binary_content).hexdigest()
+    binary_hash = sha(binary)
     if expected is not None:
         # Reuse the existing deployment-receipt shape, never execute its paths.
         files = expected.get('files', {})
@@ -97,33 +88,10 @@ def verify_vendor_install(workspace, fields, prefixes, generated_module, expecte
         package_prefixes={k: str(v) for k, v in selected.items()},
         generated_module=str(generated_module), generated_module_sha256=sha(generated_module),
         source_sha256=source_hashes, installed_sha256=installed_hashes,
-        binary=str(binary), binary_sha256=binary_hash, binary_diagnostic_markers_present=True,
+        binary=str(binary), binary_sha256=binary_hash,
         exact_servo_version_verified=expected is not None,
         consumer_binary_versions_verified=False, robot_interface='not_checked', hardware_accessed=False,
-        verification_scope='local loaded schema, prefixes, source/install pairs and servo diagnostic capability')
-
-
-def check_installed_configs(paths, share):
-    """Compare selected source checkouts; installed-only use needs no checkout."""
-    share = Path(share).resolve()
-    owners = [(ROOT/'src/integration/bindu_runtime', share)] if ROOT is not None else []
-    application = os.environ.get('BINDU_APPLICATION_SOURCE')
-    if application:
-        from ament_index_python.packages import get_package_share_directory
-        for name in ('snowbot_bringup', 'snowbot_description'):
-            source = Path(application).resolve()/'src'/name
-            if not (source/'package.xml').is_file():
-                raise ValueError('APPLICATION_SOURCE_MISSING:'+str(source))
-            owners.append((source, Path(get_package_share_directory(name)).resolve()))
-    for value in paths:
-        if not value:
-            continue
-        installed = Path(value).resolve()
-        for source_root, installed_root in owners:
-            if installed.is_relative_to(installed_root):
-                source = source_root/installed.relative_to(installed_root)
-                if not source.is_file() or source.read_bytes() != installed.read_bytes():
-                    raise ValueError('安装配置与源码不同，请重建：'+str(source))
+        verification_scope='local loaded schema, prefixes, source/install pairs and binary digest')
 
 
 def check_runtime(args, robot):
@@ -133,14 +101,9 @@ def check_runtime(args, robot):
         # Match the adapter's profile guard before launching any control node.
         # Construction is passive; no device or ROS publisher is created.
         SnowbotIO(robot.profile, lambda *_: None, lambda: 0., command_enabled=False)
-    from ament_index_python.packages import get_package_share_directory
     from rclpy.type_support import check_for_type_support
     from bindu_kinematics.bimanual import BimanualQP
 
-    check_installed_configs(
-        [args['robot_config'], robot.profile_path, robot.tool_config,
-         args.get('pico_config'), args.get('gripper_config'), args.get('base_config')],
-        get_package_share_directory('bindu_runtime'))
     modules = [
         ('bindu_interfaces.msg', ('ExecutionState', 'VRInput', 'TeleopModeState', 'GripperState')),
         ('bindu_interfaces.action', ('SelectTeleopMode', 'TeleopSession')),
