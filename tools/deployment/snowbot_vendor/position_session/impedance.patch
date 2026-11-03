@@ -188,50 +188,41 @@
      std::lock_guard<std::mutex> lock(rt_reference_mutex_);
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -117,6 +117,8 @@
-         m.csp_target_position_raw=s.csp.target_position;m.csp_target_velocity_raw=s.csp.target_velocity;m.csp_target_torque_raw=s.csp.target_torque;
-         m.csp_actual_position_raw=s.csp.actual_position;m.csp_actual_velocity_raw=s.csp.actual_velocity;
-         for(int i=0;i<20;++i){m.position[i]=s.position[i];m.speed[i]=s.speed[i];m.current[i]=s.current[i];m.status[i]=s.status[i];}
+@@ -119,0 +120,2 @@
 +        m.wrench=s.wrench;m.sensor_valid_mask=s.sensor_valid_mask;m.sensor_data_no=s.sensor_data_no;
 +        for(unsigned a=0;a<2;++a)m.sensor_age[a]=s.sensor_sampled_ns[a]>0 && now>=s.sensor_sampled_ns[a] ? (now-s.sensor_sampled_ns[a])*1e-9 : -1.;
-         m.current_valid_mask=m.valid_mask&s.current_valid_mask;m.torque_raw_valid_mask=m.valid_mask&s.torque_raw_valid_mask;m.torque_raw=s.torque_raw;
-         m.bad_wkc_count=s.bad_wkc;m.receive_overruns=s.receive_overruns;m.period_overruns=s.period_overruns;
-         m.session=s.session;m.command_sequence=s.sequence;m.session_reason=s.session_reason;m.session_selected=s.session_selected;
-@@ -137,6 +139,12 @@
-     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
-     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
-     position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if((position_gate_.selected()||position_target_takeover_valid_)&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_interrupt();position_pending_=false;}});
+@@ -139,0 +142,6 @@
 +    rcl_interfaces::msg::ParameterDescriptor session_descriptor;session_descriptor.read_only=true;
 +    session_execution_mode_=declare_parameter<std::string>("execution_mode","position",session_descriptor);
 +    if(session_execution_mode_!="position" && session_execution_mode_!="impedance")throw std::invalid_argument("execution_mode");
 +    session_calibration_confirmed_=declare_parameter<bool>("impedance_calibration_confirmed",false,session_descriptor);
 +    impedance_following_error_rad_=declare_parameter<double>("impedance_following_error_rad",.25,session_descriptor);
 +    if(!std::isfinite(impedance_following_error_rad_) || impedance_following_error_rad_<=0 || impedance_following_error_rad_>.5)throw std::invalid_argument("impedance_following_error_rad");
-     rcl_interfaces::msg::ParameterDescriptor reference_descriptor;reference_descriptor.read_only=true;
-     const auto reference_mode=declare_parameter<std::string>("position_reference_mode","follower",reference_descriptor);
-     if(reference_mode!="follower" && reference_mode!="trajectory" && reference_mode!="target_stream")throw std::invalid_argument("position_reference_mode");
-@@ -175,7 +183,7 @@
-     if(!std::isfinite(position_follower_.vmax)||!std::isfinite(position_follower_.amax)||position_follower_.vmax<=0||position_follower_.amax<=0)throw std::invalid_argument("position dynamic limits");
-     position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
-         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+@@ -189 +197 @@
 -        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?5:3;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
 +        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?5:3;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"legacy_impedance":session_execution_mode_;
-         m.startup_complete=position_startup_complete_ && !shutdown_mode_;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
-         m.state=!m.selected?"idle":position_local_hold_&&position_gate_.generation()==position_output_.admission_generation?"paused_nominal_hold":!position_gate_.live(now)?"command_timeout":position_gate_.last().operation==2?"paused":"following";
-         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
-@@ -372,7 +380,7 @@
-         // 1) 环境变量覆盖 (绝对路径)
-         std::getenv("IMPEDANCE_PARAMS_YAML") ? std::getenv("IMPEDANCE_PARAMS_YAML") : "",
-         // 2) src 源文件路径 (开发期: 修改 yaml 不需 colcon build 即时生效)
+@@ -198 +206,16 @@
+-            if(!report.empty())RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
++            if(!report.empty()){
++                if(!ready && session_execution_mode_=="impedance" && report.find("impedance_")==0){
++                    const auto obs=EtherCAT_positionObservation();
++                    const auto steady=position_session::steady_ns();
++                    const auto age_ms=[steady](int64_t sampled){return sampled>0?(steady-sampled)*1e-6:-1.;};
++                    int nonfinite=-1;for(unsigned i=0;i<12;++i)if(!std::isfinite(obs.wrench[i])){nonfinite=i;break;}
++                    const char* axes[]={"Fx","Fy","Fz","Mx","My","Mz"};
++                    RCLCPP_WARN(this->get_logger(),
++                        "Position session: %s; calibration_confirmed=%d controller_initialized=%d pdo_sample=%llu WKC=%d/%d pdo_age_ms=%.3f joint_valid_mask=0x%05x ft_valid=0x%x ft_initialized=0x%x ft_advancing=0x%x left_ft{DataNo=%u age_ms=%.3f} right_ft{DataNo=%u age_ms=%.3f} nonfinite_wrench=%s.%s",
++                        report.c_str(),int(session_calibration_confirmed_),int(impedance_inited_),
++                        static_cast<unsigned long long>(obs.sample),int(obs.wkc),int(obs.expected_wkc),age_ms(obs.sampled_ns),
++                        unsigned(obs.valid_mask),unsigned(obs.sensor_valid_mask),unsigned(obs.sensor_initialized_mask),unsigned(obs.sensor_advancing_mask),
++                        unsigned(obs.sensor_data_no[0]),age_ms(obs.sensor_sampled_ns[0]),unsigned(obs.sensor_data_no[1]),age_ms(obs.sensor_sampled_ns[1]),
++                        nonfinite<0?"-":nonfinite<6?"left":"right",nonfinite<0?"-":axes[nonfinite%6]);
++                }else RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
++            }
+@@ -386 +409 @@
 -        "/home/cc/snowbot_ws/src/ctl_msgs/config/impedance_params.yaml",
 +        session_execution_mode_=="impedance" ? "" : "/home/cc/snowbot_ws/src/ctl_msgs/config/impedance_params.yaml",
-         // 3) install 路径 (生产环境)
-         ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") +
-             "/config/impedance_params.yaml",
-@@ -393,8 +401,14 @@
-                 "Loading impedance config: %s", yaml_path_impedance.c_str());
-
-     auto make_config = [&](const std::string& side) {
+@@ -407,2 +430,8 @@
 -        return snowbot_impedance::ImpedanceConfig::fromYaml(
 -            yaml_path_impedance, side, urdf_path);
 +        auto cfg=snowbot_impedance::ImpedanceConfig::fromYaml(yaml_path_impedance, side, urdf_path);
@@ -242,13 +233,7 @@
 +            cfg.integral_gain_joint.assign(7,0.);cfg.force_feedback_gain.assign(6,0.);
 +        }
 +        return cfg;
-     };
-
-     impedance_left_  = std::make_shared<snowbot_impedance::CartesianImpedanceController>();
-@@ -415,6 +429,21 @@
-                      "Impedance controller init failed (left=%d right=%d)",
-                      ok_l, ok_r);
-     }
+@@ -428,0 +458,15 @@
 +
 +    session_q_index_.fill(-1);session_v_index_.fill(-1);
 +    if(impedance_inited_ && session_execution_mode_=="impedance"){
@@ -264,94 +249,32 @@
 +    }
 +
 +    if(impedance_inited_ && session_execution_mode_=="impedance")session_impedance_workspace();
-
-     // 双臂协调层初始化 (可选, 默认 OFF).
-     //   YAML 配置段完全可选, 缺失时 dual_arm_mode_ 保持 OFF, 零开销.
-@@ -555,9 +584,11 @@
-     }
-
-     // 运行时模式切换订阅 (可选, 不配置时默认 OFF).
+@@ -568,0 +613 @@
 +    if(session_execution_mode_!="impedance") {
-     dual_arm_mode_sub_ = create_subscription<std_msgs::msg::String>(
-         "~/dual_arm/mode", 10,
-         [this](const std_msgs::msg::String::SharedPtr msg) {
+@@ -571,0 +617 @@
 +            if(position_gate_.selected())return;
-             auto prev = dual_arm_coordinator_.mode();
-             auto m = snowbot_impedance::stringToDualArmMode(msg->data);
-             dual_arm_coordinator_.setMode(m);
-@@ -602,6 +633,7 @@
-     impedance_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
-         "~/impedance_enable", 10,
-         [this](const std_msgs::msg::Bool::SharedPtr msg) {
+@@ -615,0 +662 @@
 +            if(position_gate_.selected())return;
-             if(EtherCAT_driveResetBusy())return;
-             if (!impedance_inited_ && msg->data) {
-                 RCLCPP_WARN(this->get_logger(),
-@@ -663,6 +695,7 @@
-         });
-     RCLCPP_INFO(this->get_logger(),
-                 "Tau-FF test topics ready: ~/tau_ff_left, ~/tau_ff_right (7-DoF [Nm])");
+@@ -676,0 +724 @@
 +    }
- }
-
- void ServoNode::tau_ff_left_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-@@ -704,6 +737,7 @@
- }
-
- void ServoNode::applyImpedanceControl() {
+@@ -717,0 +766 @@
 +    if(session_execution_mode_=="impedance" && position_gate_.selected())return;
-     // 0. 提前获取六维力传感器数据并滤波
-     //    无论阻抗是否使能都持续更新, 使能时无阶跃
-     float fx, fy, fz, mx, my, mz;
-@@ -2478,6 +2512,8 @@
-   position_output_.kp[i]=packet->command.l_kp[i];position_output_.kd[i]=packet->command.l_kd[i];position_output_.torque[i]=packet->command.l_torque_grav_comp[i];
-   position_output_.kp[i+7]=packet->command.r_kp[i];position_output_.kd[i+7]=packet->command.r_kd[i];position_output_.torque[i+7]=packet->command.r_torque_grav_comp[i];
-  }
+@@ -2491,0 +2541,2 @@
 + position_output_.hold_kp=position_output_.kp;position_output_.hold_kd=position_output_.kd;position_output_.hold_torque=position_output_.torque;
 + position_output_.impedance_mode=session_execution_mode_=="impedance";
-  position_output_.selected=true;
-  if(m.operation==1 && !derived){
-   for(unsigned i=0;i<position_session::joint_count;++i)EtherCAT_setSingleMotorEnable(position_session::position_slot(i),true);
-@@ -2571,7 +2607,7 @@
-  auto* result=position_admission_->poll();if(!result){if(position_reference_mode_==2)position_target_dispatch();return;}
-  const auto source=position_session::meta(result->packet->meta);
-  const auto error=position_reference_mode_==2&&result->context.barrier!=position_target_barrier_?"target_superseded_by_pause":result->error.empty()?position_v2_.commit(result->command,result->prepared.get(),result->context,
+@@ -2585 +2636 @@
 -   position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load(),!impedance_enable_,position_policy_,
 +   position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load()&&(session_execution_mode_!="impedance"||session_impedance_ready()),!impedance_enable_,position_policy_,
-    position_feedback_,this->now().nanoseconds(),position_session::steady_ns(),position_gate_,position_trajectory_,position_output_,position_interval_):result->error.c_str();
-  if(error&&position_reference_mode_==2&&((std::strcmp(error,"target_generation_late")==0&&position_session::fresh(source,this->now().nanoseconds(),position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl))||std::strcmp(error,"target_superseded_by_pause")==0)){
-   // A late ordinary result is retried from a new dated snapshot if no newer
-@@ -2590,7 +2626,7 @@
-   }
-   if(source.operation==1)position_output_.cycle_fault={};
-   position_rejected_session_=position_rejected_sequence_=0;position_cycle_reason_=nullptr;
+@@ -2604 +2655 @@
 -
 +  position_output_.hold_kp=position_output_.kp;position_output_.hold_kd=position_output_.kd;position_output_.hold_torque=position_output_.torque;
-  }
-  if(position_receipts_enabled_ && !result->command.derived && !(error&&position_reference_mode_==2&&(std::strcmp(error,"target_generation_late")==0||std::strcmp(error,"target_superseded_by_pause")==0)))position_receipts_.push(source.session,source.sequence,
-    position_feedback_.boot,position_feedback_.sample,this->now().nanoseconds(),!error,error);
-@@ -2600,7 +2636,7 @@
-  if(!position_gate_.selected())return;
-  const auto now=position_session::steady_ns();const auto dt=position_interval_.tick(now);
-  if(impedance_enable_){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CONTROL_SOURCE_CONFLICT;if(position_reference_mode_)position_cycle_reason_="control_source_conflict";else position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}
+@@ -2614 +2665 @@
 - const bool local_hold=position_local_hold_ && position_reference_mode_==2 &&
 + const bool local_hold=position_local_hold_ && position_reference_mode_ &&
-   position_output_.operation==2 && position_output_.trajectory_phase==4 && position_output_.failure_reason==0 &&
-   position_gate_.last().session==position_output_.session && position_gate_.last().sequence==position_output_.sequence &&
-   position_gate_.generation()==position_output_.admission_generation;
-@@ -2629,7 +2665,7 @@
-    uint8_t axis_checks=0;
-    if(!std::isfinite(reference[i]))axis_checks|=4;
-    if(reference[i]<position_session::lower[i]||reference[i]>position_session::upper[i])axis_checks|=8;
+@@ -2643 +2694 @@
 -   if(std::abs(reference[i]-position_feedback_.q[i])>.5)axis_checks|=16;
 +   if(std::abs(reference[i]-position_feedback_.q[i])>(session_execution_mode_=="impedance"?impedance_following_error_rad_:.5))axis_checks|=16;
-    if(axis_checks){valid=false;checks|=axis_checks;if(failed_axis<0)failed_axis=int16_t(i);}
-   }
-   if(!valid && position_output_.failure_reason!=position_session::CYCLE_OR_TRACKING_ERROR){
-@@ -2639,14 +2675,23 @@
-   }
-   if(!valid){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CYCLE_OR_TRACKING_ERROR;if(position_reference_mode_)position_cycle_reason_="cycle_limit_or_tracking_error";else position_rejection_="cycle_limit_or_tracking_error";}
-  }
+@@ -2653 +2704,8 @@
 - if(position_reference_mode_==2 && position_output_.operation==2 && position_output_.trajectory_phase==4 &&
 + if(session_execution_mode_=="impedance" && (position_gate_.live(now)||local_hold) &&
 +    position_feedback_.fresh(this->now().nanoseconds(),now) && position_output_.failure_reason==0){
@@ -361,22 +284,37 @@
 +  }
 + }
 + if((position_reference_mode_==2 || (position_reference_mode_ && position_output_.impedance)) && position_output_.operation==2 && position_output_.trajectory_phase==4 &&
-     position_output_.failure_reason==0 && position_gate_.live(now))position_local_hold_=true;
-  position_output_.nominal_hold=position_local_hold_ && position_gate_.generation()==position_output_.admission_generation && position_output_.failure_reason==0;
+@@ -2655,0 +2714 @@
 + position_output_.impedance_mode=position_output_.impedance;
-  EtherCAT_positionOutput(position_output_);
- }
-
- bool ServoNode::position_ready(){
-  if(!position_initialized_){position_wait_reason_=position_init_error_;return false;}
-+ if(session_execution_mode_=="impedance" && !session_impedance_ready()){position_wait_reason_="impedance_calibration_or_sensor_unavailable";return false;}
-  if(!position_endpoint())return false;
-  const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-  if(!position_feedback_.sample){position_wait_reason_=position_feedback_.received_messages?"pdo_not_started":"publisher_found_no_message";return false;}
-@@ -2660,3 +2705,68 @@
-  if(position_feedback_gid_!=endpoint.publisher_gid){position_feedback_=position_session::Tracker{};position_interrupt();position_feedback_gid_=endpoint.publisher_gid;}
-  return true;
- }
+@@ -2660,0 +2720,27 @@
++ if(session_execution_mode_=="impedance"){
++  const auto obs=EtherCAT_positionObservation();const auto steady=position_session::steady_ns();
++  if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,steady)){
++   if(!session_calibration_confirmed_)position_wait_reason_="impedance_calibration_unconfirmed";
++   else if(!impedance_inited_)position_wait_reason_="impedance_controller_not_initialized";
++   else if(!obs.sample)position_wait_reason_="impedance_pdo_not_started";
++   else if(obs.expected_wkc<=0 || obs.wkc!=obs.expected_wkc)position_wait_reason_="impedance_pdo_wkc_mismatch";
++   else if(obs.sampled_ns<=0)position_wait_reason_="impedance_pdo_timestamp_missing";
++   else if(steady<obs.sampled_ns || steady-obs.sampled_ns>20000000)position_wait_reason_="impedance_pdo_stale";
++   else if((obs.valid_mask&0xfffff)!=0xfffff)position_wait_reason_="impedance_joint_feedback_invalid";
++   else{
++    position_wait_reason_="impedance_force_sensor_invalid";
++    for(unsigned a=0;a<2;++a){
++     const auto bit=1u<<a;
++     if((obs.sensor_valid_mask&bit) && obs.sensor_sampled_ns[a]>0 && steady>=obs.sensor_sampled_ns[a] && steady-obs.sensor_sampled_ns[a]<=20000000)continue;
++     position_wait_reason_=std::string("impedance_")+(a?"right_force_":"left_force_")+
++      (!(obs.sensor_initialized_mask&bit)?"not_initialized":!(obs.sensor_advancing_mask&bit)?"counter_not_advancing":obs.sensor_sampled_ns[a]<=0?"sample_missing":steady<obs.sensor_sampled_ns[a] || steady-obs.sensor_sampled_ns[a]>20000000?"stale":"invalid");
++     break;
++    }
++    const char* axes[]={"Fx","Fy","Fz","Mx","My","Mz"};
++    for(unsigned i=0;i<12;++i)if(!std::isfinite(obs.wrench[i])){
++     position_wait_reason_=std::string("impedance_")+(i<6?"left_force_nonfinite_":"right_force_nonfinite_")+axes[i%6];break;
++    }
++   }
++   return false;
++  }
++ }
+@@ -2673,0 +2760,65 @@
 +
 +bool ServoNode::session_impedance_ready() const {
 + const auto obs=EtherCAT_positionObservation();
