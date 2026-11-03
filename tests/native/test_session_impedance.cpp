@@ -53,6 +53,7 @@ void EtherCAT_setSingleMotorEnable(unsigned slot,bool value){enabled[slot]=value
 
 struct ServoNode {
  std::string session_execution_mode_="position",position_rejection_;
+ double impedance_following_error_rad_=.25;
  bool impedance_enable_=false,session_calibration_confirmed_=false,impedance_inited_=true,session_impedance_active_=false;
  uint64_t session_impedance_session_=0;
  std::shared_ptr<snowbot_impedance::CartesianImpedanceController> impedance_left_,impedance_right_;
@@ -70,7 +71,7 @@ struct ServoNode {
  snowbot_impedance::VectorXd session_q_,session_dq_,session_efforts_,session_nominal_,session_velocity_;
  uint8_t position_reference_mode_=0;position_session::TrajectoryQueue position_trajectory_;
  struct Time {int64_t nanoseconds()const{return position_session::steady_ns();}};Time now()const{return {};}
- bool session_impedance_ready()const;bool session_impedance_step();void position_step();void position_poll();
+ bool session_impedance_ready()const;bool session_impedance_step(double dt);void position_step();void position_poll();
  void session_impedance_workspace();bool session_impedance_inputs(const position_session::Observation&);
  void feedback(){auto t=position_session::steady_ns();snapshot.sampled_ns=snapshot.attempted_ns=t;snapshot.sensor_sampled_ns.fill(t);++snapshot.sample;
   position_feedback_.boot=9;position_feedback_.sample=snapshot.sample;if(!position_feedback_.ready_sample){position_feedback_.ready_sample=snapshot.sample;position_feedback_.ready_ros=t;}
@@ -187,7 +188,9 @@ void check_trajectory_impedance(ServoNode& node){
  const auto segment=PreparedSegment::target(limits,state,goal,0.,30.,.2);
  auto now=steady_ns();Meta source{99,1,now,now+200000000,1};auto wire=described(segment,1,now+5000000);
  node.position_gate_.commit(source,now,now);node.position_output_.impedance_mode=true;
- node.position_trajectory_.accept(wire,source,now,now,node.position_feedback_.q,{});
+ auto prepared=TrajectoryQueue::prepare(wire,source,.25,.5,162.);
+ prepared->admission=node.position_gate_.generation();
+ assert(!node.position_trajectory_.commit(*prepared,now,now,node.position_feedback_.q,{}));
  node.position_interval_.reset(now-1000000);node.feedback();node.position_step();
  assert(applied.trajectory&&applied.impedance&&applied.trajectory_phase==1&&applied.q[14]==snapshot.position[18]);
  std::this_thread::sleep_for(std::chrono::milliseconds(6));node.feedback();node.position_interval_.reset(steady_ns()-1000000);node.position_step();
@@ -201,8 +204,10 @@ void check_trajectory_impedance(ServoNode& node){
 
  now=steady_ns();Meta pause{99,2,now,now+200000000,2};const auto effective=now+3000000;
  const auto brake=PreparedSegment::stop(limits,segment.sample((effective-wire.effective_at_ns)*1e-9),0.,.19);
- auto pause_wire=described(brake,2,effective);node.position_trajectory_.accept(pause_wire,pause,now,now,node.position_feedback_.q,{});
- node.position_gate_.commit(pause,now,now);
+ auto pause_wire=described(brake,2,effective);node.position_gate_.commit(pause,now,now);
+ prepared=TrajectoryQueue::prepare(pause_wire,pause,.25,.5,162.);
+ prepared->admission=node.position_gate_.generation();
+ assert(!node.position_trajectory_.commit(*prepared,now,now,node.position_feedback_.q,{}));
  bool braking=false,held=false;
  for(unsigned tick=0;tick<100 && !held;++tick){
   std::this_thread::sleep_for(std::chrono::milliseconds(1));node.feedback();node.position_interval_.reset(steady_ns()-1000000);node.position_step();
@@ -243,6 +248,60 @@ void check_trajectory_impedance(ServoNode& node){
  std::cout<<"PASS actual nominal impedance PAUSE held beyond original TTL with fixed nominal/deadline, live gains/torque updates, hold_basis=1 and all safety failures latched\n";
 }
 
+void check_target_impedance(ServoNode& previous){
+ using namespace position_session;
+ ServoNode node;node.impedance_left_=previous.impedance_left_;node.impedance_right_=previous.impedance_right_;
+ node.session_q_index_=previous.session_q_index_;node.session_v_index_=previous.session_v_index_;node.session_impedance_workspace();
+ node.session_execution_mode_="impedance";node.session_calibration_confirmed_=true;node.position_reference_mode_=2;
+ snapshot.wrench.fill(0);snapshot.sensor_valid_mask=3;snapshot.status.fill(0x27);
+ node.position_admission_=std::make_unique<TrajectoryAdmission<Packet>>(node.position_trajectory_,[](auto& result){
+  if(auto error=inspect_servo_command(*result.packet,result.origin.get(),result.context,result.command))throw std::invalid_argument(error);
+ });
+ auto packet=[&](uint64_t sequence,uint8_t operation){
+  node.feedback();auto p=std::make_shared<Packet>();const auto now=steady_ns();
+  p->meta.session=701;p->meta.sequence=sequence;p->meta.operation=operation;p->meta.reference_mode=2;
+  p->meta.source_stamp_ns=now;p->meta.expires_at_ns=now+(operation==2?350000000:200000000);
+  p->meta.feedback_boot_id=node.position_feedback_.boot;p->meta.feedback_sample=node.position_feedback_.sample;p->meta.middle_instance_id=32;
+  for(unsigned i=0;i<7;++i){p->command.l_position[i]=node.position_feedback_.q[i];p->command.r_position[i]=node.position_feedback_.q[i+7];p->command.l_kp[i]=p->command.r_kp[i]=40;p->command.l_kd[i]=p->command.r_kd[i]=2;}
+  p->waist_position={node.position_feedback_.q[14],node.position_feedback_.q[15]};
+  p->trajectory.version=2;p->trajectory.segment_id=sequence;p->trajectory.max_velocity.fill(.25);p->trajectory.max_acceleration.fill(.5);p->trajectory.max_jerk.fill(162);return p;
+ };
+ auto tick=[&](){node.feedback();node.position_poll();node.position_interval_.reset(steady_ns()-1000000);node.position_step();};
+ auto settle=[&](){const auto until=steady_ns()+1000000000;do{tick();if(steady_ns()>=until){std::cerr<<"target admission stalled: "<<(node.position_cycle_reason_?node.position_cycle_reason_:"none")<<" adopted sequence="<<node.position_gate_.last().sequence<<"\n";assert(false);}std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(node.position_admission_->busy()||node.position_target_pending_);};
+ node.position_submit(packet(1,1));settle();assert(node.position_gate_.selected()&&applied.impedance&&applied.reference_mode==2);
+ auto move=packet(2,0);
+#ifdef SNOWBOT_RIGID_PREDICTION
+ // A shared-waist target preserves the model's relative grasp exactly.
+ move->trajectory.version=3;move->waist_position[0]+=.005;
+#else
+ move->command.l_position[0]+=.005;
+#endif
+ node.position_submit(move);settle();
+ if(node.position_gate_.last().sequence!=2)std::cerr<<"ordinary target rejected: "<<(node.position_cycle_reason_?node.position_cycle_reason_:"none")<<"\n";
+ assert(node.position_gate_.last().sequence==2);
+ for(unsigned i=0;i<20;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+ auto pause=packet(3,2);node.position_submit(pause);settle();
+ const auto until=steady_ns()+300000000;while(applied.trajectory_phase!=4){tick();if(steady_ns()>=until){std::cerr<<"target pause stalled: "<<(node.position_cycle_reason_?node.position_cycle_reason_:"none")<<" phase="<<unsigned(applied.trajectory_phase)<<" failure="<<unsigned(applied.failure_reason)<<" sequence="<<applied.sequence<<"\n";assert(false);}std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+ assert(applied.impedance&&applied.nominal_hold);const auto fixed=applied.reference_position;const auto deadline=applied.deadline;
+ const auto source_stamp=applied.source_stamp_ns,expires=applied.expires_at_ns;const auto old_torque=applied.torque;
+ // Real controller sees an independent measured displacement; reference stays fixed.
+ snapshot.position[0]+=.03f;Watchdog guard;
+ do{
+  tick();const auto now=steady_ns();guard.evaluate(applied,snapshot,now);snapshot.attempted_ns=now;guard.report_hold(snapshot,controlled_mask);
+  assert(applied.impedance&&applied.failure_reason==0&&applied.reference_position==fixed&&applied.deadline==deadline);
+  assert(applied.source_stamp_ns==source_stamp&&applied.expires_at_ns==expires&&guard.reason==PAUSED&&!guard.disabled);
+  assert(snapshot.hold_valid&&snapshot.hold_basis==0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+ }while(steady_ns()<deadline+20000000);
+ assert(applied.torque!=old_torque); // Feedback changes torque, not nominal position.
+ auto invalid=guard;auto feedback=snapshot;feedback.sensor_valid_mask=1;invalid.evaluate(applied,feedback,steady_ns());
+ assert(invalid.disabled&&invalid.reason==IMPEDANCE_INVALID);
+ snapshot.position[0]=float(fixed[0]+node.impedance_following_error_rad_+.01);tick();
+ assert(applied.failure_reason==CYCLE_OR_TRACKING_ERROR);guard.evaluate(applied,snapshot,steady_ns());assert(guard.disabled);
+ node.feedback();tick();assert(applied.failure_reason==CYCLE_OR_TRACKING_ERROR);
+ std::cout<<"PASS actual session_v3 impedance target/pause: fixed nominal despite measured displacement, live torque, original TTL, post-expiry local hold, sensor and hard-following failure\n";
+}
+
 int main(int argc,char**argv){assert(argc==2);ServoNode node;
  snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.sensor_valid_mask=3;
  snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;
@@ -266,5 +325,6 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  snapshot.sensor_valid_mask=3;snapshot.wrench[0]=NAN;node.feedback();assert(!node.session_impedance_ready());
  snapshot.wrench[0]=0;node.feedback();snapshot.sampled_ns-=21000000;assert(!node.session_impedance_ready());
  check_trajectory_impedance(node);
+ check_target_impedance(node);
  std::cout<<"PASS actual servo default position, gated impedance, waist output, sensor/calibration rejection, fixed-position PAUSE, RT expiry torque discard and resource isolation\n";
 }

@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from validate_position_native import TARGET_FIELDS
 
 
 def write_shims(shim):
@@ -56,6 +57,7 @@ def main():
     parser.add_argument('--source',type=Path,required=True)
     parser.add_argument('--prefix',type=Path,required=True)
     parser.add_argument('--require-production-poll',action='store_true',help='Require the native fixture to embed the actual production position_poll body')
+    parser.add_argument('--case',choices=('all','rt','nominal','session'),default='all',help='Select the directly affected existing native check')
     args=parser.parse_args()
     source=args.source.resolve();prefix=args.prefix.resolve()
     tests=Path(__file__).resolve().parents[1]/'native'
@@ -75,7 +77,9 @@ def main():
             raise RuntimeError('CANDIDATE_NATIVE_SHA256_MISMATCH')
     with tempfile.TemporaryDirectory(prefix='impedance-offline-') as temporary:
         work=Path(temporary);shim=work/'shim';write_shims(shim)
-        flags=[compiler,'-std=c++17','-O0','-DPINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION',
+        # The target worker has a fixed preparation deadline; use the same
+        # optimization level as the existing Release deployment builds.
+        flags=[compiler,'-std=c++17','-O3','-DPINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION',
             '-DPINOCCHIO_WITH_URDFDOM','-DBOOST_MPL_CFG_NO_PREPROCESSED_HEADERS',
             '-DBOOST_MPL_LIMIT_LIST_SIZE=30','-DBOOST_MPL_LIMIT_VECTOR_SIZE=30',
             '-DBOOST_FUSION_INVOKE_MAX_ARITY=12']
@@ -88,15 +92,17 @@ def main():
             result=subprocess.run(command,capture_output=True,text=True,timeout=120)
             if result.returncode:raise RuntimeError(result.stdout+result.stderr)
             return result.stdout
-        driver=(source/'servo_control/src/servo_control/ethercat_driver.cpp').read_text()
-        start=driver.index('    obs.sensor_valid_mask=0;')
-        sensor=driver[start:driver.index('    obs.session=session_watchdog_.session;',start)]
-        start=driver.index('    uint32_t position_written=0;')
-        output=driver[start:driver.index('    // --- PDO 收发 ---',start)]
-        rt=(tests/'test_impedance_rt.cpp').read_text().replace('// SENSOR_CAPTURE',sensor).replace('// FINAL_PDO_WRITE',output)
-        rt_path=work/'rt.cpp';rt_path.write_text(rt)
-        run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I'+str(source/'servo_control/include'),'-I'+str(native_include),str(rt_path),'-o',str(work/'rt')])
-        print(run([str(work/'rt')]).strip())
+        if args.case in ('all','rt'):
+            driver=(source/'servo_control/src/servo_control/ethercat_driver.cpp').read_text()
+            start=driver.index('    obs.sensor_valid_mask=0;')
+            sensor=driver[start:driver.index('    obs.session=session_watchdog_.session;',start)]
+            start=driver.index('    uint32_t position_written=0;')
+            output=driver[start:driver.index('    // --- PDO 收发 ---',start)]
+            rt=(tests/'test_impedance_rt.cpp').read_text().replace('// SENSOR_CAPTURE',sensor).replace('// FINAL_PDO_WRITE',output)
+            rt_path=work/'rt.cpp';rt_path.write_text(rt)
+            run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I'+str(source/'servo_control/include'),'-I'+str(native_include),str(rt_path),'-o',str(work/'rt')])
+            print(run([str(work/'rt')]).strip())
+        if args.case=='rt':return
         run(flags+['-c',str(controller),'-o',str(obj)])
         objects=[obj]
         for path in native_sources:
@@ -107,15 +113,19 @@ def main():
         start=servo.index('void ServoNode::position_step()')
         end=servo.index('\nbool ServoNode::position_ready()',start)
         methods=servo[start:end]+servo[servo.index('bool ServoNode::session_impedance_ready() const'):]
-        for name in ('test_impedance_nominal','test_session_impedance'):
+        names={'all':('test_impedance_nominal','test_session_impedance'),'nominal':('test_impedance_nominal',),'session':('test_session_impedance',)}[args.case]
+        for name in names:
             text=(tests/(name+'.cpp')).read_text()
+            if name=='test_session_impedance':
+                text=text.replace(' void start(',TARGET_FIELDS+'\n void start(',1)
             poll_fixture='// PRODUCTION_POLL_METHODS' in text
             if name=='test_session_impedance' and args.require_production_poll and not poll_fixture:
                 raise RuntimeError('PRODUCTION_POLL_FIXTURE_REQUIRED')
             text=text.replace('// PRODUCTION_METHODS',methods)
             if poll_fixture:
-                poll_start=servo.index('void ServoNode::position_poll()')
+                poll_start=servo.index('void ServoNode::position_interrupt()')
                 poll_methods=servo[poll_start:servo.index('void ServoNode::position_step()',poll_start)]
+                poll_methods=poll_methods.replace('snowbot_ctl_msgs::msg::PositionSessionServo','Packet')
                 text=text.replace('// PRODUCTION_POLL_METHODS',poll_methods)
                 print('Production position_poll SHA256 '+hashlib.sha256(poll_methods.encode()).hexdigest())
             path=work/(name+'.cpp');path.write_text(text);binary=work/name

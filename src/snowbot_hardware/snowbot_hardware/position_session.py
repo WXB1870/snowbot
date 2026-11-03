@@ -576,7 +576,7 @@ class PositionSessionDevices:
         if self.health.reference_mode:
             mapping = {k: metadata[k] for k in ('session', 'sequence', 'operation', 'source_stamp_ns', 'expires_at_ns')}
             mapping.update(lease_id=msg.meta.lease_id, epoch=msg.meta.epoch,
-                           execution_mode='position', reference_mode=2,
+                           execution_mode=self.health.execution_mode, reference_mode=2,
                            target_recipe_version=msg.trajectory.version,
                            rigid_reference=msg.trajectory.version==3)
             self.node.event('TARGET_SENT', 'SNOWBOT_TARGET:'+json.dumps(mapping, separators=(',', ':')),

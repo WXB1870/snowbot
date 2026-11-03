@@ -49,8 +49,6 @@ class SessionHealth:
         self.execution_mode = execution_mode
         if reference_mode not in (0, 2):
             raise ValueError('SNOWBOT_REFERENCE_MODE')
-        if reference_mode and execution_mode != 'position':
-            raise ValueError('SNOWBOT_TARGET_REQUIRES_PURE_POSITION')
         self.reference_mode = reference_mode
         self.now, self.steady = now, steady
         self.states, self.received = {}, {}
