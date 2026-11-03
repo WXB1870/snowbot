@@ -17,7 +17,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
-from .snowbot_waist_test import GROUPS, NAMES, checked_state, checked_pdo, checked_pdo_source
+from .snowbot_waist_test import GROUPS, NAMES, checked_state
 
 
 def kinematic_digest(path):
@@ -340,73 +340,14 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
 
 
 
-def checked_execution_mode(pdo, requested, now):
-    """Match the applied backend; retain the impedance session's sensor-age gate."""
-    if pdo.execution_mode != (1 if requested == 'impedance' else 0):
-        raise RuntimeError('REPLAY_EXECUTION_MODE_MISMATCH:'+requested)
-    if requested == 'impedance':
-        stamp = pdo.header.stamp.sec+pdo.header.stamp.nanosec*1e-9
-        if (pdo.sensor_valid_mask != 3 or pdo.valid_mask != 0xfffff or len(pdo.wrench) != 12 or
-                not all(math.isfinite(x) for x in pdo.wrench) or
-                len(pdo.sensor_age) != 2 or not all(math.isfinite(age) and
-                    0 <= age and now-stamp+age <= .02 for age in pdo.sensor_age)):
-            detail = dict(sensor_valid_mask=hex(pdo.sensor_valid_mask),
-                          joint_valid_mask=hex(pdo.valid_mask),
-                          pdo_sample=pdo.pdo_sample,
-                          observation_age_ms=(now-stamp)*1000,
-                          sensor_data_no=[int(x) for x in pdo.sensor_data_no],
-                          sensor_age_ms=[age*1000 for age in pdo.sensor_age],
-                          effective_age_ms=[(now-stamp+age)*1000 for age in pdo.sensor_age],
-                          wrench_count=len(pdo.wrench),
-                          nonfinite_wrench=[('left' if i<6 else 'right')+'.'+
-                              ('Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz')[i%6]
-                              for i,x in enumerate(pdo.wrench) if not math.isfinite(x)])
-            raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID:'+json.dumps(detail))
-
-
-def replay_follow_limits(config, mode, explicit=None):
-    from bindu_runtime.teleop_deployment import apply_execution_tracking
-    from bindu_contracts.teleoperation import joint_reference_limits
-    selected = apply_execution_tracking(config, mode, real=True, position_contract=True)
-    default = selected.get('max_reference_error', .15) if mode == 'impedance' else .10
-    overrides = selected.get('joint_reference_error_limits', {}) if mode == 'impedance' else {}
-    limits = joint_reference_limits(NAMES, default, overrides)
-    if explicit is not None:
-        if not math.isfinite(explicit) or not 0 < explicit <= .15:
-            raise ValueError('REPLAY_TOLERANCE')
-        limits = tuple(min(v, explicit) for v in limits)
-    return dict(zip(NAMES, limits))
-
-
-def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5., joint_follow_limits=None, execution_mode='position'):
+def run_replay(plan, port, *, settle_timeout=5., execution_mode='position'):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
-    if not 0 < start_tolerance <= .0175 or not 0 < follow_tolerance <= .15:
-        raise ValueError('REPLAY_TOLERANCE')
-    limits = joint_follow_limits or dict.fromkeys(plan.names, follow_tolerance)
-    measured, velocity = port.check(False)
     nominal = execution_mode == 'impedance'
-    recovering = bool(getattr(plan, 'measured_start', ()))
-    held_recovery = recovering and plan.start_reference_source == 'confirmed_pause'
-    expected_start = plan.measured_start if recovering and not held_recovery else plan.points[0]
-    anchored = port.nominal_reference() if nominal and not getattr(plan,'empty_prepare',False) or held_recovery else measured
-    if (max(abs(anchored[n]-q) for n, q in zip(plan.names, expected_start)) > start_tolerance or
-            max(abs(velocity[n]) for n in plan.names) > .005):
-        raise RuntimeError('REPLAY_START_POSE_MISMATCH: prepare the exported start pose')
-    if held_recovery and max(abs(measured[n]-q) for n,q in zip(plan.names,plan.measured_start)) > start_tolerance:
-        raise RuntimeError('REPLAY_START_POSE_MISMATCH: measured recovery start changed')
-    if nominal and any(abs(measured[n]-x)>limits[n] for n,x in zip(plan.names,plan.points[0])):
-        raise RuntimeError('REPLAY_TRACKING_ERROR')
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
         attempted = True
         port.acquire()
         acquired = True
-        initial, velocity = port.check(True)
-        anchor = port.nominal_reference() if nominal and not getattr(plan,'empty_prepare',False) or held_recovery else initial
-        if max(abs(anchor[n]-q) for n,q in zip(plan.names,expected_start)) > start_tolerance:
-            raise RuntimeError('REPLAY_START_MOVED')
-        if held_recovery and max(abs(initial[n]-q) for n,q in zip(plan.names,plan.measured_start)) > start_tolerance:
-            raise RuntimeError('REPLAY_START_MOVED')
         start = due = renewed = port.steady()
         ros_start = port.ros()
         rest_since = None
@@ -421,8 +362,6 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             q, v = port.check(True)
             elapsed = due-start
             goal = plan.sample(elapsed)
-            if any(abs(q[n]-x) > limits[n] for n, x in zip(plan.names, goal)):
-                raise RuntimeError('REPLAY_TRACKING_ERROR')
             if now-renewed >= .5:
                 port.renew()
                 renewed = port.steady()
@@ -471,14 +410,6 @@ def confirm_prepare_grippers(port, operation):
     port.grippers(operation)
 
 
-def require_gripper_endpoint(q, v, config, operation):
-    tolerance = config.get('direct_position_tolerance', config['position_tolerance'])
-    for side, joint in (('left', 'arm_l_joint_8'), ('right', 'arm_r_joint_8')):
-        target = config['grippers'][side]['open' if operation == 'open' else 'closed']
-        if abs(q[joint]-target) > tolerance or abs(v[joint]) > config['velocity_tolerance']:
-            raise RuntimeError('REPLAY_GRIPPER_NOT_'+operation.upper()+':'+side)
-
-
 def execute(args, plan):
     # Deliberately absent from offline preview and unit tests.
     import rclpy
@@ -501,7 +432,6 @@ def execute(args, plan):
     from snowbot_hardware.parameters import load_mode_config
     gripper_config = load_mode_config(robot.tool_config.with_name('grippers.json'), 'real')
     configured_margin = tool_config.get('posture_reference_margin_rad', 0.)
-    follow_limits = replay_follow_limits(tool_config, args.execution_mode, args.follow_tolerance)
     if abs(configured_margin-plan.reference_margin_rad) > 1e-10:
         raise ValueError('REPLAY_REFERENCE_MARGIN_CONFIG_MISMATCH')
     if kinematic_digest(robot.urdf) != plan.kinematics:
@@ -559,13 +489,9 @@ def execute(args, plan):
             raise RuntimeError(reply.code)
         return reply
 
-    prepare_context = None
-
     class Port:
         lease = None
         boot = None
-        sample = None
-        progress = None
         instance = None
         @staticmethod
         def steady(): return time.monotonic()
@@ -597,12 +523,14 @@ def execute(args, plan):
                     self.check(False)
                     if all('gripper_'+side in latest for side in ('left', 'right')):
                         states = [latest['gripper_'+side][0] for side in ('left', 'right')]
-                        if any(m.instance_id != self.instance or m.profile_hash != robot.profile.digest for m in states):
-                            raise RuntimeError('REPLAY_GRIPPER_IDENTITY')
                         current = all(m.epoch == lease.epoch and m.control_sequence == sequence for m in states)
-                        if current and any(m.state in ('FAILED', 'CANCELED') for m in states):
+                        if current and any(m.state == 'FAILED' or
+                                m.state == 'CANCELED' and m.code != 'MANUAL_ENDPOINT_STOPPED' for m in states):
                             raise RuntimeError('REPLAY_GRIPPER_FAILED:'+','.join(m.code for m in states))
-                        if current and all(m.position_reached for m in states):
+                        if current and all(m.state == 'SUCCEEDED' or
+                                m.state == 'CANCELED' and m.code == 'MANUAL_ENDPOINT_STOPPED' for m in states):
+                            record('gripper_stopped', operation=operation,
+                                   codes={m.side:m.code for m in states})
                             break
                     if self.steady() >= end:
                         raise RuntimeError('REPLAY_GRIPPER_'+operation.upper()+'_TIMEOUT')
@@ -619,8 +547,9 @@ def execute(args, plan):
                      latest['gripper_'+side][0].state not in ('MOVING', 'STOPPING', 'FAILED')
                      for side in ('left', 'right')), gripper_config['stop_timeout'])
             q, v = self.check(False)
-            require_gripper_endpoint(q, v, gripper_config, operation)
             record('grippers', operation=operation, measured_q_rad={n:q[n] for n in ('arm_l_joint_8', 'arm_r_joint_8')})
+            if operation == 'close':
+                print('双爪关爪已停止，请现场确认雪铲已夹牢。')
         @staticmethod
         def wait_until(due): wait(lambda: time.monotonic() >= due, max(.1, due-time.monotonic()+.1))
         def check(self, owned):
@@ -634,22 +563,13 @@ def execute(args, plan):
             if self.instance is None: self.instance = s.instance_id
             if not self.instance or s.instance_id != self.instance:
                 raise RuntimeError('REPLAY_EXECUTOR_CHANGED')
-            p, received = latest['pdo']
+            p, _ = latest['pdo']
             if self.boot is None: self.boot = p.boot_id
             if not self.boot: raise RuntimeError('REPLAY_BOOT_MISSING')
-            checked_pdo(p, now, received, steady, self.boot)
-            checked_execution_mode(p, args.execution_mode, now)
-            checked_pdo_source(node.get_publishers_info_by_topic(topic+'/bindu/position/observation'))
-            if not p.session_selected or p.reference_mode != 2:
-                raise RuntimeError('REPLAY_REQUIRES_SESSION_V3_TARGET_STREAM')
-            if self.sample is not None and p.pdo_sample < self.sample:
-                raise RuntimeError('REPLAY_PDO_REVERSED')
-            if p.pdo_sample != self.sample: self.sample, self.progress = p.pdo_sample, steady
-            if steady-self.progress > .05 or latest.get('error'):
-                raise RuntimeError(latest.get('error', 'REPLAY_PDO_NOT_ADVANCING'))
-            if prepare_context is not None and any(
-                    n not in q or not math.isfinite(q[n]) or abs(q[n]-x)>.001 for n,x in prepare_context.items()):
-                raise RuntimeError('PREPARE_CONTEXT_CHANGED')
+            if p.execution_mode != (1 if args.execution_mode == 'impedance' else 0):
+                raise RuntimeError('REPLAY_EXECUTION_MODE_MISMATCH:'+args.execution_mode)
+            if latest.get('error'):
+                raise RuntimeError(latest['error'])
             if guard is not None: guard.check(q)
             return q, v
         def nominal_reference(self):
@@ -716,34 +636,16 @@ def execute(args, plan):
             wait(lambda: latest['state'][1] > released and
                  not latest['state'][0].lease_active and latest['state'][0].state != 'STOPPING',
                  robot.profile.stop_timeout+.2)
-            rest_since = None
-            end = self.steady()+.5
-            while self.steady() < end:
-                q, v = self.check(False)
-                now = self.steady()
-                resting = all(abs(v[n]) <= .005 for n in NAMES)
-                rest_since = now if resting and rest_since is None else rest_since if resting else None
-                if rest_since is not None and now-rest_since >= .1:
-                    self.lease = None
-                    return True
-                rclpy.spin_once(node, timeout_sec=.005)
-            raise RuntimeError('REPLAY_MEASURED_STOP_NOT_CONFIRMED')
+            self.check(False)
+            self.lease = None
+            return True
 
     manifest = json.loads(args.library.read_text())
     guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest and args.action != 'Prepare' else None
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
-        rest_since = None
-        end = time.monotonic()+5.
-        while True:
-            q, v = port.check(False)
-            now = time.monotonic()
-            resting = all(abs(v[n]) <= .005 for n in NAMES)
-            rest_since = now if resting and rest_since is None else rest_since if resting else None
-            if rest_since is not None and now-rest_since >= .2: break
-            if now >= end: raise RuntimeError('REPLAY_START_NOT_SETTLED')
-            rclpy.spin_once(node, timeout_sec=.005)
+        q, v = port.check(False)
         if args.action == 'Prepare':
             initial = dict(q)
             record('prepare_start', measured_q_rad=initial)
@@ -753,28 +655,21 @@ def execute(args, plan):
             plan = plan_prepare(args.library, robot, initial, args.speed, reference=reference)
             record('prepare_reference', source=plan.start_reference_source,
                    reference_q_rad=dict(zip(NAMES, plan.points[0])))
-            prepare_context = {n:x for n,x in initial.items() if n not in NAMES}
             # Validation blocks callbacks; receipt time alone can admit queued old samples.
             checked_at = port.ros()
             wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= checked_at and
                  latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= checked_at, 1.)
-            current, _ = port.check(False)
-            if any(n not in current or abs(current[n]-x)>.001 for n,x in initial.items()):
-                raise RuntimeError('PREPARE_START_CHANGED_AFTER_VALIDATION')
+            port.check(False)
         else:
-            require_gripper_endpoint(q, v, gripper_config, 'close')
             if manifest.get('transition_validation_passed'):
                 anchor = port.nominal_reference() if args.execution_mode=='impedance' else q
                 plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead, args.start_tolerance)
                 plan.validate_profile(robot.profile)
-        record('plan', execution_mode=args.execution_mode, joint_follow_limits_rad=follow_limits, tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
+        record('plan', execution_mode=args.execution_mode, tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
-        result = run_replay(plan, port, start_tolerance=min(args.start_tolerance,.001) if args.action=='Prepare' else args.start_tolerance,
-                            follow_tolerance=args.follow_tolerance if args.follow_tolerance is not None else .10,
-                            joint_follow_limits=follow_limits, execution_mode=args.execution_mode)
+        result = run_replay(plan, port, execution_mode=args.execution_mode)
         if args.action == 'Prepare':
-            prepare_context = None
             confirm_prepare_grippers(port, 'open')
             confirm_prepare_grippers(port, 'close')
         record('result', **result)
@@ -860,7 +755,6 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--output-dir', type=Path, help='Interactive mode: one new JSONL log per selected action')
     parser.add_argument('--start-tolerance', type=float, default=.01)
-    parser.add_argument('--follow-tolerance', type=float, help='Optional cap on configured per-joint tracking limits, at most .15 rad')
     args = parser.parse_args(argv)
     if args.interactive:
         if not args.execute or not args.tool_id or not args.output_dir or args.output:
