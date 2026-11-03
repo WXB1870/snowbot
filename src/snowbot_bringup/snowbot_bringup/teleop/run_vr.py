@@ -338,7 +338,7 @@ def parse_args(argv=None):
     parser.add_argument('--check', action='store_true', help='仅检查环境、证书和端口')
     parser.add_argument('--check-robot', action='store_true', help='配合 --check，只读核对机器人端点、实测反馈和保护状态')
     parser.add_argument('--enable-commands', action='store_true',
-                        help='为本次真机纯位置会话开放运动写入；保留在线预检，不修改现场配方')
+                        help='为本次真机位置或阻抗会话开放运动写入；保留在线预检，不修改现场配方')
     parser.add_argument('--robot-check-timeout', type=float, default=2., help='只读机器人检查时长，秒，最多30秒')
     parser.add_argument('--physics', action='store_true', help='启用Isaac物理反馈，保留浏览器显示；仅允许仿真配置')
     parser.add_argument('--domain-id', type=int, default=int(os.environ.get('ROS_DOMAIN_ID','0')))
@@ -379,8 +379,8 @@ def parse_args(argv=None):
     args.runtime_parameters=load_parameters(d['parameters_config'])
     if args.enable_commands:
         if (d.get('runtime_mode') != 'real' or d.get('device_backend') != 'snowbot_vendor' or
-                d.get('execution_mode', 'position') != 'position' or args.physics or args.declare_load):
-            parser.error('--enable-commands 仅用于真机纯位置会话，不能与 --physics/--declare-load 同用')
+                d.get('execution_mode', 'position') not in ('position','impedance') or args.physics or args.declare_load):
+            parser.error('--enable-commands 仅用于真机位置或阻抗会话，不能与 --physics/--declare-load 同用')
         d['command_enabled'] = 'true'
     if args.check_robot and d.get('runtime_mode') != 'real':
         parser.error('--check-robot 仅用于真实接口配方')

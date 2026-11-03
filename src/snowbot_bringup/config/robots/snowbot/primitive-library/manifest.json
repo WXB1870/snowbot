@@ -59,11 +59,11 @@
     }
   },
   "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
-  "replay_code_sha256": "22af766010b71ff092f1ab9add91ba5d6d46f6cda2020db3aaf8a1af39163b29",
+  "replay_code_sha256": "4f0ac5ca0951b6aa26653c9b2bc5c6b1e70fd6a33d67843d5c4b4afcae09cab4",
   "source_commits": {
-    "snowbot_base": "43fcb3d",
-    "bindu": "7c66a75fb3d5fe2a787f1fafc0dbf9357f8318e5",
-    "branch": "main"
+    "snowbot_base": "fc86da1",
+    "bindu": "6a517689dd58db9a1f5bf8afa517c70061f661e3",
+    "branch": "xavier/impedance-control"
   },
   "validation_kind": "certified primitives plus native target-stream and field-waist tested transfer graph",
   "transfers": {
@@ -343,5 +343,11 @@
     "start": "fresh measured joints",
     "goal_node": "SideScoop:start",
     "path_checked_before_lease": true
+  },
+  "reference_validation_execution_mode": "position",
+  "impedance_software_validation": {
+    "passed": true,
+    "directed_checks": 32,
+    "hardware_motion_executed": false
   }
 }

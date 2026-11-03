@@ -312,10 +312,39 @@ def plan_prepare(path, robot, measured, speed=1.):
     return plan
 
 
-def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5.):
+
+def checked_execution_mode(pdo, requested, now):
+    """Match the applied backend; retain the impedance session's sensor-age gate."""
+    if pdo.execution_mode != (1 if requested == 'impedance' else 0):
+        raise RuntimeError('REPLAY_EXECUTION_MODE_MISMATCH:'+requested)
+    if requested == 'impedance':
+        stamp = pdo.header.stamp.sec+pdo.header.stamp.nanosec*1e-9
+        if (pdo.sensor_valid_mask != 3 or pdo.valid_mask != 0xfffff or len(pdo.wrench) != 12 or
+                not all(math.isfinite(x) for x in pdo.wrench) or
+                len(pdo.sensor_age) != 2 or not all(math.isfinite(age) and
+                    0 <= age and now-stamp+age <= .02 for age in pdo.sensor_age)):
+            raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
+
+
+def replay_follow_limits(config, mode, explicit=None):
+    from bindu_runtime.teleop_deployment import apply_execution_tracking
+    from bindu_contracts.teleoperation import joint_reference_limits
+    selected = apply_execution_tracking(config, mode, real=True, position_contract=True)
+    default = selected.get('max_reference_error', .15) if mode == 'impedance' else .10
+    overrides = selected.get('joint_reference_error_limits', {}) if mode == 'impedance' else {}
+    limits = joint_reference_limits(NAMES, default, overrides)
+    if explicit is not None:
+        if not math.isfinite(explicit) or not 0 < explicit <= .15:
+            raise ValueError('REPLAY_TOLERANCE')
+        limits = tuple(min(v, explicit) for v in limits)
+    return dict(zip(NAMES, limits))
+
+
+def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5., joint_follow_limits=None):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
     if not 0 < start_tolerance <= .0175 or not 0 < follow_tolerance <= .15:
         raise ValueError('REPLAY_TOLERANCE')
+    limits = joint_follow_limits or dict.fromkeys(plan.names, follow_tolerance)
     measured, velocity = port.check(False)
     if (max(abs(measured[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance or
             max(abs(velocity[n]) for n in plan.names) > .005):
@@ -341,7 +370,7 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             q, v = port.check(True)
             elapsed = due-start
             goal = plan.sample(elapsed)
-            if max(abs(q[n]-x) for n, x in zip(plan.names, goal)) > follow_tolerance:
+            if any(abs(q[n]-x) > limits[n] for n, x in zip(plan.names, goal)):
                 raise RuntimeError('REPLAY_TRACKING_ERROR')
             if now-renewed >= .5:
                 port.renew()
@@ -394,7 +423,9 @@ def execute(args, plan):
         args.robot_config = package_share('snowbot_bringup')/'config/robots/snowbot/robot_snowbot_real.json'
     robot = RobotSetup.load(args.robot_config)
     plan.validate_profile(robot.profile)
-    configured_margin = json.loads(robot.tool_config.read_text()).get('posture_reference_margin_rad', 0.)
+    tool_config = json.loads(robot.tool_config.read_text())
+    configured_margin = tool_config.get('posture_reference_margin_rad', 0.)
+    follow_limits = replay_follow_limits(tool_config, args.execution_mode, args.follow_tolerance)
     if abs(configured_margin-plan.reference_margin_rad) > 1e-10:
         raise ValueError('REPLAY_REFERENCE_MARGIN_CONFIG_MISMATCH')
     if kinematic_digest(robot.urdf) != plan.kinematics:
@@ -476,6 +507,7 @@ def execute(args, plan):
             if self.boot is None: self.boot = p.boot_id
             if not self.boot: raise RuntimeError('REPLAY_BOOT_MISSING')
             checked_pdo(p, now, received, steady, self.boot)
+            checked_execution_mode(p, args.execution_mode, now)
             checked_pdo_source(node.get_publishers_info_by_topic(topic+'/bindu/position/observation'))
             if not p.session_selected or p.reference_mode != 2:
                 raise RuntimeError('REPLAY_REQUIRES_SESSION_V3_TARGET_STREAM')
@@ -558,11 +590,12 @@ def execute(args, plan):
         elif manifest.get('transition_validation_passed'):
             plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
             plan.validate_profile(robot.profile)
-        record('plan', tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
+        record('plan', execution_mode=args.execution_mode, joint_follow_limits_rad=follow_limits, tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
         result = run_replay(plan, port, start_tolerance=min(args.start_tolerance,.001) if args.action=='Prepare' else args.start_tolerance,
-                            follow_tolerance=args.follow_tolerance)
+                            follow_tolerance=args.follow_tolerance if args.follow_tolerance is not None else .10,
+                            joint_follow_limits=follow_limits)
         record('result', **result)
         print(json.dumps(result))
     except (Exception, KeyboardInterrupt) as exc:
@@ -586,19 +619,21 @@ def main(argv=None):
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--execution-mode', choices=('position','impedance'), default='position',
+                        help='Must match the already running backend; never switches its mode')
     parser.add_argument('--robot-config', type=Path)
     parser.add_argument('--tool-id')
     parser.add_argument('--namespace', default='bindu_snowbot')
     parser.add_argument('--vendor-namespace', default='')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--start-tolerance', type=float, default=.01)
-    parser.add_argument('--follow-tolerance', type=float, default=.10)
+    parser.add_argument('--follow-tolerance', type=float, help='Optional cap on configured per-joint tracking limits, at most .15 rad')
     args = parser.parse_args(argv)
     manifest = json.loads(args.library.read_text())
     if args.action == 'Prepare':
         plan = load_replay(args.library, 'SideScoop', args.speed, waist_lead_s=0.)
         if not args.execute:
-            print(json.dumps(dict(action='Prepare', empty_handed=True,
+            print(json.dumps(dict(action='Prepare', execution_mode=args.execution_mode, empty_handed=True,
                 start_source='fresh measured joints on execute; full path checked before lease',
                 goal_q_rad=dict(zip(plan.names,plan.points[0])),
                 posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
@@ -615,7 +650,7 @@ def main(argv=None):
             parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
         execute(args, plan)
     else:
-        print(json.dumps(dict(route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
+        print(json.dumps(dict(execution_mode=args.execution_mode, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
                               waist_lead_s=plan.waist_lead_s, posture_reference_margin_rad=plan.reference_margin_rad,
                               start_q_rad=dict(zip(plan.names, plan.points[0])),
                               end_q_rad=dict(zip(plan.names, plan.points[-1])),

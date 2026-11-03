@@ -614,6 +614,26 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                    side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
             self.assertFalse(await node.prepare_primitive(S(token=1)))
 
+
+    def test_real_impedance_enable_flag_retains_simulation_and_mode_guards(self):
+        import ast
+        from types import SimpleNamespace as S
+        path=Path(find_spec('snowbot_bringup.teleop.run_vr').origin)
+        entry=next(n for n in ast.parse(path.read_text()).body if getattr(n,'name','')=='parse_args')
+        block=next(n for n in entry.body if isinstance(n,ast.If) and isinstance(n.test,ast.Attribute)
+                   and n.test.attr=='enable_commands')
+        code=compile(ast.Module(body=[block],type_ignores=[]),str(path),'exec')
+        def error(message):raise ValueError(message)
+        for mode in ('position','impedance'):
+            d=dict(runtime_mode='real',device_backend='snowbot_vendor',execution_mode=mode)
+            exec(code,dict(args=S(enable_commands=True,physics=False,declare_load=None),d=d,parser=S(error=error)))
+            self.assertEqual(d['command_enabled'],'true')
+        for change in ({'runtime_mode':'simulation'},{'device_backend':'kinematic'},{'execution_mode':'unknown'}):
+            d=dict(runtime_mode='real',device_backend='snowbot_vendor',execution_mode='impedance')
+            d.update(change)
+            with self.assertRaises(ValueError):
+                exec(code,dict(args=S(enable_commands=True,physics=False,declare_load=None),d=d,parser=S(error=error)))
+
 class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_exit_is_revalidated_before_full_prepare(self):
         from types import SimpleNamespace as S
