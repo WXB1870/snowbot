@@ -583,6 +583,37 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 node.validate_prepare.assert_awaited_once()
 
 
+
+    async def test_primitive_a_targets_side_scoop_and_never_falls_back_while_holding(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock, AsyncMock, patch
+        from snowbot_bringup.teleop.snowbot_primitive_replay import NAMES
+        node=self.production('prepare_primitive')
+        node.current=Mock();node.event=Mock();node.primitive_library='library';node.profile=object()
+        node.names=NAMES;node.unheld_test=False;node.control=S(load='held',teleop_mode='bimanual_tool')
+        node.reading=lambda:(S(joints=S(name=list(NAMES),velocity=[0.]*16)),dict.fromkeys(NAMES,0.))
+        node.feedback=lambda:S(modes=('closed','closed'))
+        node.primitive_grasp_guard=S(check=Mock());node.move=AsyncMock()
+        plan=S(points=((0.,)*16,(.1,)*16),names=NAMES,route=('FlipReverse','ScoopPrefixReverse'),
+               duration=2.,validate_profile=Mock())
+        with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',return_value=plan) as planner:
+            self.assertTrue(await node.prepare_primitive(S(token=1)))
+            self.assertEqual(planner.call_args.args[1],'Home')
+            node.move.assert_awaited_once()
+            self.assertIs(node.move.call_args.kwargs['replay'],plan)
+        node.move.reset_mock()
+        for mode in ('bimanual_tool','independent_arms'):
+            node.control.teleop_mode=mode
+            with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',
+                       side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
+                with self.assertRaisesRegex(RuntimeError,'UNKNOWN_START'):
+                    await node.prepare_primitive(S(token=1))
+            node.move.assert_not_awaited()
+        node.control.load='empty'
+        with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',
+                   side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
+            self.assertFalse(await node.prepare_primitive(S(token=1)))
+
 class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_exit_is_revalidated_before_full_prepare(self):
         from types import SimpleNamespace as S
@@ -778,7 +809,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         module.PicoNode=S(move=module.move)
         return module
 
-    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=1.,position_contract=True):
+    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=1.,position_contract=True,primitive=False,cancel_at=None):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock,patch
         module=self.move_module()
@@ -803,10 +834,33 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             event=Mock(),simulation=False,now=lambda:clock[0],runtime_mode='real',pause=pause,
             runtime_parameters=parameters,submit=S(call_async=Mock(return_value=S(accepted=True,revision=0))),
             release_lease=AsyncMock(side_effect=stop_error))
+        replay=None
+        if primitive:
+            from snowbot_bringup.teleop.snowbot_primitive_replay import Replay
+            replay=Replay((0.,2.),((target-error,),(target,)),(joint,),'tool','kin',1.)
+            node.primitive_grasp_guard=S(check=Mock())
+            def current(intent):
+                if cancel_at is not None and clock[0]>=cancel_at:raise RuntimeError('PREPARE_RELEASED')
+            node.current=current
         with patch.object(module,'time',S(monotonic=lambda:clock[0])):
-            try:await module.PicoNode.move(node,PicoIntent(1,operation),{joint:target},2.)
+            try:await module.PicoNode.move(node,PicoIntent(1,operation),{joint:target},2.,replay=replay)
             finally:node.release_lease.assert_awaited_once()
         return node
+
+
+    async def test_held_a_stream_uses_certified_samples_and_cancellation_stops_it(self):
+        node=await self.arrival(error=.001,primitive=True,tick_period=.005)
+        commands=[call.args[0].command for call in node.submit.call_async.call_args_list]
+        stamps=[command.stamp.sec+command.stamp.nanosec/1e9 for command in commands]
+        self.assertTrue(all(abs((b-a)-.02)<1e-8 for a,b in zip(stamps,stamps[1:])))
+        self.assertTrue(all(c.valid_for==.25 for c in commands))
+        self.assertAlmostEqual(commands[0].positions[0],.199)
+        self.assertAlmostEqual(commands[-1].positions[0],.2)
+        self.assertGreater(node.primitive_grasp_guard.check.call_count,len(commands))
+        with self.assertRaisesRegex(RuntimeError,'REPLAY_STREAM_LATE'):
+            await self.arrival(error=.001,primitive=True,tick_period=.1)
+        with self.assertRaisesRegex(RuntimeError,'PREPARE_RELEASED'):
+            await self.arrival(error=.001,primitive=True,tick_period=.005,cancel_at=.2)
 
     async def test_configured_prepare_period_and_ttl_reach_real_motion_messages(self):
         from snowbot_hardware.parameters import load_parameters

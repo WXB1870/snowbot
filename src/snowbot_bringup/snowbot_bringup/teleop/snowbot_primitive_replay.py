@@ -7,6 +7,7 @@ import argparse
 import bisect
 from dataclasses import dataclass
 import hashlib
+import gzip
 import json
 import math
 from pathlib import Path
@@ -83,14 +84,14 @@ def load_replay(path, action, speed=1., waist_lead_s=None):
     margin = manifest.get('posture_reference_margin_rad', 0.)
     if type(margin) not in (float, int) or not math.isfinite(margin) or not 0 <= margin < .2:
         raise ValueError('REPLAY_REFERENCE_MARGIN')
-    item = manifest['actions'][action]
+    item = (manifest.get('transfers', {}) | manifest['actions'])[action]
     target = (path.parent/item['targets']).resolve()
     if not target.is_relative_to(path.parent):
         raise ValueError('REPLAY_ASSET_PATH')
     payload = target.read_bytes()
     if hashlib.sha256(payload).hexdigest() != item['sha256']:
         raise ValueError('REPLAY_ASSET_IDENTITY')
-    data = json.loads(payload)
+    data = json.loads(gzip.decompress(payload) if target.suffix == '.gz' else payload)
     if (data.get('schema_version') != 1 or data.get('mode') != 'joint_target' or
             data.get('runtime_mode') != 'real' or tuple(data['joint_names']) != NAMES or
             tuple(data['resource_groups']) != GROUPS or data.get('period_s') != .02 or
@@ -108,6 +109,131 @@ def load_replay(path, action, speed=1., waist_lead_s=None):
         raise ValueError('REPLAY_TIMELINE_OR_VALUES')
     return Replay(times, points, NAMES, manifest['tool_id'],
                   manifest['kinematic_sha256'], speed, lead, manifest.get('backend_ready') is True, margin)
+
+
+
+@dataclass(frozen=True)
+class ReplaySequence:
+    segments: tuple
+    route: tuple
+    hold_s: float = 3.
+
+    @property
+    def points(self): return (self.segments[0].points[0], self.segments[-1].points[-1])
+    @property
+    def duration(self): return sum(s.duration for s in self.segments)+self.hold_s*(len(self.segments)-1)
+    @property
+    def names(self): return self.segments[0].names
+    @property
+    def tool_id(self): return self.segments[0].tool_id
+    @property
+    def kinematics(self): return self.segments[0].kinematics
+    @property
+    def speed(self): return self.segments[0].speed
+    @property
+    def waist_lead_s(self): return self.segments[0].waist_lead_s
+    @property
+    def backend_ready(self): return all(s.backend_ready for s in self.segments)
+    @property
+    def reference_margin_rad(self): return self.segments[0].reference_margin_rad
+
+    def sample(self, elapsed):
+        for segment in self.segments[:-1]:
+            if elapsed <= segment.duration+self.hold_s:
+                return segment.sample(min(elapsed, segment.duration))
+            elapsed -= segment.duration+self.hold_s
+        return self.segments[-1].sample(elapsed)
+
+    def validate_profile(self, profile):
+        for segment in self.segments: segment.validate_profile(profile)
+
+
+def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01):
+    """Join only certified grasp-preserving edges; unknown starts never interpolate."""
+    import heapq
+    manifest = json.loads(Path(path).read_text())
+    if manifest.get('transition_validation_passed') is not True:
+        raise ValueError('REPLAY_TRANSITIONS_UNVALIDATED')
+    if not 0 < tolerance <= .0175 or not set(NAMES) <= set(measured):
+        raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
+    if any(not math.isfinite(measured[n]) for n in NAMES):
+        raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
+    nodes = manifest['nodes']
+    errors = {key: max(abs(measured[n]-q) for n, q in zip(NAMES, values))
+              for key, values in nodes.items() if len(values) == len(NAMES)}
+    if not errors or min(errors.values()) > tolerance:
+        raise RuntimeError('REPLAY_UNKNOWN_START: use a certified action start/end pose')
+    source = min(errors, key=errors.get)
+    target = manifest['home_node'] if action == 'Home' else manifest['actions'][action]['start_node']
+    edges, plans = {}, {}
+    for edge in manifest['edges']:
+        key, a, b = edge['segment'], edge['from'], edge['to']
+        segment = load_replay(path, key, speed, waist_lead_s)
+        if (max(abs(x-y) for x, y in zip(segment.points[0], nodes[a])) > 1e-8 or
+                max(abs(x-y) for x, y in zip(segment.points[-1], nodes[b])) > 1e-8):
+            raise ValueError('REPLAY_TRANSITION_ENDPOINT:'+key)
+        plans[key] = segment
+        edges.setdefault(a, []).append((b, key, segment.duration+3.))
+    queue, costs = [(0., source, ())], {source: 0.}
+    selected = None
+    while queue:
+        cost, node, route = heapq.heappop(queue)
+        if cost != costs[node]: continue
+        if node == target:
+            selected = route
+            break
+        for following, key, duration in edges.get(node, ()):
+            candidate = cost+duration
+            if candidate < costs.get(following, math.inf):
+                costs[following] = candidate
+                heapq.heappush(queue, (candidate, following, route+(key,)))
+    if selected is None: raise RuntimeError('REPLAY_TRANSITION_UNREACHABLE')
+    if action != 'Home':
+        selected += (action,)
+    if not selected:
+        # A at home still confirms the measured pose and stop; no artificial path.
+        home = load_replay(path, manifest['home_node'].split(':')[0], speed, waist_lead_s)
+        selected_plans = (Replay((0., .02), (tuple(nodes[target]),)*2, home.names,
+                                home.tool_id, home.kinematics, speed, 0.,
+                                home.backend_ready, home.reference_margin_rad),)
+    else:
+        selected_plans = tuple(plans[k] if k in plans else load_replay(path, k, speed, waist_lead_s)
+                               for k in selected)
+    for before, after in zip(selected_plans, selected_plans[1:]):
+        if (before.tool_id != after.tool_id or before.kinematics != after.kinematics or
+                before.reference_margin_rad != after.reference_margin_rad or
+                max(abs(x-y) for x, y in zip(before.points[-1], after.points[0])) > 1e-8):
+            raise ValueError('REPLAY_TRANSITION_JOIN')
+    return ReplaySequence(selected_plans, selected)
+
+
+class AxialGraspGuard:
+    """Check only the four constrained directions of the two released grips."""
+    def __init__(self, urdf, specification):
+        import numpy as np
+        from bindu_kinematics.model import ArmModel
+        root = ET.parse(urdf)
+        locked = {j.get('name'): 0. for j in root.findall('joint')
+                  if j.get('type') != 'fixed' and j.get('name') not in NAMES}
+        self.np, self.spec = np, specification
+        self.model = ArmModel(dict(urdf=str(urdf), joint_names=NAMES, locked_joints=locked,
+            tool_transform=np.eye(4).ravel(), ee_link=specification['left_frame']))
+
+    def check(self, positions):
+        np, s = self.np, self.spec
+        frames = self.model.frames([positions[n] for n in NAMES], None,
+                                   [s['left_frame'], s['right_frame']])
+        points, axes = [], []
+        for side in ('left', 'right'):
+            F = frames[s[side+'_frame']]
+            points.append(F[:3, 3]+F[:3, :3]@np.array(s[side+'_grip_in_flange_m']))
+            axes.append(F[:3, :3]@np.array(s[side+'_axis_in_flange']))
+        error = points[1]-points[0]-s['shaft_separation_m']*axes[1]-s['bar_separation_m']*axes[0]
+        position = float(np.linalg.norm(error))
+        angle = math.asin(float(np.clip(axes[0]@axes[1], -1., 1.)))
+        if position > s['max_position_error_m'] or abs(angle) > s['max_axis_error_rad']:
+            raise RuntimeError(f'REPLAY_GRASP_ERROR:position_m={position:.6f},axis_rad={angle:.6f}')
+        return position, angle
 
 
 def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5.):
@@ -280,6 +406,7 @@ def execute(args, plan):
             if p.pdo_sample != self.sample: self.sample, self.progress = p.pdo_sample, steady
             if steady-self.progress > .05 or latest.get('error'):
                 raise RuntimeError(latest.get('error', 'REPLAY_PDO_NOT_ADVANCING'))
+            if guard is not None: guard.check(q)
             return q, v
         def acquire(self):
             self.lease = call(leases, Lease.Request(operation='acquire', owner=task, resources=list(GROUPS)))
@@ -323,6 +450,8 @@ def execute(args, plan):
                 rclpy.spin_once(node, timeout_sec=.005)
             raise RuntimeError('REPLAY_MEASURED_STOP_NOT_CONFIRMED')
 
+    manifest = json.loads(args.library.read_text())
+    guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest else None
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
@@ -336,7 +465,10 @@ def execute(args, plan):
             if rest_since is not None and now-rest_since >= .2: break
             if now >= end: raise RuntimeError('REPLAY_START_NOT_SETTLED')
             rclpy.spin_once(node, timeout_sec=.005)
-        record('plan', action=args.action, duration_s=plan.duration, speed=plan.speed,
+        if manifest.get('transition_validation_passed'):
+            plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
+            plan.validate_profile(robot.profile)
+        record('plan', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
         result = run_replay(plan, port, start_tolerance=args.start_tolerance,
@@ -359,7 +491,8 @@ def execute(args, plan):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library', type=Path, required=True)
-    parser.add_argument('--action', choices=('Push', 'SideScoop', 'Flip'), required=True)
+    parser.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home'), required=True)
+    parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
     parser.add_argument('--execute', action='store_true')
@@ -371,7 +504,12 @@ def main(argv=None):
     parser.add_argument('--start-tolerance', type=float, default=.01)
     parser.add_argument('--follow-tolerance', type=float, default=.10)
     args = parser.parse_args(argv)
-    plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
+    manifest = json.loads(args.library.read_text())
+    if manifest.get('transition_validation_passed'):
+        start = args.from_node or manifest['home_node']
+        plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])), args.speed, args.waist_lead)
+    else:
+        plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
         if not args.output or not args.tool_id:
             parser.error('--execute requires --tool-id and --output')
@@ -379,7 +517,7 @@ def main(argv=None):
             parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
         execute(args, plan)
     else:
-        print(json.dumps(dict(action=args.action, duration_s=plan.duration, speed=args.speed,
+        print(json.dumps(dict(route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
                               waist_lead_s=plan.waist_lead_s, posture_reference_margin_rad=plan.reference_margin_rad,
                               start_q_rad=dict(zip(plan.names, plan.points[0])),
                               end_q_rad=dict(zip(plan.names, plan.points[-1])),
