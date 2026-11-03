@@ -145,6 +145,18 @@ class PicoNode(RuntimeNode):
                 not self.profile.limits[n][0]<=self.prepare_positions[n]<=self.profile.limits[n][1]
                 for n in prepare_names)):
             raise ValueError('PICO_PREPARE_PRESET_INVALID')
+        self.primitive_library = None
+        if self.position_contract and self.cfg.get('primitive_library'):
+            from bindu_contracts.resources import resource_file
+            from snowbot_bringup.teleop.snowbot_primitive_replay import AxialGraspGuard, load_replay
+            self.primitive_library = resource_file(self.cfg['primitive_library'])
+            library = json.loads(self.primitive_library.read_text())
+            if library.get('transition_validation_passed') is not True or library.get('home_node') != 'SideScoop:start':
+                raise ValueError('PICO_PRIMITIVE_HOME_MISMATCH')
+            home = load_replay(self.primitive_library, 'SideScoop')
+            if any(abs(self.prepare_positions[n]-q)>1e-10 for n,q in zip(home.names,home.points[0])):
+                raise ValueError('PICO_PRIMITIVE_PRESET_MISMATCH')
+            self.primitive_grasp_guard = AxialGraspGuard(self.tool_cfg['urdf'], library['grasp'])
         if not 0 < float(self.cfg['prepare_duration']) <= 60:
             raise ValueError('PICO_PREPARE_DURATION_INVALID')
         self.prepare_position_tolerance=float(self.cfg.get('prepare_position_tolerance_rad',.002))
@@ -608,10 +620,35 @@ class PicoNode(RuntimeNode):
             raise RuntimeError('PREPARE_LIMIT_RECOVERY_HOLD_CHANGED') from exc
         return data
 
-    async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False):
+
+    async def prepare_primitive(self, intent):
+        """A return from a certified held-tool node, using the same transition graph."""
+        from snowbot_bringup.teleop.snowbot_primitive_replay import plan_from_current
+        self.current(intent)
+        state, measured = self.reading()
+        if not joints_at_rest(state.joints, self.names, parameters_for(self, 'execution')['prepare_start_velocity_tolerance_rad_s']):
+            raise RuntimeError('PREPARE_REQUIRES_STATIONARY_START')
+        try:
+            plan = plan_from_current(self.primitive_library, 'Home', measured)
+        except RuntimeError as exc:
+            if (str(exc).startswith('REPLAY_UNKNOWN_START') and
+                    self.control.teleop_mode == 'independent_arms' and
+                    (self.control.load == 'empty' or self.unheld_test or self.feedback().modes == ('open', 'open'))):
+                # Ordinary-arm A remains an explicit empty-hand setup request.
+                return False
+            raise
+        plan.validate_profile(self.profile)
+        self.prepare_limit_reference=self.prepare_limit_start=self.prepare_recovery=None
+        self.primitive_grasp_guard.check(measured)
+        self.event('PICO_PRIMITIVE_HOME', json.dumps(dict(home='SideScoop:start',
+            route=list(plan.route), duration_s=plan.duration, coupling_checked=True)))
+        await self.move(intent, dict(zip(plan.names, plan.points[-1])), plan.duration, replay=plan)
+        return True
+
+    async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
-        arrival_tolerance=self.prepare_position_tolerance if intent.operation=='prepare' else self.profile.feedback_tolerances['joint_position']
+        arrival_tolerance=(.002 if replay is not None or getattr(self,'primitive_library',None) and intent.operation=='prepare' else self.prepare_position_tolerance if intent.operation=='prepare' else self.profile.feedback_tolerances['joint_position'])
         execution_instance_id=self.state.instance_id
         future=self.leases.call_async(Lease.Request(operation='acquire',
             owner=self.instance_id,resources=list(self.groups)))
@@ -667,10 +704,17 @@ class PicoNode(RuntimeNode):
                 raise RuntimeError('PREPARE_LIMIT_RECOVERY_HOLD_REQUIRED')
             arrival_names=set(recovery_progress) if limit_exit else set(self.names)
             revision=s.revision;segment=0
+            if replay is not None:
+                if tuple(self.names)!=replay.names or max(abs(q[n]-x) for n,x in zip(self.names,replay.points[0]))>.01:
+                    raise RuntimeError('PREPARE_STATE_CHANGED')
+                self.primitive_grasp_guard.check(q)
+            elif getattr(self,'primitive_library',None) and intent.operation=='prepare':
+                travel=max(abs(end[i]-start[n]) for i,n in enumerate(self.names) if n.startswith('body_joint_'))
+                duration=max(duration,1.875*travel/.025,(5.774*travel/.12)**.5)
             before=State.rest(tuple(start[n] for n in self.names));after=State.rest(tuple(end))
-            curve=Curve.between(0.,duration,before,after)
-            if not curve.valid(self.profile,self.names):raise RuntimeError('PICO_MOTION_LIMITS')
-            if fit_duration:
+            curve=None if replay is not None else Curve.between(0.,duration,before,after)
+            if replay is None and not curve.valid(self.profile,self.names):raise RuntimeError('PICO_MOTION_LIMITS')
+            if fit_duration and replay is None:
                 # Fit simulation-demo preparation and small grasp changes to
                 # the same v/a/jerk limits. Loading/unloading and the strict
                 # preparation flow retain their configured duration.
@@ -687,9 +731,14 @@ class PicoNode(RuntimeNode):
             started=self.now();command_id=self.instance_id+'_'+str(intent.token)+'_'+uuid.uuid4().hex[:8]
             deadline=time.monotonic()+duration+parameters_for(self,'pico')['motion_completion_grace_s'];renew_at=0.;next_submit=0.
             renewal=None;renewal_started=0.
+            replay_tick=0;replay_steady=time.monotonic()
             while time.monotonic()<deadline:
                 self.current(intent)
                 state,measured=self.reading();now=self.now()
+                if replay is not None:
+                    self.primitive_grasp_guard.check(measured)
+                    if abs((now-started)-(time.monotonic()-replay_steady))>.02:
+                        raise RuntimeError('REPLAY_CLOCK_CHANGED')
                 if (state.instance_id==execution_instance_id and
                         state.command_id.startswith(command_id+'_') and state.state in ('STOPPING','FAILED') and
                         state.code not in ('OK','CANCELED','SHUTDOWN')):
@@ -710,7 +759,8 @@ class PicoNode(RuntimeNode):
                                 reply.profile_hash!=self.profile.digest):
                             raise RuntimeError('PICO_EXECUTION_AUTHORITY_CHANGED')
                         renewal=None;renew_at=time.monotonic()+parameters_for(self,'pico')['renewal_period_s']
-                if (now>=started+duration and seconds(state.feedback_stamp)>=started+duration and
+                if (now>=started+duration and (replay is None or (replay_tick-1)*.02>=duration) and
+                        seconds(state.feedback_stamp)>=started+duration and
                         all(abs(measured[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
                         (recovery is None or all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1]
                                                  for n in self.names)) and
@@ -733,19 +783,24 @@ class PicoNode(RuntimeNode):
                 if now>=next_submit:
                     lookahead=parameters_for(self,'pico')['reference_lookahead_s']
                     lookahead_sec,lookahead_ns=divmod(round(lookahead*1e9),1000000000)
-                    sample=curve.sample(min(duration,max(0.,now-started)+(0. if self.position_contract else lookahead)))
+                    source=started+replay_tick*.02 if replay is not None else now
+                    if replay is not None and now-source>.04:
+                        raise RuntimeError('REPLAY_STREAM_LATE')
+                    sample=(State.rest(replay.sample(replay_tick*.02)) if replay is not None else
+                        curve.sample(min(duration,max(0.,now-started)+(0. if self.position_contract else lookahead))))
                     point=JointTrajectoryPoint(positions=list(sample.q),velocities=list(sample.v),
                         accelerations=list(sample.a),time_from_start=Duration(sec=lookahead_sec,nanosec=lookahead_ns))
                     msg=MotionCommand(schema_version=2,runtime_mode=self.runtime_mode,command_id=command_id+'_'+str(segment),
                         task_id='pico_'+intent.operation,expected_revision=revision,profile_hash=self.profile.digest,lease_id=lease.lease_id,
                         epoch=lease.epoch,mode='joint_target' if self.position_contract else 'joint_reference_segment',resource_groups=list(self.groups),
-                        stamp=stamp(now),valid_for=parameters_for(self,'pico')['prepare_command_ttl_s'],joint_names=list(self.names),
+                        stamp=stamp(source),valid_for=.25 if replay is not None else parameters_for(self,'pico')['prepare_command_ttl_s'],joint_names=list(self.names),
                         positions=list(sample.q) if self.position_contract else [],points=[] if self.position_contract else [point])
                     self.current(intent)
                     response=await self.wait(self.submit.call_async(SubmitMotion.Request(command=msg)))
                     if not response.accepted:raise RuntimeError(response.code)
                     revision=response.revision;segment+=1
-                    next_submit=now+parameters_for(self,'pico')['prepare_command_period_s']
+                    replay_tick+=1
+                    next_submit=started+replay_tick*.02 if replay is not None else now+parameters_for(self,'pico')['prepare_command_period_s']
                 await self.pause()
             state,measured=self.reading()
             errors={n:float(v-measured[n]) for n,v in zip(self.names,end)}
@@ -1017,40 +1072,46 @@ class PicoNode(RuntimeNode):
                     (intent.operation=='confirm_tool' or intent.operation=='select_mode' and intent.value=='bimanual_tool')):
                 read_only=False
             if intent.operation=='prepare':
-                # A is the operator's explicit empty-hand return request.
+                # A targets the configured ready pose; held-node returns use the certified graph.
                 if not self.position_contract and self.control.load!='empty':raise RuntimeError('PICO_PREPARE_REQUIRES_EMPTY')
-                target=await self.validate_prepare(intent)
-                if getattr(self,'prepare_limit_reference',None) is not None:
+                if getattr(self,'primitive_library',None):
                     read_only=False
-                    self.event('PICO_PREPARE_LIMIT_EXIT',json.dumps(dict(target=target)))
-                    await self.move(intent,target,min(3.,self.cfg['prepare_duration']),limit_exit=True)
-                    self.current(intent)
-                    target=await self.validate_prepare(intent)
-                    if self.prepare_limit_reference is not None:
-                        raise RuntimeError('PREPARE_LIMIT_RECOVERY_NOT_INSIDE')
-                _,measured=self.reading()
-                error=max(abs(measured[n]-q) for n,q in target.items())
-                if (self.position_contract and error<self.prepare_position_tolerance and not self.prepare_recovery and
-                        (not getattr(self,'prepare_limit_reference',None) or
-                         all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
-                    self.event('PICO_PREPARE_ALREADY_REACHED',json.dumps(dict(max_joint_error_rad=error,
-                        position_tolerance_rad=self.prepare_position_tolerance)))
+                    primitive_done=await self.prepare_primitive(intent)
                 else:
-                    read_only=False
-                    recovery=self.prepare_recovery
-                    if recovery:
-                        escape=recovery['exit_waypoint']
-                        distance=max(abs(measured[n]-v) for n,v in escape.items())
-                        # Rest-to-rest quintic peak speed is 1.875 * travel / time.
-                        duration=max(1.,2.5*distance/recovery['max_joint_speed_rad_s'])
-                        await self.move(intent,escape,duration)
+                    primitive_done=False
+                if not primitive_done:
+                    target=await self.validate_prepare(intent)
+                    if getattr(self,'prepare_limit_reference',None) is not None:
+                        read_only=False
+                        self.event('PICO_PREPARE_LIMIT_EXIT',json.dumps(dict(target=target)))
+                        await self.move(intent,target,min(3.,self.cfg['prepare_duration']),limit_exit=True)
                         self.current(intent)
-                        target=await self.validate_prepare(intent,allow_recovery=False)
-                    await self.move(intent,target,self.cfg['prepare_duration'],fit_duration=self.simulation_demo)
-                if getattr(self,'automatic_close_grippers',False) and not getattr(self,'independent_grippers',False) and not self.unheld_test:
-                    read_only=False
-                    await self.position_ops.close_grippers(intent)
-                    self.current(intent)
+                        target=await self.validate_prepare(intent)
+                        if self.prepare_limit_reference is not None:
+                            raise RuntimeError('PREPARE_LIMIT_RECOVERY_NOT_INSIDE')
+                    _,measured=self.reading()
+                    error=max(abs(measured[n]-q) for n,q in target.items())
+                    if (self.position_contract and error<(.002 if getattr(self,'primitive_library',None) else self.prepare_position_tolerance) and not self.prepare_recovery and
+                            (not getattr(self,'prepare_limit_reference',None) or
+                             all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
+                        self.event('PICO_PREPARE_ALREADY_REACHED',json.dumps(dict(max_joint_error_rad=error,
+                            position_tolerance_rad=self.prepare_position_tolerance)))
+                    else:
+                        read_only=False
+                        recovery=self.prepare_recovery
+                        if recovery:
+                            escape=recovery['exit_waypoint']
+                            distance=max(abs(measured[n]-v) for n,v in escape.items())
+                            # Rest-to-rest quintic peak speed is 1.875 * travel / time.
+                            duration=max(1.,2.5*distance/recovery['max_joint_speed_rad_s'])
+                            await self.move(intent,escape,duration)
+                            self.current(intent)
+                            target=await self.validate_prepare(intent,allow_recovery=False)
+                        await self.move(intent,target,self.cfg['prepare_duration'],fit_duration=self.simulation_demo)
+                    if getattr(self,'automatic_close_grippers',False) and not getattr(self,'independent_grippers',False) and not self.unheld_test:
+                        read_only=False
+                        await self.position_ops.close_grippers(intent)
+                        self.current(intent)
             elif intent.operation=='manual_grippers':
                 if (not self.position_ops or self.control.phase!='gripper_control' or
                         not self.control.frames or any(f.grip>=parameters_for(self,'pico')['grip_release_threshold'] for f in self.control.frames)):

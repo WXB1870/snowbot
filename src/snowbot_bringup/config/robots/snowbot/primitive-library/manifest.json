@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "validation_passed": true,
+  "backend_ready": true,
+  "tool_id": "g099-curved",
+  "kinematic_sha256": "26f3df22b1e77754a8544d8e1ab24572d0a78d794b56653d35721ae2e10f6c6a",
+  "waist_lead_s": 0.88,
+  "posture_reference_margin_rad": 0.027453292519943294,
+  "nominal_position_limits": "shared wide snowbot_control.urdf",
+  "requires_prepared_start": true,
+  "source_backend_limits_aligned": true,
+  "installed_on_real_robot": false,
+  "physical_robot_motion_executed": false,
+  "actions": {
+    "Push": {
+      "targets": "Push.json.gz",
+      "sha256": "98347efc0ffd6a0687f25a7f44264b67d1d6775cb6084b2a706b66545a5b0dfa",
+      "nominal_duration_s": 25.677,
+      "duration_s": 26.557,
+      "source": "/Users/xavier/Documents/snowbot/artifacts/experiments/d-handle-workspace-20261102/three-primitives-repaired/real-retimed/original-urdf-path/reference-margin/accepted/Push/joint-target-stream.json",
+      "validation": {
+        "tracking_rms_mm": 4.887294003355946,
+        "tracking_peak_mm": 10.617933562278916,
+        "coupling_rms_mm": 0.3526001123776893,
+        "physics_dt_s": 0.002
+      },
+      "start_node": "Push:start",
+      "end_node": "Push:end"
+    },
+    "SideScoop": {
+      "targets": "SideScoop.json.gz",
+      "sha256": "bede5aed0e4693b5a6993846e92a9f765942d92a31b6ea0c49452b31c6b9178b",
+      "nominal_duration_s": 79.745,
+      "duration_s": 80.625,
+      "source": "/Users/xavier/Documents/snowbot/artifacts/experiments/d-handle-workspace-20261102/three-primitives-repaired/real-retimed/original-urdf-path/reference-margin/accepted/SideScoop/joint-target-stream.json",
+      "validation": {
+        "tracking_rms_mm": 8.371799542130056,
+        "tracking_peak_mm": 17.410089169381656,
+        "coupling_rms_mm": 0.36034142411786924,
+        "physics_dt_s": 0.002
+      },
+      "start_node": "SideScoop:start",
+      "end_node": "Dump:end"
+    },
+    "Flip": {
+      "targets": "Flip.json.gz",
+      "sha256": "0a103e0cd38a0ff28fbcf3eb5b83438f1763449e843589e577d050efccce5808",
+      "nominal_duration_s": 45.133,
+      "duration_s": 46.013000000000005,
+      "source": "/Users/xavier/Documents/snowbot/artifacts/experiments/d-handle-workspace-20261102/three-primitives-repaired/real-retimed/original-urdf-path/reference-margin/accepted/Flip/joint-target-stream.json",
+      "validation": {
+        "tracking_rms_mm": 9.684659198669214,
+        "tracking_peak_mm": 17.397259417447913,
+        "coupling_rms_mm": 0.37944352246871005,
+        "physics_dt_s": 0.002
+      },
+      "start_node": "Flip:start",
+      "end_node": "Dump:end"
+    }
+  },
+  "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
+  "replay_code_sha256": "bd6ef051c47f8952161d04b5663ac49d50bda8d0c83cf0200ef33f61f6bc3559",
+  "source_commits": {
+    "snowbot_base": "43fcb3d",
+    "bindu": "81c5f0fa7dc7e2a44f5827238243f28ccfd1ec6f",
+    "branch": "main"
+  },
+  "validation_kind": "certified primitives plus native target-stream and field-waist tested transfer graph",
+  "transfers": {
+    "BridgeForward": {
+      "targets": "BridgeForward.json.gz",
+      "sha256": "d13502e810d8b231aaac220072e41d193c0f0d6085e9778a77c7adac56026655",
+      "validation": {
+        "position_coupling_rms_mm": 1.1364271801237986,
+        "position_coupling_peak_mm": 4.276294898004345,
+        "non_ground_collision_violations": 0,
+        "physics": {
+          "status": "passed",
+          "whole": {
+            "edge_rms_mm": 6.699420066975149,
+            "edge_peak_mm": 13.99767502532563,
+            "rotation_rms_deg": 0.3183634916529788,
+            "rotation_peak_deg": 0.6391111238709853,
+            "closure_rms_mm": 1.1775213079352218,
+            "closure_peak_mm": 4.12373594670358,
+            "orthogonality_peak_deg": 0.3979710581251663
+          },
+          "phases": {},
+          "actual_peak_edge_speed_m_s": 0.20939808381645458,
+          "waist_tilt_range_deg": [
+            -8.052397734246819,
+            -2.446749424626284
+          ],
+          "geometry": {
+            "violations": 0,
+            "minimum_tool_robot_clearance_mm": 32.32251534999824,
+            "minimum_tool_ground_clearance_mm": 2.381362623329636,
+            "failures": []
+          }
+        }
+      }
+    },
+    "BridgeReverse": {
+      "targets": "BridgeReverse.json.gz",
+      "sha256": "03c33896509901ac37774fc1c3cd4bca4a2f35631348359bba3ad240d43c000f",
+      "validation": {
+        "position_coupling_rms_mm": 1.1751759188405548,
+        "position_coupling_peak_mm": 2.991189533164805,
+        "non_ground_collision_violations": 0,
+        "physics": {
+          "status": "passed",
+          "whole": {
+            "edge_rms_mm": 6.456546956770879,
+            "edge_peak_mm": 11.677727361786362,
+            "rotation_rms_deg": 0.3225572347634749,
+            "rotation_peak_deg": 0.5550510490977293,
+            "closure_rms_mm": 1.2225597201885947,
+            "closure_peak_mm": 3.1462741293783987,
+            "orthogonality_peak_deg": 0.2341544135935942
+          },
+          "phases": {},
+          "actual_peak_edge_speed_m_s": 0.20984796718800192,
+          "waist_tilt_range_deg": [
+            -8.028770402360452,
+            -2.4240384053057564
+          ],
+          "geometry": {
+            "violations": 0,
+            "minimum_tool_robot_clearance_mm": 32.31875416308399,
+            "minimum_tool_ground_clearance_mm": 0.8640038870138256,
+            "failures": []
+          }
+        }
+      }
+    },
+    "PushReverse": {
+      "targets": "PushReverse.json.gz",
+      "sha256": "776d8359105eefd1753ab3cb9c7614f1ae28c2f3aa3f1f1dc6eab6a8904450dc",
+      "validation": {
+        "position_coupling_rms_mm": 0.02125013087849278,
+        "position_coupling_peak_mm": 0.15559732941645618,
+        "non_ground_collision_violations": 0
+      }
+    },
+    "ScoopPrefix": {
+      "targets": "ScoopPrefix.json.gz",
+      "sha256": "ed3efb5e12e437793a4272437afe37e6564b0016e951ba566d86f0b2d2fae0e6",
+      "validation": {
+        "position_coupling_rms_mm": 0.04046720430102816,
+        "position_coupling_peak_mm": 0.24247269594581616,
+        "non_ground_collision_violations": 0
+      }
+    },
+    "ScoopPrefixReverse": {
+      "targets": "ScoopPrefixReverse.json.gz",
+      "sha256": "92c58f50083c02a9cd28e3a7541b2281a4eacc29aec18c3396b86fd5091d8b66",
+      "validation": {
+        "position_coupling_rms_mm": 0.051240350190555076,
+        "position_coupling_peak_mm": 0.33420684545736334,
+        "non_ground_collision_violations": 0
+      }
+    },
+    "FlipReverse": {
+      "targets": "FlipReverse.json.gz",
+      "sha256": "081c2a1a1c9ffc2d2dfe9d44d673d9dd79feb4c0240fb8a5a9283e69936b5663",
+      "validation": {
+        "position_coupling_rms_mm": 0.2148648457108547,
+        "position_coupling_peak_mm": 1.021978642213101,
+        "non_ground_collision_violations": 0
+      }
+    }
+  },
+  "nodes": {
+    "Push:start": [
+      0.12682864835404556,
+      -0.14121513330617333,
+      -0.29959143780225134,
+      0.0284532925199433,
+      0.7341525642359213,
+      -0.8603358725303145,
+      -1.1280435339659691,
+      0.45501854088370225,
+      1.32145870388653,
+      0.10356993482226633,
+      -0.2646468489476671,
+      -0.49667310722626595,
+      -0.13258806898699357,
+      0.21794232542490385,
+      -0.2303526336697379,
+      0.7527019936080956
+    ],
+    "Push:end": [
+      0.1551295020677216,
+      0.19731344401848092,
+      -0.9515286672194836,
+      0.028453292519963348,
+      0.751862437738253,
+      -0.2830657226305026,
+      -1.525207962532299,
+      0.6486585686476469,
+      0.8742017239186733,
+      0.7289021068889381,
+      -0.028453292519943305,
+      -0.35830497276152173,
+      -0.7501330527882094,
+      0.10663606937936,
+      -0.4635385945345821,
+      0.28227057481732865
+    ],
+    "SideScoop:start": [
+      0.11573753524633504,
+      -0.04304069702748756,
+      -0.1602517147283605,
+      0.1767418909161982,
+      0.4792635135459127,
+      -0.8391253493799659,
+      -1.940559169828511,
+      0.029715555578290552,
+      0.3833934343031332,
+      -3.1115467074800565,
+      -2.5961799733855786,
+      2.537332370745722,
+      0.20992494382694685,
+      0.25670234478589454,
+      -0.10066724183752589,
+      0.10940743497845025
+    ],
+    "Dump:end": [
+      0.03613418675784917,
+      -0.15368635288565466,
+      -0.9694477825540259,
+      0.9501162227719485,
+      0.27759670729019414,
+      -0.9757574727063388,
+      -1.2067325197046912,
+      -1.280546682633042,
+      0.45620941291025574,
+      -2.786620040203759,
+      -2.770503081902976,
+      2.6181193832271337,
+      0.5381835424357806,
+      -0.6410742262517973,
+      0.5937765432757424,
+      0.03643378094936291
+    ],
+    "Flip:start": [
+      0.1744350988244643,
+      -0.11170775548734155,
+      -0.08670192821287907,
+      0.2539676845193916,
+      0.8394624586096369,
+      -0.7438794046140886,
+      -1.7379905284586443,
+      0.2967360089055589,
+      0.15319499486940907,
+      -3.0749413590568504,
+      -2.5628822901578543,
+      2.6076201770659146,
+      -0.2593678201840841,
+      0.07650212990892646,
+      -0.5832906545008121,
+      0.04328285385741508
+    ]
+  },
+  "home_node": "SideScoop:start",
+  "edges": [
+    {
+      "from": "Push:start",
+      "to": "Push:end",
+      "segment": "Push"
+    },
+    {
+      "from": "Push:end",
+      "to": "Push:start",
+      "segment": "PushReverse"
+    },
+    {
+      "from": "Push:start",
+      "to": "SideScoop:start",
+      "segment": "BridgeForward"
+    },
+    {
+      "from": "SideScoop:start",
+      "to": "Push:start",
+      "segment": "BridgeReverse"
+    },
+    {
+      "from": "SideScoop:start",
+      "to": "Flip:start",
+      "segment": "ScoopPrefix"
+    },
+    {
+      "from": "Flip:start",
+      "to": "SideScoop:start",
+      "segment": "ScoopPrefixReverse"
+    },
+    {
+      "from": "Flip:start",
+      "to": "Dump:end",
+      "segment": "Flip"
+    },
+    {
+      "from": "Dump:end",
+      "to": "Flip:start",
+      "segment": "FlipReverse"
+    }
+  ],
+  "grasp": {
+    "shaft_separation_m": -0.42000000000000004,
+    "bar_separation_m": 0.015000000000000001,
+    "max_position_error_m": 0.01,
+    "max_axis_error_rad": 0.05,
+    "left_frame": "arm_l_ft_sensor",
+    "left_grip_in_flange_m": [
+      0.119,
+      0.0085,
+      0.0
+    ],
+    "left_axis_in_flange": [
+      3.5504620122549835e-09,
+      1.9112149397293896e-08,
+      0.9999999999999997
+    ],
+    "right_frame": "arm_r_ft_sensor",
+    "right_grip_in_flange_m": [
+      0.119,
+      -0.0085,
+      0.0
+    ],
+    "right_axis_in_flange": [
+      2.185458702923424e-16,
+      -8.523361834480354e-17,
+      0.9999999999999992
+    ]
+  },
+  "transition_validation_passed": true,
+  "transition_start_policy": "certified settled action nodes; unknown coupled starts reject",
+  "transition_hold_s": 3.0,
+  "automatic_certified_transition": true
+}
