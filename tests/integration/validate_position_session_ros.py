@@ -355,7 +355,7 @@ def main():
             assert probe.returncode==0,probe_log.read_text()
             preflight=json.loads(probe_log.read_text().splitlines()[-1])
             assert preflight['robot_interface']=='available',preflight
-            checks['read_only_preflight_with_real_type_hashes_and_qos']=True
+            checks['read_only_preflight_with_endpoint_identity_and_qos']=True
         result=dict(passed=True,checks=checks,synthetic_input=True,real_controller_input=False,
                     servo_executable_started=False,hardware_commands_sent=False,frames=len(frames),
                     domain=os.environ['ROS_DOMAIN_ID'],preflight_discovery_timeout=args.preflight_discovery_timeout,
