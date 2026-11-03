@@ -139,7 +139,9 @@ def vendor_build(vendor, workspace, distro):
            ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION',
             'FASTDDS_BUILTIN_TRANSPORTS', 'CMAKE_BUILD_PARALLEL_LEVEL')}
     env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-    script = f'source /opt/ros/{distro}/setup.bash; export LD_LIBRARY_PATH=/opt/openrobots/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}; exec "$@"'
+    script = (f'source /opt/ros/{distro}/setup.bash; '
+              'export CMAKE_PREFIX_PATH=/opt/openrobots${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}; '
+              'export LD_LIBRARY_PATH=/opt/openrobots/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; exec "$@"')
     subprocess.run(['bash', '--noprofile', '--norc', '-ec', script, 'snowbot-build',
                     '/usr/bin/python3', '/usr/bin/colcon', '--log-base', str(workspace/'vendor-log'), 'build',
                     '--base-paths', str(vendor/'src'), '--build-base', str(workspace/'vendor-build'),
