@@ -59,7 +59,7 @@
     }
   },
   "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
-  "replay_code_sha256": "78eadad5ab0d6d165173d43e5b5bb823dabc66e17947a492b9e6ae56a7ba0799",
+  "replay_code_sha256": "832f6990cdb5b7ac1db60b4a4997b9ef463ac452df5aa49014f738ed4342cb95",
   "source_commits": {
     "snowbot_base": "ff1b464",
     "bindu": "6c9cc8f0ece983bbe74bd4c1cda0daed871d4fd4",

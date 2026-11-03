@@ -453,8 +453,8 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
 
 
 def confirm_prepare_grippers(port, operation):
-    message = ('确认空手后按 Enter 打开双爪并开始 Prepare：' if operation == 'open' else
-               'Prepare 已到位；装夹雪铲后按 Enter 关闭双爪：')
+    message = ('Prepare 已到位；按 Enter 打开双爪以装夹雪铲：' if operation == 'open' else
+               '装夹雪铲后按 Enter 关闭双爪：')
     if input(message).strip():
         raise RuntimeError('PREPARE_OPERATOR_CANCELED')
     port.grippers(operation)
@@ -723,8 +723,6 @@ def execute(args, plan):
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
-        if args.action == 'Prepare':
-            confirm_prepare_grippers(port, 'open')
         rest_since = None
         end = time.monotonic()+5.
         while True:
@@ -764,6 +762,7 @@ def execute(args, plan):
                             joint_follow_limits=follow_limits, execution_mode=args.execution_mode)
         if args.action == 'Prepare':
             prepare_context = None
+            confirm_prepare_grippers(port, 'open')
             confirm_prepare_grippers(port, 'close')
         record('result', **result)
         print(json.dumps(result))
