@@ -1,4 +1,4 @@
-"""Snowbot x86/Jazzy assembly. prepare/build never start a device or ROS node."""
+"""Snowbot native assembly. prepare/build never start a device or ROS node."""
 import argparse
 import hashlib
 import json
@@ -121,23 +121,23 @@ def require_stopped(bindu):
                    cwd=bindu, env=source_environment(bindu), check=True)
 
 
-def prepare_ros_dependencies(bindu, vendor):
+def prepare_ros_dependencies(bindu, vendor, distro):
     # Resolve only the required package closure across all three source roots.
     roots = [vendor/'src', bindu/'src', ROOT/'src']
     paths = subprocess.check_output(['/usr/bin/colcon', 'list', '--base-paths',
         *map(str, roots), '--packages-up-to', *TARGETS, 'snowbot_bringup',
         'bindu_bimanual_qp', '--paths-only'], text=True).splitlines()
     subprocess.run(['/usr/bin/rosdep', 'install', '--from-paths', *paths, '--ignore-src',
-        '--rosdistro', 'jazzy', '--skip-keys', 'pinocchio proxsuite', '-y'], check=True)
+        '--rosdistro', distro, '--skip-keys', 'pinocchio proxsuite', '-y'], check=True)
 
 
-def vendor_build(vendor, workspace):
+def vendor_build(vendor, workspace, distro):
     # A clean, vendor-only shell prevents numerical venv libraries entering servo.
     env = {key: value for key, value in os.environ.items() if key in
            ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION',
             'FASTDDS_BUILTIN_TRANSPORTS', 'CMAKE_BUILD_PARALLEL_LEVEL')}
     env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-    script = 'source /opt/ros/jazzy/setup.bash; export LD_LIBRARY_PATH=/opt/openrobots/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; exec "$@"'
+    script = f'source /opt/ros/{distro}/setup.bash; export LD_LIBRARY_PATH=/opt/openrobots/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}; exec "$@"'
     subprocess.run(['bash', '--noprofile', '--norc', '-ec', script, 'snowbot-build',
                     '/usr/bin/python3', '/usr/bin/colcon', '--log-base', str(workspace/'vendor-log'), 'build',
                     '--base-paths', str(vendor/'src'), '--build-base', str(workspace/'vendor-build'),
@@ -180,15 +180,19 @@ print(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in pat
 
 def require_platform():
     import platform
-    if (platform.system() != 'Linux' or platform.machine() != 'x86_64' or
-        platform.freedesktop_os_release().get('ID') != 'ubuntu' or
-        platform.freedesktop_os_release().get('VERSION_ID') != '24.04'):
-        raise ValueError('Full Snowbot assembly requires Ubuntu 24.04 x86_64 / ROS 2 Jazzy')
-    for path in ('/opt/ros/jazzy/setup.bash', '/usr/bin/colcon',
-                 '/opt/openrobots/lib/libpinocchio_parsers.so.4.1.0',
-                 '/opt/openrobots/lib/libpinocchio_default.so.4.1.0'):
+    info = platform.freedesktop_os_release() if platform.system() == 'Linux' else {}
+    targets = {('x86_64', '24.04'): ('jazzy', '4.1.0'),
+               ('aarch64', '22.04'): ('humble', '3.9.0')}
+    target = targets.get((platform.machine(), info.get('VERSION_ID')))
+    if info.get('ID') != 'ubuntu' or target is None:
+        raise ValueError('Full assembly requires Ubuntu 24.04 x86_64/Jazzy or Ubuntu 22.04 aarch64/Humble')
+    distro, pinocchio = target
+    for path in (f'/opt/ros/{distro}/setup.bash', '/usr/bin/colcon',
+                 f'/opt/openrobots/lib/libpinocchio_parsers.so.{pinocchio}',
+                 f'/opt/openrobots/lib/libpinocchio_default.so.{pinocchio}'):
         if not Path(path).is_file():
             raise ValueError('Install system/ROS/vendor prerequisites first: '+path)
+    return distro
 
 
 def main(argv=None):
@@ -209,7 +213,7 @@ def main(argv=None):
                 'build', '--workspace', str(workspace/'upper')], driver_started=False), indent=2))
             return 0
         if options.command in ('prepare', 'build'):
-            require_platform()
+            distro = require_platform()
         bindu = locked_bindu(existing, acquire=options.command in ('prepare', 'build'))
         if options.command == 'start':
             # x86_real start already performs the runtime precheck exactly once.
@@ -220,8 +224,8 @@ def main(argv=None):
         require_stopped(bindu)
         vendor = assemble(bindu, workspace)
         if options.command == 'prepare':
-            prepare_ros_dependencies(bindu, vendor)
-        vendor_build(vendor, workspace)
+            prepare_ros_dependencies(bindu, vendor, distro)
+        vendor_build(vendor, workspace, distro)
         if options.command == 'prepare':
             x86(bindu, workspace, 'prepare', '--vendor-setup', vendor/'install/local_setup.bash',
                 '--application-source', ROOT)
