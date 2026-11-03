@@ -160,11 +160,11 @@ def write_receipt_poll_check(source, work, root):
     described=fixture[fixture.index('TrajectoryWire described('):fixture.index('void check_adapter_memory')]
     checks=fixture[fixture.index('void check_production_poll()'):fixture.index('void check_trajectory_impedance')]
     if not ready:
-        checks=checks.replace('invalid<5','invalid<1')
-        checks=checks.replace('initialized/calibration/sensor admission gates','initialized admission gate (position-only candidate)')
+        checks=checks.replace('invalid<4','invalid<1')
+        checks=checks.replace('initialized/sensor admission gates','initialized admission gate (position-only candidate)')
         body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
         checks=checks.replace('if(sensor_age)snapshot.sensor_sampled_ns.fill(steady_ns()-sensor_age);','(void)sensor_age;')
-        checks=checks.replace('snapshot.sensor_valid_mask=invalid==3?1:3;','').replace('snapshot.sensor_valid_mask=3;','')
+        checks=checks.replace('snapshot.sensor_valid_mask=invalid==2?1:3;','').replace('snapshot.sensor_valid_mask=3;','')
     main='\nint main(){\n snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.sensor_valid_mask=3;\n snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;\n check_production_poll();\n}\n'
     if not ready:main=main.replace('snapshot.sensor_valid_mask=3;','')
     path=work/'test_production_receipt.cpp'

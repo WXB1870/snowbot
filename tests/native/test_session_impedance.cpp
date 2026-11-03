@@ -54,7 +54,7 @@ void EtherCAT_setSingleMotorEnable(unsigned slot,bool value){enabled[slot]=value
 struct ServoNode {
  std::string session_execution_mode_="position",position_rejection_;
  double impedance_following_error_rad_=.25;
- bool impedance_enable_=false,session_calibration_confirmed_=false,impedance_inited_=true,session_impedance_active_=false;
+ bool impedance_enable_=false,impedance_inited_=true,session_impedance_active_=false;
  uint64_t session_impedance_session_=0;
  std::shared_ptr<snowbot_impedance::CartesianImpedanceController> impedance_left_,impedance_right_;
  std::array<int,20> session_q_index_{},session_v_index_{};
@@ -167,16 +167,16 @@ void check_production_poll(){
  assert(node.position_receipts_.pop(receipt)&&!receipt.accepted&&receipt.session==64);
  const auto admission=node.position_gate_.generation();const auto enables=enable_requests;
  node.session_execution_mode_="impedance";
- for(unsigned invalid=0;invalid<5;++invalid){
-  node.position_initialized_=invalid!=0;node.session_calibration_confirmed_=invalid!=1;node.impedance_inited_=invalid!=2;
-  snapshot.sensor_valid_mask=invalid==3?1:3;
-  next=make_packet(65+invalid);submit(next);finish(invalid==4?21000000:0);
+ for(unsigned invalid=0;invalid<4;++invalid){
+  node.position_initialized_=invalid!=0;node.impedance_inited_=invalid!=1;
+  snapshot.sensor_valid_mask=invalid==2?1:3;
+  next=make_packet(65+invalid);submit(next);finish(invalid==3?21000000:0);
   assert(node.position_gate_.generation()==admission&&node.position_gate_.last().session==61&&enable_requests==enables);
   assert(std::string(node.position_cycle_reason_)=="startup_shutdown_or_mode_conflict");
   assert(node.position_receipts_.pop(receipt)&&!receipt.accepted&&receipt.session==65+invalid);
  }
  snapshot.sensor_valid_mask=3;
- std::cout<<"PASS actual production position_poll: import/derived/error paths, ACK after commit, generation/restart rejection, initialized/calibration/sensor admission gates, no rejected enable requests, zero periodic new/delete\n";
+ std::cout<<"PASS actual production position_poll: import/derived/error paths, ACK after commit, generation/restart rejection, initialized/sensor admission gates, no rejected enable requests, zero periodic new/delete\n";
 }
 void check_trajectory_impedance(ServoNode& node){
  using namespace position_session;using namespace bindu::execution;
@@ -252,7 +252,7 @@ void check_target_impedance(ServoNode& previous){
  using namespace position_session;
  ServoNode node;node.impedance_left_=previous.impedance_left_;node.impedance_right_=previous.impedance_right_;
  node.session_q_index_=previous.session_q_index_;node.session_v_index_=previous.session_v_index_;node.session_impedance_workspace();
- node.session_execution_mode_="impedance";node.session_calibration_confirmed_=true;node.position_reference_mode_=2;
+ node.session_execution_mode_="impedance";node.position_reference_mode_=2;
  snapshot.wrench.fill(0);snapshot.sensor_valid_mask=3;snapshot.status.fill(0x27);
  node.position_admission_=std::make_unique<TrajectoryAdmission<Packet>>(node.position_trajectory_,[](auto& result){
   if(auto error=inspect_servo_command(*result.packet,result.origin.get(),result.context,result.command))throw std::invalid_argument(error);
@@ -311,8 +311,8 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  for(unsigned i=0;i<20;++i){const std::string name=i<8?"arm_l_joint_"+std::to_string(i+1):i<16?"arm_r_joint_"+std::to_string(i-7):i<18?"head_joint_"+std::to_string(i-15):"body_joint_"+std::to_string(i-17);node.session_q_index_[i]=node.impedance_left_->getJointQIdx(name);node.session_v_index_[i]=node.impedance_left_->getJointVIdx(name);}
  node.session_impedance_workspace();check_adapter_memory(node);
  check_production_poll();
- node.session_execution_mode_="impedance";node.feedback();assert(!node.session_impedance_ready());
- node.session_calibration_confirmed_=true;node.start();assert(node.session_impedance_ready());node.position_step();assert(applied.impedance&&applied.kp[0]==1&&applied.kd[0]==.2f&&std::isfinite(applied.torque[0]));
+ node.session_execution_mode_="impedance";node.feedback();assert(node.session_impedance_ready());
+ node.start();assert(node.session_impedance_ready());node.position_step();assert(applied.impedance&&applied.kp[0]==1&&applied.kd[0]==.2f&&std::isfinite(applied.torque[0]));
  assert(applied.q[14]==snapshot.position[18]&&applied.q[15]==snapshot.position[19]);
  assert(gravity[7]==0&&gravity[15]==0&&gravity[16]==0&&gravity[17]==0);
  // Actual production watchdog, so ROS repetition cannot keep old torque alive.
@@ -326,5 +326,5 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  snapshot.wrench[0]=0;node.feedback();snapshot.sampled_ns-=21000000;assert(!node.session_impedance_ready());
  check_trajectory_impedance(node);
  check_target_impedance(node);
- std::cout<<"PASS actual servo default position, gated impedance, waist output, sensor/calibration rejection, fixed-position PAUSE, RT expiry torque discard and resource isolation\n";
+ std::cout<<"PASS actual servo default position, gated impedance, waist output, sensor rejection, fixed-position PAUSE, RT expiry torque discard and resource isolation\n";
 }
