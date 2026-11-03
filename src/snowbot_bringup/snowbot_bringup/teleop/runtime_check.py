@@ -307,11 +307,14 @@ def inspect_position_routes(args, node):
         if local is None or peer is None:
             errors.append('SNOWBOT_SESSION_ROUTE_UNVERIFIED:'+topic)
             continue
-        local_hash, peer_hash = schema(local), schema(peer)
-        if local_hash is None or peer_hash is None:
-            errors.append('SNOWBOT_ENDPOINT_TYPE_HASH_UNAVAILABLE:'+topic)
-        elif local_hash != peer_hash:
-            errors.append('SNOWBOT_ENDPOINT_TYPE_HASH_MISMATCH:'+topic)
+        # Humble exposes no endpoint hash API. If either side exposes it,
+        # retain the existing requirement for two valid, matching hashes.
+        if hasattr(local, 'topic_type_hash') or hasattr(peer, 'topic_type_hash'):
+            local_hash, peer_hash = schema(local), schema(peer)
+            if local_hash is None or peer_hash is None:
+                errors.append('SNOWBOT_ENDPOINT_TYPE_HASH_UNAVAILABLE:'+topic)
+            elif local_hash != peer_hash:
+                errors.append('SNOWBOT_ENDPOINT_TYPE_HASH_MISMATCH:'+topic)
         # Relays compare their actual publisher and receiver. The passive local
         # reader supplies only the local schema on those command topics.
         publisher = next((e for e in endpoints if e['topic'] == topic and e['role'] == 'publisher'), None)

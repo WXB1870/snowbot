@@ -16,19 +16,20 @@ struct Endpoint {
  std::array<uint8_t,24> endpoint_gid()const{std::array<uint8_t,24> id{};id[0]=17;return id;}
 };
 struct Sub {const char* get_topic_name(){return "/bindu/position/observation";}rclcpp::QoS get_actual_qos(){return {};}};
-struct Node {
- std::vector<Endpoint> writers,readers;unsigned graph_reads=0;
+struct HumbleEndpoint : Endpoint { const Hash& topic_type_hash()const=delete; };
+template<class EndpointType=Endpoint> struct Node {
+ std::vector<EndpointType> writers,readers;unsigned graph_reads=0;
  const char* get_name(){return "upper";}const char* get_namespace(){return "/";}
  auto get_publishers_info_by_topic(const char*){++graph_reads;return writers;}
  auto get_subscriptions_info_by_topic(const char*){++graph_reads;return readers;}
 };
 int main(){try{
- Node node;auto sub=std::make_shared<Sub>();
+ Node<> node;auto sub=std::make_shared<Sub>();
  const auto check=[&](){return position_connection::check_publisher(node,sub,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");};
  CHECK(check().reason=="publisher_missing");
  node.writers.push_back({});CHECK(check().reason=="subscription_not_discovered");
  node.readers.push_back({});node.readers[0].node="upper";
- CHECK(check().ready());CHECK(check().publisher_gid.size()==48);CHECK(check().publisher_gid.substr(0,2)=="11");
+ CHECK(check().ready());CHECK(check().type_hash_verified);CHECK(check().publisher_gid.size()==48);CHECK(check().publisher_gid.substr(0,2)=="11");
  node.writers.push_back({});CHECK(check().reason=="publisher_ambiguous");node.writers.pop_back();
  node.writers[0].node="observer";CHECK(check().reason=="publisher_identity_mismatch");node.writers[0].node="servo_node";
  node.writers[0].ns="/snowbot";CHECK(check().reason=="publisher_identity_mismatch");node.writers[0].ns="/";
@@ -41,5 +42,14 @@ int main(){try{
  node.writers[0].qos.result=rclcpp::QoSCompatibility::Error;CHECK(check().reason.find("qos_incompatible:")==0);
  node.writers[0].qos.result=rclcpp::QoSCompatibility::Warning;CHECK(check().reason.find("qos_compatibility_unknown:")==0);
  node.writers[0].qos.result=rclcpp::QoSCompatibility::Ok;CHECK(check().ready());CHECK(node.graph_reads>20);
+ Node<HumbleEndpoint> humble;humble.writers.push_back({});humble.readers.push_back({});humble.readers[0].node="upper";
+ const auto check_humble=[&](){return position_connection::check_publisher(humble,sub,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");};
+ CHECK(check_humble().ready());CHECK(!check_humble().type_hash_verified);CHECK(check_humble().publisher_gid.substr(0,2)=="11");
+ humble.writers.push_back({});CHECK(check_humble().reason=="publisher_ambiguous");humble.writers.pop_back();
+ humble.writers[0].node="observer";CHECK(check_humble().reason=="publisher_identity_mismatch");humble.writers[0].node="servo_node";
+ humble.writers[0].type="std_msgs/msg/String";CHECK(check_humble().reason=="message_type_mismatch");humble.writers[0].type=node.readers[0].type;
+ humble.readers[0].node="another_subscriber";CHECK(check_humble().reason=="subscription_not_discovered");humble.readers[0].node="upper";
+ humble.writers[0].qos.result=rclcpp::QoSCompatibility::Error;CHECK(check_humble().reason.find("qos_incompatible:")==0);
+ humble.writers[0].qos.result=rclcpp::QoSCompatibility::Warning;CHECK(check_humble().reason.find("qos_compatibility_unknown:")==0);
  std::cout<<checks<<" endpoint diagnostic assertions passed\n";
  }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}

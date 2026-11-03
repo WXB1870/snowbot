@@ -178,6 +178,7 @@ print(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in pat
                 dependency_lock_sha256=digest(ROOT/'dependencies.repos'),
                 vendor_manifest_sha256=digest(vendor/'position_release.json'),
                 configuration_hashes=configs,
+                connection_type_hash_policy='compare_when_api_available',
                 software_build_completed=True, driver_started=False, physical_acceptance=False)
     (workspace/'deployment-manifest.json').write_text(json.dumps(data, indent=2)+'\n')
 
