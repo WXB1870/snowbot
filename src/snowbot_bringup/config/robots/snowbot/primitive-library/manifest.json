@@ -59,10 +59,10 @@
     }
   },
   "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
-  "replay_code_sha256": "bd6ef051c47f8952161d04b5663ac49d50bda8d0c83cf0200ef33f61f6bc3559",
+  "replay_code_sha256": "22af766010b71ff092f1ab9add91ba5d6d46f6cda2020db3aaf8a1af39163b29",
   "source_commits": {
     "snowbot_base": "43fcb3d",
-    "bindu": "81c5f0fa7dc7e2a44f5827238243f28ccfd1ec6f",
+    "bindu": "7c66a75fb3d5fe2a787f1fafc0dbf9357f8318e5",
     "branch": "main"
   },
   "validation_kind": "certified primitives plus native target-stream and field-waist tested transfer graph",
@@ -336,5 +336,12 @@
   "transition_validation_passed": true,
   "transition_start_policy": "certified settled action nodes; unknown coupled starts reject",
   "transition_hold_s": 3.0,
-  "automatic_certified_transition": true
+  "automatic_certified_transition": true,
+  "preparation": {
+    "action": "Prepare",
+    "tool_present": false,
+    "start": "fresh measured joints",
+    "goal_node": "SideScoop:start",
+    "path_checked_before_lease": true
+  }
 }

@@ -1,7 +1,8 @@
 """Operator-run replay of certified Snowbot atomic joint targets.
 
 Preview is offline. --execute uses an already running session_v3 executor;
-it never starts drivers, enables motors, homes, or commands grippers/base.
+Prepare is an empty-hand entry to the side-scoop ready pose. No driver
+startup, motor enabling, encoder homing, or gripper/base commands are performed.
 """
 import argparse
 import bisect
@@ -41,6 +42,7 @@ class Replay:
     waist_lead_s: float = 0.
     backend_ready: bool = False
     reference_margin_rad: float = 0.
+    empty_prepare: bool = False
 
     @property
     def duration(self):
@@ -63,8 +65,26 @@ class Replay:
         for row in self.points:
             for n, q in zip(self.names, row):
                 margin = self.reference_margin_rad if n.startswith('arm_') else 0.
-                if not profile.limits[n][0]+margin <= q <= profile.limits[n][1]-margin:
+                lo, hi = profile.limits[n]
+                low, high = lo+margin, hi-margin
+                if self.empty_prepare:
+                    start = self.points[0][self.names.index(n)]
+                    low, high = min(low, start), max(high, start)
+                if not lo <= q <= hi:
                     raise ValueError('REPLAY_POSITION_LIMIT:'+n)
+                if not low <= q <= high:
+                    raise ValueError(('PREPARE_REFERENCE_MARGIN_ENTRY:' if self.empty_prepare else 'REPLAY_POSITION_LIMIT:')+n)
+        if self.empty_prepare:
+            for i, n in enumerate(self.names):
+                margin = self.reference_margin_rad if n.startswith('arm_') else 0.
+                low, high = profile.limits[n][0]+margin, profile.limits[n][1]-margin
+                if not low <= self.points[-1][i] <= high:
+                    raise ValueError('PREPARE_END_REFERENCE_MARGIN:'+n)
+                for a,b in zip(self.points,self.points[1:]):
+                    if ((a[i]<low and b[i]<a[i]-1e-12) or
+                            (a[i]>high and b[i]>a[i]+1e-12) or
+                            (low<=a[i]<=high and not low<=b[i]<=high)):
+                        raise ValueError('PREPARE_REFERENCE_MARGIN_ENTRY:'+n)
         for a, b, t0, t1 in zip(self.points, self.points[1:], self.times, self.times[1:]):
             for n, x, y in zip(self.names, a, b):
                 if abs(y-x)/(t1-t0)*self.speed > profile.speed(n)+1e-7:
@@ -236,6 +256,62 @@ class AxialGraspGuard:
         return position, angle
 
 
+
+def plan_prepare(path, robot, measured, speed=1.):
+    """Empty-hand entry from measured joints; validate before acquiring a lease."""
+    import numpy as np
+    from bindu_execution.interpolation import Curve, State
+    from bindu_kinematics.tool_geometry import make_collision_checker
+    from snowbot_hardware.parameters import load_mode_config
+
+    home = load_replay(path, 'SideScoop', speed, waist_lead_s=0.)
+    profile = robot.profile
+    context = tuple(n for group in profile.groups.values() for n in group)
+    for name in context:
+        if name not in measured or not math.isfinite(measured[name]):
+            raise ValueError('PREPARE_MEASUREMENT_REQUIRED:'+name)
+        if not profile.limits[name][0] <= measured[name] <= profile.limits[name][1]:
+            raise ValueError('PREPARE_START_JOINT_LIMIT:'+name)
+    before = tuple(measured[n] for n in NAMES)
+    after = home.points[0]
+    config = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')
+    duration = float(config['prepare_duration'])
+    for name, a, b in zip(NAMES, before, after):
+        shared = name.startswith('body_')
+        velocity = min(profile.speed(name)*.8, .025) if shared else profile.speed(name)*.8
+        acceleration = min(profile.acceleration(name)*.8, .12) if shared else profile.acceleration(name)*.8
+        jerk = min(profile.jerk(name)*.8, .8) if shared else profile.jerk(name)*.8
+        distance = abs(b-a)
+        duration = max(duration, 1.875*distance/velocity,
+                       math.sqrt(10/math.sqrt(3)*distance/acceleration),
+                       (60*distance/jerk)**(1/3))
+    duration = math.ceil(duration/.02)*.02
+    curve = Curve.between(0., duration, State.rest(before), State.rest(after))
+    if not curve.valid(profile, NAMES):
+        raise ValueError('PREPARE_MOTION_LIMITS')
+    times = tuple(k*.02 for k in range(round(duration/.02)+1))
+    plan = Replay(times, tuple(curve.sample(t).q for t in times), NAMES,
+                  home.tool_id, home.kinematics, speed, 0., home.backend_ready,
+                  home.reference_margin_rad, empty_prepare=True)
+    plan.validate_profile(profile)
+    tool = json.loads(robot.tool_config.read_text())
+    recipe = dict(tool['demo'])
+    recipe['left_grip_in_tool_m'] = (np.linalg.inv(np.array(tool['left_to_tool']).reshape(4,4)) @
+        np.r_[recipe['grip_offset_m'], 1.])[:3].tolist()
+    checker = make_collision_checker(robot.display_urdf, recipe, conservative_convex=True,
+                                     tool_present=False, validation_only=True)
+    # A rest-to-rest quintic shares one scalar progress across every joint.
+    count = max(1, math.ceil(max(abs(a-b) for a,b in zip(before,after))/.005))
+    samples = []
+    for k in range(count+1):
+        u = k/count
+        q = dict(measured)
+        q.update({n: (1-u)*a+u*b for n,a,b in zip(NAMES,before,after)})
+        samples.append(dict(t=u, q=q, tool=np.eye(4)))
+    checker(samples)
+    return plan
+
+
 def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5.):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
     if not 0 < start_tolerance <= .0175 or not 0 < follow_tolerance <= .15:
@@ -323,7 +399,7 @@ def execute(args, plan):
         raise ValueError('REPLAY_REFERENCE_MARGIN_CONFIG_MISMATCH')
     if kinematic_digest(robot.urdf) != plan.kinematics:
         raise ValueError('REPLAY_KINEMATICS_MISMATCH')
-    if args.tool_id != plan.tool_id:
+    if args.action != 'Prepare' and args.tool_id != plan.tool_id:
         raise ValueError('REPLAY_TOOL_ID_MISMATCH')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     log = args.output.open('x')
@@ -371,6 +447,8 @@ def execute(args, plan):
             raise RuntimeError(reply.code)
         return reply
 
+    prepare_context = None
+
     class Port:
         lease = None
         boot = None
@@ -406,6 +484,9 @@ def execute(args, plan):
             if p.pdo_sample != self.sample: self.sample, self.progress = p.pdo_sample, steady
             if steady-self.progress > .05 or latest.get('error'):
                 raise RuntimeError(latest.get('error', 'REPLAY_PDO_NOT_ADVANCING'))
+            if prepare_context is not None and any(
+                    n not in q or not math.isfinite(q[n]) or abs(q[n]-x)>.001 for n,x in prepare_context.items()):
+                raise RuntimeError('PREPARE_CONTEXT_CHANGED')
             if guard is not None: guard.check(q)
             return q, v
         def acquire(self):
@@ -451,7 +532,7 @@ def execute(args, plan):
             raise RuntimeError('REPLAY_MEASURED_STOP_NOT_CONFIRMED')
 
     manifest = json.loads(args.library.read_text())
-    guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest else None
+    guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest and args.action != 'Prepare' else None
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
@@ -465,13 +546,22 @@ def execute(args, plan):
             if rest_since is not None and now-rest_since >= .2: break
             if now >= end: raise RuntimeError('REPLAY_START_NOT_SETTLED')
             rclpy.spin_once(node, timeout_sec=.005)
-        if manifest.get('transition_validation_passed'):
+        if args.action == 'Prepare':
+            initial = dict(q)
+            plan = plan_prepare(args.library, robot, initial, args.speed)
+            prepare_context = {n:x for n,x in initial.items() if n not in NAMES}
+            checked_at = time.monotonic()
+            wait(lambda: latest['state'][1]>checked_at and latest['pdo'][1]>checked_at, 1.)
+            current, _ = port.check(False)
+            if any(n not in current or abs(current[n]-x)>.001 for n,x in initial.items()):
+                raise RuntimeError('PREPARE_START_CHANGED_AFTER_VALIDATION')
+        elif manifest.get('transition_validation_passed'):
             plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
             plan.validate_profile(robot.profile)
-        record('plan', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
+        record('plan', tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
-        result = run_replay(plan, port, start_tolerance=args.start_tolerance,
+        result = run_replay(plan, port, start_tolerance=min(args.start_tolerance,.001) if args.action=='Prepare' else args.start_tolerance,
                             follow_tolerance=args.follow_tolerance)
         record('result', **result)
         print(json.dumps(result))
@@ -491,7 +581,7 @@ def execute(args, plan):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library', type=Path, required=True)
-    parser.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home'), required=True)
+    parser.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare'), required=True)
     parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
@@ -505,14 +595,22 @@ def main(argv=None):
     parser.add_argument('--follow-tolerance', type=float, default=.10)
     args = parser.parse_args(argv)
     manifest = json.loads(args.library.read_text())
-    if manifest.get('transition_validation_passed'):
+    if args.action == 'Prepare':
+        plan = load_replay(args.library, 'SideScoop', args.speed, waist_lead_s=0.)
+        if not args.execute:
+            print(json.dumps(dict(action='Prepare', empty_handed=True,
+                start_source='fresh measured joints on execute; full path checked before lease',
+                goal_q_rad=dict(zip(plan.names,plan.points[0])),
+                posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
+            return
+    elif manifest.get('transition_validation_passed'):
         start = args.from_node or manifest['home_node']
         plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])), args.speed, args.waist_lead)
     else:
         plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
-        if not args.output or not args.tool_id:
-            parser.error('--execute requires --tool-id and --output')
+        if not args.output or (args.action != 'Prepare' and not args.tool_id):
+            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare')
         if not plan.backend_ready:
             parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
         execute(args, plan)
