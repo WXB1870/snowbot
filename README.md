@@ -62,6 +62,8 @@ snowbot/
 
 通用契约、求解与执行逻辑在 Bindu 维护；型号配置、底层适配和操作流程在 Snowbot 维护。底层代码以 `vendor/snowbot/original/` 为基线，在 `tools/deployment/snowbot_vendor/position_session/` 维护补丁与公共头，通过 [prepare_position_session.py](tools/deployment/prepare_position_session.py) 生成构建源码。
 
+准备器显式传入 `--with-impedance` 时叠加已固定的118关节阻抗控制器与参数，来源和源码哈希见 [impedance_118.json](vendor/snowbot/impedance_118.json)。双臂阻抗复用会话目标流，腰部保持位置控制；上层与servo须配对选择 `execution_mode=impedance`，默认仍为位置模式、标定未确认。阻抗会话从本部署安装目录读取参数（可用已有 `IMPEDANCE_PARAMS_YAML` 显式覆盖），不读取同事工作区；独立参考、旧阻抗开关、双臂模式及直接力矩测试订阅不注册。导入参数未经本项目真机验收，真实标定完成后才能确认 `impedance_calibration_confirmed`；本地原生检查不代表完整ROS构建或实体跟踪／停止通过。
+
 应用测试从仓库根目录执行，例如 `python -m unittest tests.unit.test_pico_control`。ROS 与原生依赖的加载方式、仿真构建及集成检查见[运行指南](运行与验证.md#仿真与浏览器操作台)。
 
 ## 文档

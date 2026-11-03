@@ -157,8 +157,9 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'deployed_vendor.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'deployed_vendor')
         if with_impedance:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'joint_impedance_118.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'impedance')
+            patches=(*patches,'joint_impedance_118','impedance')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
@@ -208,6 +209,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
             native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,
+            impedance_source=json.loads((pairing_path.parent/'vendor/snowbot/impedance_118.json').read_text()) if with_impedance else None,
             impedance_calibration_confirmed=False,source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
         (stage/'position_release.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
         stage.rename(output)

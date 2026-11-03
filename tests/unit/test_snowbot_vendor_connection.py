@@ -95,12 +95,14 @@ class PositionReleaseTests(unittest.TestCase):
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
         manifest=json.loads((output/'position_release.json').read_text())
-        self.assertEqual(set(manifest['components']),{*(set(vendor.COMPONENTS)-{'target'}),'impedance'})
-        self.assertFalse(manifest['target_stream_available'])
-        self.assertFalse(manifest['feedback_publication']['isolated'])
-        self.assertEqual(manifest['feedback_publication']['mode'],'original')
-        self.assertNotIn('feedback_send', (output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
-        self.assertNotIn('target_stream', (output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
+        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance'})
+        self.assertTrue(manifest['target_stream_available'])
+        self.assertTrue(manifest['feedback_publication']['isolated'])
+        self.assertEqual(manifest['feedback_publication']['mode'],'latest_only_worker')
+        identity=json.loads((ROOT/'vendor/snowbot/impedance_118.json').read_text())
+        self.assertEqual(manifest['impedance_source'],identity)
+        self.assertEqual(vendor.digest(output/'src/ctl_msgs/config/impedance_params.yaml'),
+                         identity['files']['ctl_msgs/config/impedance_params.yaml']['source_sha256'])
         self.assertEqual(manifest['execution_mode'],'position')
         self.assertTrue(manifest['impedance_available'])
         self.assertFalse(manifest['impedance_calibration_confirmed'])
@@ -111,8 +113,8 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertEqual((default['target_wire_version'],default['target_reference_mode']),(5,2))
         self.assertEqual(default['session_wire_version'],3)
         self.assertEqual(default['target_prepare_ms'],10.)
-        self.assertEqual((self.release/'src/servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes(),
-                         (self.baseline/'servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes())
+        for rel,hashes in identity['files'].items():
+            self.assertEqual(vendor.digest(self.release/'src'/rel),hashes['input_sha256'])
         for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
             rel='ctl_msgs/msg/'+name+'.msg'
             self.assertEqual((self.baseline/rel).read_bytes(),(output/'src'/rel).read_bytes())
