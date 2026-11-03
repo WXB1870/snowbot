@@ -340,26 +340,32 @@ def replay_follow_limits(config, mode, explicit=None):
     return dict(zip(NAMES, limits))
 
 
-def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5., joint_follow_limits=None):
+def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5., joint_follow_limits=None, execution_mode='position'):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
     if not 0 < start_tolerance <= .0175 or not 0 < follow_tolerance <= .15:
         raise ValueError('REPLAY_TOLERANCE')
     limits = joint_follow_limits or dict.fromkeys(plan.names, follow_tolerance)
     measured, velocity = port.check(False)
-    if (max(abs(measured[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance or
+    nominal = execution_mode == 'impedance'
+    anchored = port.nominal_reference() if nominal and not getattr(plan,'empty_prepare',False) else measured
+    if (max(abs(anchored[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance or
             max(abs(velocity[n]) for n in plan.names) > .005):
         raise RuntimeError('REPLAY_START_POSE_MISMATCH: prepare the exported start pose')
+    if nominal and any(abs(measured[n]-x)>limits[n] for n,x in zip(plan.names,plan.points[0])):
+        raise RuntimeError('REPLAY_TRACKING_ERROR')
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
         attempted = True
         port.acquire()
         acquired = True
         initial, velocity = port.check(True)
-        if max(abs(initial[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance:
+        anchor = port.nominal_reference() if nominal and not getattr(plan,'empty_prepare',False) else initial
+        if max(abs(anchor[n]-q) for n,q in zip(plan.names,plan.points[0])) > start_tolerance:
             raise RuntimeError('REPLAY_START_MOVED')
         start = due = renewed = port.steady()
         ros_start = port.ros()
         rest_since = None
+        measured_at_goal = False
         while True:
             port.wait_until(due)
             now = port.steady()
@@ -381,8 +387,11 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             port.send(goal, ros_start+elapsed)
             sent += 1
             if elapsed >= plan.duration:
-                resting = (all(abs(q[n]-x) <= port.arrival_tolerance(n)
-                               for n, x in zip(plan.names, plan.points[-1])) and
+                arrival = port.nominal_reference() if nominal else q
+                measured_at_goal = all(abs(q[n]-x) <= port.arrival_tolerance(n)
+                                       for n,x in zip(plan.names,plan.points[-1]))
+                resting = (all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
+                               for n,x in zip(plan.names,plan.points[-1])) and
                            all(abs(v[n]) <= .005 for n in plan.names))
                 rest_since = now if resting and rest_since is None else rest_since if resting else None
                 if rest_since is not None and now-rest_since >= .2:
@@ -399,7 +408,9 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
                 stopped = port.release_and_confirm_stop() is True
             except (Exception, KeyboardInterrupt) as exc:
                 failure = (failure+'; ' if failure else '')+'STOP_UNCONFIRMED:'+str(exc)
-    result = dict(targets_sent=sent, measured_arrival_confirmed=arrived,
+    result = dict(targets_sent=sent, measured_arrival_confirmed=arrived and measured_at_goal,
+                  nominal_arrival_confirmed=arrived and nominal,
+                  measured_end_error_rad={n:q[n]-x for n,x in zip(plan.names,plan.points[-1])} if arrived else None,
                   stop_confirmed=stopped, completed=arrived and failure is None,
                   error=failure, driver_started=False, snow_removal_verified=False)
     if failure:
@@ -414,6 +425,8 @@ def execute(args, plan):
     from rclpy.qos import qos_profile_sensor_data
     from bindu_interfaces.msg import ExecutionState, MotionCommand, RuntimeEvent
     from bindu_interfaces.srv import Lease, SubmitMotion
+    from std_srvs.srv import Trigger
+    from bindu_runtime.stop_evidence import sampled_nominal_reference
     from snowbot_ctl_msgs.msg import PositionObservation
     from bindu_runtime.robot_setup import RobotSetup
     from bindu_runtime.common import stamp
@@ -460,6 +473,7 @@ def execute(args, plan):
     node.create_subscription(RuntimeEvent, ns+'/events', event, 100)
     leases = node.create_client(Lease, ns+'/execution/lease')
     submit = node.create_client(SubmitMotion, ns+'/execution/submit')
+    holds = node.create_client(Trigger, ns+'/execution/held_reference')
 
     def wait(predicate, timeout):
         end = time.monotonic()+timeout
@@ -521,6 +535,35 @@ def execute(args, plan):
                 raise RuntimeError('PREPARE_CONTEXT_CHANGED')
             if guard is not None: guard.check(q)
             return q, v
+        def nominal_reference(self):
+            state = latest['state'][0]
+            if self.lease and getattr(self, 'commanded', False):
+                values, _ = sampled_nominal_reference(state, NAMES, self.lease.epoch,
+                    self.ros(), tool_config['feedback_max_age'])
+                return dict(zip(NAMES, values))
+            if not holds.service_is_ready():
+                raise RuntimeError('REPLAY_HELD_REFERENCE_UNAVAILABLE')
+            future = holds.call_async(Trigger.Request())
+            wait(future.done, .25)
+            reply = future.result()
+            if not reply.success: raise RuntimeError(reply.message)
+            data = json.loads(reply.message)
+            state = latest['state'][0]
+            expected = self.lease.lease_id if self.lease else ''
+            epoch = self.lease.epoch if self.lease else state.lease_epoch
+            if (data['instance_id'] != self.instance or data['profile_hash'] != robot.profile.digest or
+                    data['lease_id'] != expected or data['epoch'] != epoch or data['revision'] != state.revision or
+                    data['boot_id'] != self.boot or not 0 <= self.ros()-data['stamp'] <= tool_config['feedback_max_age'] or
+                    set(data['positions']) != set(NAMES) or
+                    any(not math.isfinite(q) or not robot.profile.limits[n][0]<=q<=robot.profile.limits[n][1]
+                        for n,q in data['positions'].items())):
+                raise RuntimeError('REPLAY_HELD_REFERENCE_IDENTITY')
+            identity = (data['boot_id'], data['session'], data['sequence'], data['positions'])
+            if getattr(self,'held_identity',None) is not None and identity != self.held_identity:
+                raise RuntimeError('REPLAY_HELD_REFERENCE_CHANGED')
+            self.held_identity = identity
+            return data['positions']
+
         def acquire(self):
             self.lease = call(leases, Lease.Request(operation='acquire', owner=task, resources=list(GROUPS)))
             if self.lease.profile_hash != robot.profile.digest:
@@ -538,6 +581,7 @@ def execute(args, plan):
                 positions=list(goal), stamp=stamp(source), valid_for=.25)
             commands.add(msg.command_id)
             call(submit, SubmitMotion.Request(command=msg))
+            self.commanded = True
             record('target', source_stamp=source, q=list(goal))
         @staticmethod
         def arrival_tolerance(name):
@@ -588,14 +632,15 @@ def execute(args, plan):
             if any(n not in current or abs(current[n]-x)>.001 for n,x in initial.items()):
                 raise RuntimeError('PREPARE_START_CHANGED_AFTER_VALIDATION')
         elif manifest.get('transition_validation_passed'):
-            plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
+            anchor = port.nominal_reference() if args.execution_mode=='impedance' else q
+            plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead, args.start_tolerance)
             plan.validate_profile(robot.profile)
         record('plan', execution_mode=args.execution_mode, joint_follow_limits_rad=follow_limits, tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
         result = run_replay(plan, port, start_tolerance=min(args.start_tolerance,.001) if args.action=='Prepare' else args.start_tolerance,
                             follow_tolerance=args.follow_tolerance if args.follow_tolerance is not None else .10,
-                            joint_follow_limits=follow_limits)
+                            joint_follow_limits=follow_limits, execution_mode=args.execution_mode)
         record('result', **result)
         print(json.dumps(result))
     except (Exception, KeyboardInterrupt) as exc:

@@ -167,6 +167,7 @@ def assemble(context):
         nodes.append(Node(package='snowbot_teleop',executable='pico_control',namespace=ns,output='screen',
             parameters=[{**common,**model,'parameters_config':value('parameters_config'),'tool_config':str(robot.tool_config),
                          'pico_config':pico_config,'device_backend':backend,'recording_enabled':recorder_enabled,
+                         'execution_mode':execution_mode,
                          'gripper_config':value('gripper_config'),
                          'base_config':base_config, 'command_enabled':enabled('command_enabled','false'),
                          'position_protocol':value('position_protocol','legacy_guard'),

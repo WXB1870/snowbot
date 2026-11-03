@@ -28,7 +28,7 @@ from bindu_execution.interpolation import Curve, State
 from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, PicoContext
 from bindu_interfaces.action import SelectTeleopMode, TeleopSession
 from bindu_runtime.common import RuntimeNode, seconds, stamp, spin, joints_at_rest
-from bindu_runtime.stop_evidence import stop_feedback_matches
+from bindu_runtime.stop_evidence import stop_feedback_matches, sampled_nominal_reference
 
 
 class Superseded(RuntimeError):
@@ -66,6 +66,7 @@ class PicoNode(RuntimeNode):
         self.declare_parameter('model_root',str(Path(get_package_share_directory('snowbot_description'))/'urdf'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('device_backend','kinematic',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('position_protocol','legacy_guard',descriptor=ParameterDescriptor(read_only=True))
+        self.execution_mode=self.declare_parameter('execution_mode','position',descriptor=ParameterDescriptor(read_only=True)).value
         self.declare_parameter('gripper_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('base_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('command_enabled',False,descriptor=ParameterDescriptor(read_only=True))
@@ -623,13 +624,20 @@ class PicoNode(RuntimeNode):
 
     async def prepare_primitive(self, intent):
         """A return from a certified held-tool node, using the same transition graph."""
-        from snowbot_bringup.teleop.snowbot_primitive_replay import plan_from_current
+        from snowbot_bringup.teleop.snowbot_primitive_replay import plan_from_current, replay_follow_limits
         self.current(intent)
         state, measured = self.reading()
         if not joints_at_rest(state.joints, self.names, parameters_for(self, 'execution')['prepare_start_velocity_tolerance_rad_s']):
             raise RuntimeError('PREPARE_REQUIRES_STATIONARY_START')
+        anchor=measured
+        if getattr(self,'execution_mode','position')=='impedance':
+            self.primitive_nominal_hold=await self.prepare_hold_reference(intent)
+            anchor=self.primitive_nominal_hold['positions']
+            limits=replay_follow_limits(self.tool_cfg,'impedance')
+            if any(abs(measured[n]-anchor[n])>limits[n] for n in self.names):
+                raise RuntimeError('REPLAY_TRACKING_ERROR')
         try:
-            plan = plan_from_current(self.primitive_library, 'Home', measured)
+            plan = plan_from_current(self.primitive_library, 'Home', anchor)
         except RuntimeError as exc:
             if (str(exc).startswith('REPLAY_UNKNOWN_START') and
                     self.control.teleop_mode == 'independent_arms' and
@@ -649,6 +657,10 @@ class PicoNode(RuntimeNode):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
         arrival_tolerance=(.002 if replay is not None or getattr(self,'primitive_library',None) and intent.operation=='prepare' else self.prepare_position_tolerance if intent.operation=='prepare' else self.profile.feedback_tolerances['joint_position'])
+        nominal_arrival=self.position_contract and getattr(self,'execution_mode','position')=='impedance'
+        if nominal_arrival and replay is not None:
+            from snowbot_bringup.teleop.snowbot_primitive_replay import replay_follow_limits
+            follow_limits=replay_follow_limits(self.tool_cfg,'impedance')
         execution_instance_id=self.state.instance_id
         future=self.leases.call_async(Lease.Request(operation='acquire',
             owner=self.instance_id,resources=list(self.groups)))
@@ -705,7 +717,11 @@ class PicoNode(RuntimeNode):
             arrival_names=set(recovery_progress) if limit_exit else set(self.names)
             revision=s.revision;segment=0
             if replay is not None:
-                if tuple(self.names)!=replay.names or max(abs(q[n]-x) for n,x in zip(self.names,replay.points[0]))>.01:
+                anchor=q
+                if nominal_arrival:
+                    held=await self.prepare_hold_reference(intent,lease=lease,previous=self.primitive_nominal_hold)
+                    anchor=held['positions']
+                if tuple(self.names)!=replay.names or max(abs(anchor[n]-x) for n,x in zip(self.names,replay.points[0]))>.01:
                     raise RuntimeError('PREPARE_STATE_CHANGED')
                 self.primitive_grasp_guard.check(q)
             elif getattr(self,'primitive_library',None) and intent.operation=='prepare':
@@ -737,6 +753,9 @@ class PicoNode(RuntimeNode):
                 state,measured=self.reading();now=self.now()
                 if replay is not None:
                     self.primitive_grasp_guard.check(measured)
+                    if nominal_arrival and any(abs(measured[n]-x)>follow_limits[n]
+                            for n,x in zip(self.names,replay.sample(max(0.,now-started)))):
+                        raise RuntimeError('REPLAY_TRACKING_ERROR')
                     if abs((now-started)-(time.monotonic()-replay_steady))>.02:
                         raise RuntimeError('REPLAY_CLOCK_CHANGED')
                 if (state.instance_id==execution_instance_id and
@@ -759,9 +778,13 @@ class PicoNode(RuntimeNode):
                                 reply.profile_hash!=self.profile.digest):
                             raise RuntimeError('PICO_EXECUTION_AUTHORITY_CHANGED')
                         renewal=None;renew_at=time.monotonic()+parameters_for(self,'pico')['renewal_period_s']
+                arrival=measured
+                if nominal_arrival and now>=started+duration:
+                    reference,_=sampled_nominal_reference(state,self.names,lease.epoch,now,self.tool_cfg['feedback_max_age'])
+                    arrival=dict(zip(self.names,reference))
                 if (now>=started+duration and (replay is None or (replay_tick-1)*.02>=duration) and
                         seconds(state.feedback_stamp)>=started+duration and
-                        all(abs(measured[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
+                        all(abs(arrival[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
                         (recovery is None or all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1]
                                                  for n in self.names)) and
                         (not limit_exit or all(
@@ -770,6 +793,8 @@ class PicoNode(RuntimeNode):
                             for n in recovery_progress)) and
                         joints_at_rest(state.joints,self.names,parameters_for(self,'execution')['motion_arrival_velocity_tolerance_rad_s'])):
                     self.event('PICO_ACTUATOR_ARRIVED',json.dumps(dict(operation=intent.operation,
+                        arrival_basis='sampled_nominal' if nominal_arrival else 'measured',
+                        measured_at_goal=all(abs(measured[n]-v)<arrival_tolerance for n,v in zip(self.names,end)),
                         position_tolerance_rad=arrival_tolerance,
                         error_rad={n:float(v-measured[n]) for n,v in zip(self.names,end)},
                         measured_at_rest=True)))
@@ -1090,7 +1115,10 @@ class PicoNode(RuntimeNode):
                         if self.prepare_limit_reference is not None:
                             raise RuntimeError('PREPARE_LIMIT_RECOVERY_NOT_INSIDE')
                     _,measured=self.reading()
-                    error=max(abs(measured[n]-q) for n,q in target.items())
+                    ready=measured
+                    if getattr(self,'execution_mode','position')=='impedance':
+                        ready=(await self.prepare_hold_reference(intent))['positions']
+                    error=max(abs(ready[n]-q) for n,q in target.items())
                     if (self.position_contract and error<(.002 if getattr(self,'primitive_library',None) else self.prepare_position_tolerance) and not self.prepare_recovery and
                             (not getattr(self,'prepare_limit_reference',None) or
                              all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
