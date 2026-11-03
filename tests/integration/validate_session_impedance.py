@@ -58,6 +58,7 @@ def main():
     parser.add_argument('--prefix',type=Path,required=True)
     parser.add_argument('--require-production-poll',action='store_true',help='Require the native fixture to embed the actual production position_poll body')
     parser.add_argument('--case',choices=('all','rt','nominal','session'),default='all',help='Select the directly affected existing native check')
+    parser.add_argument('--physics-controller-output',type=Path,help='Build the simulation-only stdio torque bridge instead of running fixtures')
     args=parser.parse_args()
     source=args.source.resolve();prefix=args.prefix.resolve()
     tests=Path(__file__).resolve().parents[1]/'native'
@@ -92,7 +93,7 @@ def main():
             result=subprocess.run(command,capture_output=True,text=True,timeout=120)
             if result.returncode:raise RuntimeError(result.stdout+result.stderr)
             return result.stdout
-        if args.case in ('all','rt'):
+        if not args.physics_controller_output and args.case in ('all','rt'):
             driver=(source/'servo_control/src/servo_control/ethercat_driver.cpp').read_text()
             start=driver.index('    obs.sensor_valid_mask=0;')
             sensor=driver[start:driver.index('    obs.session=session_watchdog_.session;',start)]
@@ -102,8 +103,16 @@ def main():
             rt_path=work/'rt.cpp';rt_path.write_text(rt)
             run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I'+str(source/'servo_control/include'),'-I'+str(native_include),str(rt_path),'-o',str(work/'rt')])
             print(run([str(work/'rt')]).strip())
-        if args.case=='rt':return
+        if args.case=='rt' and not args.physics_controller_output:return
         run(flags+['-c',str(controller),'-o',str(obj)])
+        if args.physics_controller_output:
+            binary=args.physics_controller_output.resolve()
+            binary.parent.mkdir(parents=True,exist_ok=True)
+            run(flags+[str(tests/'impedance_physics.cpp'),str(obj),'-L'+str(prefix/'lib'),
+                       '-Wl,-rpath,'+str(prefix/'lib'),'-lpinocchio_default','-lpinocchio_parsers',
+                       '-lyaml-cpp','-o',str(binary)])
+            print('Physics controller built: '+str(binary))
+            return
         objects=[obj]
         for path in native_sources:
             native_obj=work/(path.stem+'.o')
