@@ -350,7 +350,18 @@ def checked_execution_mode(pdo, requested, now):
                 not all(math.isfinite(x) for x in pdo.wrench) or
                 len(pdo.sensor_age) != 2 or not all(math.isfinite(age) and
                     0 <= age and now-stamp+age <= .02 for age in pdo.sensor_age)):
-            raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
+            detail = dict(sensor_valid_mask=hex(pdo.sensor_valid_mask),
+                          joint_valid_mask=hex(pdo.valid_mask),
+                          pdo_sample=pdo.pdo_sample,
+                          observation_age_ms=(now-stamp)*1000,
+                          sensor_data_no=[int(x) for x in pdo.sensor_data_no],
+                          sensor_age_ms=[age*1000 for age in pdo.sensor_age],
+                          effective_age_ms=[(now-stamp+age)*1000 for age in pdo.sensor_age],
+                          wrench_count=len(pdo.wrench),
+                          nonfinite_wrench=[('left' if i<6 else 'right')+'.'+
+                              ('Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz')[i%6]
+                              for i,x in enumerate(pdo.wrench) if not math.isfinite(x)])
+            raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID:'+json.dumps(detail))
 
 
 def replay_follow_limits(config, mode, explicit=None):
@@ -743,8 +754,10 @@ def execute(args, plan):
             record('prepare_reference', source=plan.start_reference_source,
                    reference_q_rad=dict(zip(NAMES, plan.points[0])))
             prepare_context = {n:x for n,x in initial.items() if n not in NAMES}
-            checked_at = time.monotonic()
-            wait(lambda: latest['state'][1]>checked_at and latest['pdo'][1]>checked_at, 1.)
+            # Validation blocks callbacks; receipt time alone can admit queued old samples.
+            checked_at = port.ros()
+            wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= checked_at and
+                 latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= checked_at, 1.)
             current, _ = port.check(False)
             if any(n not in current or abs(current[n]-x)>.001 for n,x in initial.items()):
                 raise RuntimeError('PREPARE_START_CHANGED_AFTER_VALIDATION')
