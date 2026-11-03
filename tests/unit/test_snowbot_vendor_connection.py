@@ -362,6 +362,20 @@ class DeploymentEntryTests(unittest.TestCase):
                 deploy.assemble(bindu,workspace)
             self.assertEqual(changed.read_text(),'local maintenance')
 
+    def test_impedance_backend_selection_is_preserved_on_rebuild(self):
+        from tools.deployment import deploy
+        from bindu_contracts.resources import package_share
+        bindu=package_share('bindu_execution').parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace=Path(tmp)
+            output=deploy.assemble(bindu,workspace)
+            self.assertFalse(json.loads((output/'position_release.json').read_text())['impedance_available'])
+            output=deploy.assemble(bindu,workspace,with_impedance=True)
+            self.assertTrue(json.loads((output/'position_release.json').read_text())['impedance_available'])
+            self.assertEqual(deploy.assemble(bindu,workspace),output)
+            self.assertTrue(json.loads((output/'position_release.json').read_text())['impedance_available'])
+            self.assertEqual(len(list(workspace.glob('vendor-before-*'))),1)
+
     def test_prepare_build_and_start_have_separate_side_effects(self):
         from unittest.mock import Mock, patch
         from tools.deployment import deploy
@@ -370,12 +384,13 @@ class DeploymentEntryTests(unittest.TestCase):
             calls=Mock();bindu=workspace/'bindu';vendor=workspace/'vendor'
             with patch.object(deploy,'require_platform'),patch.object(deploy,'require_stopped'), \
                  patch.object(deploy,'locked_bindu',return_value=bindu), \
-                 patch.object(deploy,'assemble',side_effect=lambda *a:(calls.assemble(),vendor)[1]), \
+                 patch.object(deploy,'assemble',side_effect=lambda *a,**kw:(calls.assemble(),vendor)[1]), \
                  patch.object(deploy,'vendor_build',side_effect=lambda *a:calls.vendor()), \
                  patch.object(deploy,'prepare_ros_dependencies',side_effect=lambda *a:calls.rosdep()), \
                  patch.object(deploy,'x86',side_effect=lambda b,w,c,*a:calls.upper(c)), \
                  patch.object(deploy,'receipt',side_effect=lambda *a:calls.receipt()):
-                self.assertEqual(deploy.main(['prepare','--workspace',str(workspace)]),0)
+                self.assertEqual(deploy.main(['prepare','--workspace',str(workspace),'--with-impedance']),0)
+                self.assertTrue(deploy.assemble.call_args.kwargs['with_impedance'])
                 self.assertEqual([c[0] for c in calls.mock_calls],['assemble','rosdep','vendor','upper','upper','receipt'])
                 self.assertEqual([c.args for c in calls.mock_calls if c[0]=='upper'],[('prepare',),('build',)])
                 calls.reset_mock();self.assertEqual(deploy.main(['build','--workspace',str(workspace)]),0)

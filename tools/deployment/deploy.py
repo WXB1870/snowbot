@@ -70,7 +70,7 @@ def x86(bindu, workspace, command, *args):
                    cwd=bindu, env=source_environment(bindu), check=True)
 
 
-def assemble(bindu, workspace):
+def assemble(bindu, workspace, *, with_impedance=None):
     from tools.deployment import prepare_position_session as position
     robot = ROOT/'src/snowbot_bringup/config/robots/snowbot'
     model = ROOT/'src/snowbot_description/urdf/snowbot_control.urdf'
@@ -80,11 +80,14 @@ def assemble(bindu, workspace):
     inputs = [Path(position.__file__), ROOT/'vendor/snowbot/baseline.json', model, tool,
               *sorted(ASSETS.glob('*')), *(native/n for n in position.NATIVE_FILES),
               bindu/'src/capabilities/bindu_kinematics/bindu_kinematics/model_codegen.py']
-    signature = hashlib.sha256(''.join(digest(p) for p in inputs if p.is_file()).encode()).hexdigest()
     vendor = workspace/'vendor'
     identity = workspace/'assembly.json'
+    saved = json.loads(identity.read_text()) if identity.exists() else None
+    if with_impedance is None:
+        with_impedance = bool(saved and saved.get('with_impedance', False))
+    signature = hashlib.sha256((''.join(digest(p) for p in inputs if p.is_file())+
+                                (':impedance' if with_impedance else '')).encode()).hexdigest()
     if identity.exists():
-        saved = json.loads(identity.read_text())
         for name, expected in saved['files'].items():
             if not (vendor/name).is_file() or digest(vendor/name) != expected:
                 raise ValueError('Generated vendor changed: '+name+'; preserve it and use a new --workspace')
@@ -102,14 +105,16 @@ def assemble(bindu, workspace):
     workspace.mkdir(parents=True, exist_ok=True)
     subprocess.run([sys.executable, str(ROOT/'tools/deployment/prepare_position_session.py'),
                     '--output', str(vendor), '--execution-source', str(native),
-                    '--prediction-urdf', str(model), '--prediction-tool', str(tool)],
+                    '--prediction-urdf', str(model), '--prediction-tool', str(tool),
+                    *(['--with-impedance'] if with_impedance else [])],
                    cwd=ROOT, env=source_environment(bindu), check=True)
     # Leave site-owned parameters intact on rebuilds, including changed recipes.
     config = workspace/'vendor-position.yaml'
     if not config.exists():
         config.write_bytes((ASSETS/'target_stream.yaml').read_bytes())
     files = {str(p.relative_to(vendor)): digest(p) for p in (vendor/'src').rglob('*') if p.is_file()}
-    identity.write_text(json.dumps(dict(signature=signature, files=files), indent=2)+'\n')
+    identity.write_text(json.dumps(dict(signature=signature, files=files,
+                                        with_impedance=with_impedance), indent=2)+'\n')
     return vendor
 
 
@@ -196,6 +201,8 @@ def main(argv=None):
     parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
+    parser.add_argument('--with-impedance', action='store_const', const=True, default=None,
+                        help='Include the impedance backend during prepare/build; subsequent builds retain it')
     options, extra = parser.parse_known_args(argv)
     workspace = options.workspace.expanduser().resolve()
     existing = options.bindu_source.expanduser().resolve() if options.bindu_source else None
@@ -218,7 +225,7 @@ def main(argv=None):
         if options.command == 'build' and not (workspace/'upper/deployment.json').is_file():
             raise ValueError('Run prepare once before build')
         require_stopped(bindu)
-        vendor = assemble(bindu, workspace)
+        vendor = assemble(bindu, workspace, with_impedance=options.with_impedance)
         if options.command == 'prepare':
             prepare_ros_dependencies(bindu, vendor)
         vendor_build(vendor, workspace)
