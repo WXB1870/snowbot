@@ -36,7 +36,7 @@ def validate_grasp_config(cfg):
 
 
 def build_scene(motion, cfg, output):
-    from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade, PhysxSchema, PhysicsSchemaTools, UsdLux
+    from pxr import Gf, Vt, Usd, UsdGeom, UsdPhysics, UsdShade, PhysxSchema, PhysicsSchemaTools, UsdLux
     from isaacsim.core.api import World
     from isaacsim.core.prims import SingleArticulation, RigidPrim
     from isaacsim.core.utils.extensions import enable_extension
@@ -165,6 +165,13 @@ def build_scene(motion, cfg, output):
             shape = UsdGeom.Cube.Define(stage, path)
             shape.CreateSizeAttr(1.)
             scale = part['size']
+        elif part['kind'] == 'mesh':
+            shape = UsdGeom.Mesh.Define(stage, path)
+            shape.CreatePointsAttr(Vt.Vec3fArray(part['vertices'].tolist()))
+            shape.CreateFaceVertexCountsAttr([3]*len(part['triangles']))
+            shape.CreateFaceVertexIndicesAttr(part['triangles'].ravel().tolist())
+            shape.CreateSubdivisionSchemeAttr('none')
+            scale = np.ones(3)
         else:
             shape = UsdGeom.Cylinder.Define(stage, path)
             shape.CreateRadiusAttr(part['radius'])
@@ -177,6 +184,14 @@ def build_scene(motion, cfg, output):
         shape.AddTransformOp().Set(Gf.Matrix4d(tf.T.tolist()))
         shape.CreateDisplayColorAttr([Gf.Vec3f(.55, .33, .15)])
         UsdPhysics.CollisionAPI.Apply(shape.GetPrim())
+        if part['kind'] == 'mesh':
+            UsdPhysics.MeshCollisionAPI.Apply(shape.GetPrim()).CreateApproximationAttr('convexDecomposition')
+            decomposition = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(shape.GetPrim())
+            decomposition.CreateMaxConvexHullsAttr(64)
+            decomposition.CreateHullVertexLimitAttr(64)
+            decomposition.CreateVoxelResolutionAttr(500000)
+            decomposition.CreateErrorPercentageAttr(.1)
+            decomposition.CreateShrinkWrapAttr(True)
         contact = PhysxSchema.PhysxCollisionAPI.Apply(shape.GetPrim())
         contact.CreateContactOffsetAttr(.001)
         contact.CreateRestOffsetAttr(0.)
