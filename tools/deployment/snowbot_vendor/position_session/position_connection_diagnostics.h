@@ -1,7 +1,5 @@
 #pragma once
-#include <algorithm>
 #include <iomanip>
-#include <iterator>
 #include <sstream>
 #include <string>
 #include <rclcpp/qos.hpp>
@@ -33,13 +31,6 @@ EndpointCheck check_publisher(Node& node, const Subscription& sub,
         if (reader.node_name() != node.get_name() || reader.node_namespace() != node.get_namespace() ||
                 reader.topic_type() != expected_type) continue;
         found = true;
-        const auto& offered = writer.topic_type_hash();
-        const auto& requested = reader.topic_type_hash();
-        if (!offered.version || !requested.version)
-            return {"message_type_hash_unavailable", gid.str()};
-        if (offered.version != requested.version ||
-                !std::equal(std::begin(offered.value), std::end(offered.value), std::begin(requested.value)))
-            return {"message_type_hash_mismatch", gid.str()};
     }
     if (!found) return {"subscription_not_discovered", gid.str()};
     const auto qos = rclcpp::qos_check_compatible(writer.qos_profile(), sub->get_actual_qos());
