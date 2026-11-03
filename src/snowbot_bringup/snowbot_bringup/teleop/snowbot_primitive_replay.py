@@ -661,24 +661,7 @@ def execute(args, plan):
         log.close()
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--library', type=Path, required=True)
-    parser.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare'), required=True)
-    parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
-    parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
-    parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
-    parser.add_argument('--execute', action='store_true')
-    parser.add_argument('--execution-mode', choices=('position','impedance'), default='position',
-                        help='Must match the already running backend; never switches its mode')
-    parser.add_argument('--robot-config', type=Path)
-    parser.add_argument('--tool-id')
-    parser.add_argument('--namespace', default='bindu_snowbot')
-    parser.add_argument('--vendor-namespace', default='')
-    parser.add_argument('--output', type=Path)
-    parser.add_argument('--start-tolerance', type=float, default=.01)
-    parser.add_argument('--follow-tolerance', type=float, help='Optional cap on configured per-joint tracking limits, at most .15 rad')
-    args = parser.parse_args(argv)
+def replay_action(args, parser):
     manifest = json.loads(args.library.read_text())
     if args.action == 'Prepare':
         plan = load_replay(args.library, 'SideScoop', args.speed, waist_lead_s=0.)
@@ -705,6 +688,56 @@ def main(argv=None):
                               start_q_rad=dict(zip(plan.names, plan.points[0])),
                               end_q_rad=dict(zip(plan.names, plan.points[-1])),
                               tool_id=plan.tool_id, hardware_commands=False)))
+
+
+def interactive_replay(args, parser):
+    actions = {'1': 'Push', '2': 'SideScoop', '3': 'Flip'}
+    while True:
+        print('\n1 前推    2 侧前铲    3 翻倒    q 退出')
+        try:
+            choice = input('输入编号并按 Enter 执行：').strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice.lower() == 'q':
+            return
+        if choice not in actions:
+            print('请输入 1、2、3 或 q。')
+            continue
+        selected = argparse.Namespace(**vars(args))
+        selected.action = actions[choice]
+        selected.output = args.output_dir/(time.strftime('%Y%m%d-%H%M%S')+'-'+
+                                          selected.action+'-'+uuid.uuid4().hex[:8]+'.jsonl')
+        replay_action(selected, parser)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--library', type=Path, required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare'))
+    selection.add_argument('--interactive', action='store_true', help='Select 1=Push, 2=SideScoop, 3=Flip; Enter executes')
+    parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
+    parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
+    parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
+    parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--execution-mode', choices=('position','impedance'), default='position',
+                        help='Must match the already running backend; never switches its mode')
+    parser.add_argument('--robot-config', type=Path)
+    parser.add_argument('--tool-id')
+    parser.add_argument('--namespace', default='bindu_snowbot')
+    parser.add_argument('--vendor-namespace', default='')
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--output-dir', type=Path, help='Interactive mode: one new JSONL log per selected action')
+    parser.add_argument('--start-tolerance', type=float, default=.01)
+    parser.add_argument('--follow-tolerance', type=float, help='Optional cap on configured per-joint tracking limits, at most .15 rad')
+    args = parser.parse_args(argv)
+    if args.interactive:
+        if not args.execute or not args.tool_id or not args.output_dir or args.output:
+            parser.error('--interactive requires --execute --tool-id --output-dir; omit --output')
+        return interactive_replay(args, parser)
+    if args.output_dir:
+        parser.error('--output-dir requires --interactive')
+    return replay_action(args, parser)
 
 
 if __name__ == '__main__':
