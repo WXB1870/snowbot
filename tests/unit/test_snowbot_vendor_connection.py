@@ -317,9 +317,11 @@ class DeploymentEntryTests(unittest.TestCase):
                 checked = [str(call.args[0]) for call in exists.call_args_list]
                 self.assertIn(f'/opt/ros/{distro}/setup.bash', checked)
                 self.assertIn(f'/opt/openrobots/lib/libpinocchio_default.so.{pinocchio}', checked)
-                exists.return_value = False
-                with self.assertRaisesRegex(ValueError, 'prerequisites'):
-                    deploy.require_platform()
+                for missing in ('/usr/include/nlohmann/json.hpp',
+                                '/usr/lib/python3/dist-packages/colcon_ros/task/ament_python/build.py'):
+                    exists.side_effect = lambda path: str(path) != missing
+                    with self.assertRaisesRegex(ValueError, 'prerequisites'):
+                        deploy.require_platform()
         with patch('platform.system', return_value='Linux'), \
                 patch('platform.machine', return_value='aarch64'), \
                 patch('platform.freedesktop_os_release', return_value=dict(ID='ubuntu', VERSION_ID='24.04')):

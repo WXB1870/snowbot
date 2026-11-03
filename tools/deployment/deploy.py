@@ -128,7 +128,9 @@ def prepare_ros_dependencies(bindu, vendor, distro):
         *map(str, roots), '--packages-up-to', *TARGETS, 'snowbot_bringup',
         'bindu_bimanual_qp', '--paths-only'], text=True).splitlines()
     subprocess.run(['/usr/bin/rosdep', 'install', '--from-paths', *paths, '--ignore-src',
-        '--rosdistro', distro, '--skip-keys', 'pinocchio proxsuite', '-y'], check=True)
+        # These legacy keys have no rosdep definition; require_platform checks
+        # the installed colcon build task and JSON header before reaching here.
+        '--rosdistro', distro, '--skip-keys', 'pinocchio proxsuite ament_python libnlohmann-json-dev', '-y'], check=True)
 
 
 def vendor_build(vendor, workspace, distro):
@@ -188,6 +190,8 @@ def require_platform():
         raise ValueError('Full assembly requires Ubuntu 24.04 x86_64/Jazzy or Ubuntu 22.04 aarch64/Humble')
     distro, pinocchio = target
     for path in (f'/opt/ros/{distro}/setup.bash', '/usr/bin/colcon',
+                 '/usr/lib/python3/dist-packages/colcon_ros/task/ament_python/build.py',
+                 '/usr/include/nlohmann/json.hpp',
                  f'/opt/openrobots/lib/libpinocchio_parsers.so.{pinocchio}',
                  f'/opt/openrobots/lib/libpinocchio_default.so.{pinocchio}'):
         if not Path(path).is_file():
