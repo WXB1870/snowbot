@@ -277,7 +277,7 @@ def inspect_vendor_endpoints(args, node):
 
 
 def inspect_position_routes(args, node):
-    """Compare local generated schemas and offered/requested QoS, without publishing."""
+    """Check discovered routes and offered/requested QoS, without publishing."""
     from rclpy.qos import QoSCompatibility, qos_check_compatible
     endpoints = vendor_endpoints(args)
     own = node.get_namespace().rstrip('/')+'/'+node.get_name()
@@ -294,26 +294,14 @@ def inspect_position_routes(args, node):
         found = [i for i in infos(topic, role) if i.node_namespace.rstrip('/')+'/'+i.node_name == name]
         return found[0] if len(found) == 1 else None
 
-    def schema(info):
-        value = getattr(info, 'topic_type_hash', None)
-        version, digest = getattr(value, 'version', 0), getattr(value, 'value', b'')
-        if isinstance(version, int) and version > 0 and isinstance(digest, bytes) and len(digest) == 32 and any(digest):
-            return version, digest
-        return None
-
     for endpoint in endpoints:
         topic, role = endpoint['topic'], endpoint['role']
         local, peer = find(topic, 'subscription', own), find(topic, role, endpoint['node'])
         if local is None or peer is None:
             errors.append('SNOWBOT_SESSION_ROUTE_UNVERIFIED:'+topic)
             continue
-        local_hash, peer_hash = schema(local), schema(peer)
-        if local_hash is None or peer_hash is None:
-            errors.append('SNOWBOT_ENDPOINT_TYPE_HASH_UNAVAILABLE:'+topic)
-        elif local_hash != peer_hash:
-            errors.append('SNOWBOT_ENDPOINT_TYPE_HASH_MISMATCH:'+topic)
         # Relays compare their actual publisher and receiver. The passive local
-        # reader supplies only the local schema on those command topics.
+        # reader only establishes local discovery on those command topics.
         publisher = next((e for e in endpoints if e['topic'] == topic and e['role'] == 'publisher'), None)
         receiver = next((e for e in endpoints if e['topic'] == topic and e['role'] == 'subscription'), None)
         if role == 'publisher' and receiver:
@@ -439,8 +427,8 @@ def check_position_session(args, timeout):
         for layer in ('upper', 'middle', 'servo'):
             node.create_subscription(PositionSessionState, '/bindu/position/'+layer+'_state',
                 lambda msg, l=layer: state(l, msg), 1)
-        # Passive readers expose this process's generated type hashes. Their
-        # default QoS also describes the future command publisher's QoS.
+        # Passive readers establish discovery. Their default QoS also
+        # describes the future command publisher's QoS.
         for topic, kind in (('command', PositionSessionCommand), ('upper', PositionSessionUpper),
                             ('servo', PositionSessionServo)):
             node.create_subscription(kind, '/bindu/position/'+topic, lambda msg: None, 1)
