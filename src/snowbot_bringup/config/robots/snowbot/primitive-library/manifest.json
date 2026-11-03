@@ -59,10 +59,10 @@
     }
   },
   "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
-  "replay_code_sha256": "9a647e6c4f8b1f20fb22d47616186e68552170f459ebe0ade0d0a401504dbe78",
+  "replay_code_sha256": "0f27d6f6810a0b7aaa683a5959c270bf0d56f4b6fe3826c5ca2948c0ebb4a3c5",
   "source_commits": {
-    "snowbot_base": "06bb742",
-    "bindu": "ef7e59189788c43e1e052d2faf8c1a3fa37882dc",
+    "snowbot_base": "ff1b464",
+    "bindu": "6c9cc8f0ece983bbe74bd4c1cda0daed871d4fd4",
     "branch": "xavier/impedance-control"
   },
   "validation_kind": "certified primitives plus native target-stream and field-waist tested transfer graph",
@@ -347,7 +347,7 @@
   "reference_validation_execution_mode": "position",
   "impedance_software_validation": {
     "passed": true,
-    "directed_checks": 38,
+    "directed_checks": 39,
     "hardware_motion_executed": false,
     "completion_basis": "sampled nominal arrival and measured stationary feedback; measured arrival reported separately"
   }

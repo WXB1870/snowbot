@@ -390,7 +390,7 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
                 arrival = port.nominal_reference() if nominal else q
                 measured_at_goal = all(abs(q[n]-x) <= port.arrival_tolerance(n)
                                        for n,x in zip(plan.names,plan.points[-1]))
-                resting = (all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
+                resting = (arrival is not None and all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
                                for n,x in zip(plan.names,plan.points[-1])) and
                            all(abs(v[n]) <= .005 for n in plan.names))
                 rest_since = now if resting and rest_since is None else rest_since if resting else None
@@ -538,9 +538,12 @@ def execute(args, plan):
         def nominal_reference(self):
             state = latest['state'][0]
             if self.lease and getattr(self, 'commanded', False):
-                values, _ = sampled_nominal_reference(state, NAMES, self.lease.epoch,
-                    self.ros(), tool_config['feedback_max_age'])
-                return dict(zip(NAMES, values))
+                sample = sampled_nominal_reference(state, NAMES, self.lease.epoch,
+                    self.ros(), tool_config['feedback_max_age'],
+                    wait_until=getattr(self,'reference_ready_by',0.), steady_now=self.steady())
+                if sample is None: return None
+                self.reference_ready_by = 0.
+                return dict(zip(NAMES, sample[0]))
             if not holds.service_is_ready():
                 raise RuntimeError('REPLAY_HELD_REFERENCE_UNAVAILABLE')
             future = holds.call_async(Trigger.Request())
@@ -581,6 +584,8 @@ def execute(args, plan):
                 positions=list(goal), stamp=stamp(source), valid_for=.25)
             commands.add(msg.command_id)
             call(submit, SubmitMotion.Request(command=msg))
+            if not getattr(self,'commanded',False):
+                self.reference_ready_by=self.steady()+tool_config['feedback_max_age']
             self.commanded = True
             record('target', source_stamp=source, q=list(goal))
         @staticmethod

@@ -747,7 +747,7 @@ class PicoNode(RuntimeNode):
             started=self.now();command_id=self.instance_id+'_'+str(intent.token)+'_'+uuid.uuid4().hex[:8]
             deadline=time.monotonic()+duration+parameters_for(self,'pico')['motion_completion_grace_s'];renew_at=0.;next_submit=0.
             renewal=None;renewal_started=0.
-            replay_tick=0;replay_steady=time.monotonic()
+            replay_tick=0;replay_steady=time.monotonic();nominal_sample_seen=False
             while time.monotonic()<deadline:
                 self.current(intent)
                 state,measured=self.reading();now=self.now()
@@ -780,11 +780,14 @@ class PicoNode(RuntimeNode):
                         renewal=None;renew_at=time.monotonic()+parameters_for(self,'pico')['renewal_period_s']
                 arrival=measured
                 if nominal_arrival and now>=started+duration:
-                    reference,_=sampled_nominal_reference(state,self.names,lease.epoch,now,self.tool_cfg['feedback_max_age'])
-                    arrival=dict(zip(self.names,reference))
+                    reference=sampled_nominal_reference(state,self.names,lease.epoch,now,self.tool_cfg['feedback_max_age'],
+                        wait_until=None if nominal_sample_seen else replay_steady+self.tool_cfg['feedback_max_age'],
+                        steady_now=time.monotonic())
+                    arrival=None if reference is None else dict(zip(self.names,reference[0]))
+                    nominal_sample_seen=nominal_sample_seen or reference is not None
                 if (now>=started+duration and (replay is None or (replay_tick-1)*.02>=duration) and
                         seconds(state.feedback_stamp)>=started+duration and
-                        all(abs(arrival[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
+                        arrival is not None and all(abs(arrival[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
                         (recovery is None or all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1]
                                                  for n in self.names)) and
                         (not limit_exit or all(
