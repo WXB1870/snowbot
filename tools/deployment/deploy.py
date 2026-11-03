@@ -73,7 +73,7 @@ def x86(bindu, workspace, command, *args):
 def assemble(bindu, workspace):
     from tools.deployment import prepare_position_session as position
     robot = ROOT/'src/snowbot_bringup/config/robots/snowbot'
-    model = ROOT/'src/snowbot_description/urdf/snowbot_control_real.urdf'
+    model = ROOT/'src/snowbot_description/urdf/snowbot_control.urdf'
     tool = robot/'bimanual_snowbot_real.json'
     native = bindu/'src/control/bindu_execution/native'
     # The receipt records paired revisions; generation depends on actual inputs.

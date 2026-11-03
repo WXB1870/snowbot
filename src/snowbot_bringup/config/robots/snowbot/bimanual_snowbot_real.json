@@ -1,7 +1,7 @@
 {
   "simulation_only": false,
   "collision_scope": "configured_tool_geometry",
-  "urdf": "snowbot_control_real.urdf",
+  "urdf": "snowbot_control.urdf",
   "resource_groups": [
     "waist",
     "left_arm",
@@ -219,12 +219,7 @@
   "geometry_step_backtracking": true,
   "posture_policy": {
     "reference": "initial_capture",
-    "position_bounds": {
-      "body_joint_2": [
-        -0.45,
-        0.45
-      ]
-    }
+    "position_bounds": {}
   },
   "reference_kinematics": true,
   "posture_reference_margin_rad": 0.027453292519943294,
