@@ -104,8 +104,11 @@ class PositionReleaseTests(unittest.TestCase):
         for name in ('include/impedance/cartesian_impedance_controller.h',
                      'src/impedance/cartesian_impedance_controller.cpp'):
             self.assertEqual((servo/name).read_bytes(),(self.baseline/'servo_control'/name).read_bytes())
-        self.assertEqual((self.release/'src/ctl_msgs/config/impedance_params.yaml').read_bytes(),
-                         (self.baseline/'ctl_msgs/config/impedance_params.yaml').read_bytes())
+        # Position mode also uses these deployed gravity coefficients; other tuning stays original.
+        expected=(self.baseline/'ctl_msgs/config/impedance_params.yaml').read_text().replace(
+            'kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]',
+            'kt_gravity: [1.28, 1.35, 1.35, 1.35, 1.35, 1.35, 1.35]')
+        self.assertEqual((self.release/'src/ctl_msgs/config/impedance_params.yaml').read_text(),expected)
         cmake=(servo/'CMakeLists.txt').read_text()
         self.assertNotIn('install(PROGRAMS scripts/impedance_',cmake)
         self.assertIn('src/impedance/cartesian_impedance_controller.cpp',cmake)

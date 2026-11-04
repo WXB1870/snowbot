@@ -1556,3 +1556,11 @@
 -install(PROGRAMS scripts/impedance_keyboard_teleop.py
 -  DESTINATION lib/${PROJECT_NAME} RENAME impedance_keyboard_teleop)
 -
+--- a/ctl_msgs/config/impedance_params.yaml
++++ b/ctl_msgs/config/impedance_params.yaml
+@@ -117 +117 @@
+-    kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]
++    kt_gravity: [1.28, 1.35, 1.35, 1.35, 1.35, 1.35, 1.35]
+@@ -203 +203 @@
+-    kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]
++    kt_gravity: [1.28, 1.35, 1.35, 1.35, 1.35, 1.35, 1.35]
