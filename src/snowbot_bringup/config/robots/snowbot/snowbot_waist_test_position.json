@@ -138,7 +138,7 @@
         "jerk": 259.2
       },
       "body_joint_2": {
-        "velocity": 0.6,
+        "velocity": 1.0,
         "acceleration": 3.6,
         "jerk": 259.2
       },
