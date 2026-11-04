@@ -277,7 +277,7 @@
 + const bool local_hold=position_local_hold_ && position_reference_mode_ &&
 @@ -2643 +2694 @@
 -   if(std::abs(reference[i]-position_feedback_.q[i])>.5)axis_checks|=16;
-+   if(std::abs(reference[i]-position_feedback_.q[i])>(session_execution_mode_=="impedance"?impedance_following_error_rad_:.5))axis_checks|=16;
++   if((i!=14 || session_execution_mode_!="impedance") && std::abs(reference[i]-position_feedback_.q[i])>(session_execution_mode_=="impedance"?impedance_following_error_rad_:.5))axis_checks|=16;
 @@ -2653 +2704,8 @@
 - if(position_reference_mode_==2 && position_output_.operation==2 && position_output_.trajectory_phase==4 &&
 + if(session_execution_mode_=="impedance" && (position_gate_.live(now)||local_hold) &&
