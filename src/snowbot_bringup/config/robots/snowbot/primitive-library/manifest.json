@@ -4,7 +4,7 @@
   "backend_ready": true,
   "tool_id": "g099-curved",
   "kinematic_sha256": "26f3df22b1e77754a8544d8e1ab24572d0a78d794b56653d35721ae2e10f6c6a",
-  "waist_lead_s": 0.88,
+  "waist_lead_s": 0.0,
   "posture_reference_margin_rad": 0.027453292519943294,
   "nominal_position_limits": "shared wide snowbot_control.urdf",
   "requires_prepared_start": true,
@@ -14,159 +14,220 @@
   "actions": {
     "Push": {
       "targets": "Push.json.gz",
-      "sha256": "98347efc0ffd6a0687f25a7f44264b67d1d6775cb6084b2a706b66545a5b0dfa",
-      "nominal_duration_s": 25.677,
-      "duration_s": 26.557,
-      "source": "/Users/xavier/Documents/snowbot/artifacts/experiments/d-handle-workspace-20261102/three-primitives-repaired/real-retimed/original-urdf-path/reference-margin/accepted/Push/joint-target-stream.json",
-      "validation": {
-        "tracking_rms_mm": 4.887294003355946,
-        "tracking_peak_mm": 10.617933562278916,
-        "coupling_rms_mm": 0.3526001123776893,
-        "physics_dt_s": 0.002
-      },
+      "sha256": "2a7b00e3578e6bffd081d4b7f47c7614975c5161a8a616d606abdf81bf90e09d",
+      "nominal_duration_s": 5.745,
+      "duration_s": 5.745,
       "start_node": "Push:start",
-      "end_node": "Push:end"
+      "end_node": "Push:end",
+      "source": "20261104 verified upright fast reference",
+      "validation": {
+        "tracking_rms_mm": 6.148585578695476,
+        "tracking_peak_mm": 10.353514276186749,
+        "coupling_rms_mm": 0.36042425341172185,
+        "coupling_peak_mm": 0.47358615652222996,
+        "physics_dt_s": 0.002,
+        "non_ground_collision_violations": 0,
+        "reference_source_sha256": "2952b016f665e2b4c338eed374d23a94516f824adcdd7d55d33d2850ee313b6c",
+        "validation_scope": "full PhysX reference replay; 20ms export checked separately",
+        "packaged_reference": {
+          "samples_2ms": 2874,
+          "maximum_grasp_position_m": 0.00012460062796377272,
+          "maximum_grasp_axis_rad": 0.00017243969913081342,
+          "minimum_extra_margin_rad": 0.0009999995568339137,
+          "passed": true
+        }
+      }
     },
     "SideScoop": {
       "targets": "SideScoop.json.gz",
-      "sha256": "bede5aed0e4693b5a6993846e92a9f765942d92a31b6ea0c49452b31c6b9178b",
-      "nominal_duration_s": 79.745,
-      "duration_s": 80.625,
-      "source": "/Users/xavier/Documents/snowbot/artifacts/experiments/d-handle-workspace-20261102/three-primitives-repaired/real-retimed/original-urdf-path/reference-margin/accepted/SideScoop/joint-target-stream.json",
-      "validation": {
-        "tracking_rms_mm": 8.371799542130056,
-        "tracking_peak_mm": 17.410089169381656,
-        "coupling_rms_mm": 0.36034142411786924,
-        "physics_dt_s": 0.002
-      },
+      "sha256": "8c6415eaa18f3a6c8c8a21628b4bf8b464f42f42cf27750d6f5ec88e303ccafe",
+      "nominal_duration_s": 12.53,
+      "duration_s": 12.53,
       "start_node": "SideScoop:start",
-      "end_node": "Dump:end"
+      "end_node": "Dump:end",
+      "source": "20261104 verified upright fast reference",
+      "validation": {
+        "tracking_rms_mm": 8.988762780346727,
+        "tracking_peak_mm": 18.416243657496118,
+        "coupling_rms_mm": 0.4077698723836572,
+        "coupling_peak_mm": 0.9576547585536814,
+        "physics_dt_s": 0.002,
+        "non_ground_collision_violations": 0,
+        "reference_source_sha256": "3508c4bf1347c5c74c976d67ec723b0c6f486580856f8c69973c3b100da7439c",
+        "validation_scope": "full PhysX reference replay; 20ms export checked separately",
+        "packaged_reference": {
+          "samples_2ms": 6266,
+          "maximum_grasp_position_m": 0.0007700321325305363,
+          "maximum_grasp_axis_rad": 0.0007642670298894632,
+          "minimum_extra_margin_rad": 0.000999995387742137,
+          "passed": true
+        }
+      }
     },
     "Flip": {
       "targets": "Flip.json.gz",
-      "sha256": "0a103e0cd38a0ff28fbcf3eb5b83438f1763449e843589e577d050efccce5808",
-      "nominal_duration_s": 45.133,
-      "duration_s": 46.013000000000005,
-      "source": "/Users/xavier/Documents/snowbot/artifacts/experiments/d-handle-workspace-20261102/three-primitives-repaired/real-retimed/original-urdf-path/reference-margin/accepted/Flip/joint-target-stream.json",
-      "validation": {
-        "tracking_rms_mm": 9.684659198669214,
-        "tracking_peak_mm": 17.397259417447913,
-        "coupling_rms_mm": 0.37944352246871005,
-        "physics_dt_s": 0.002
-      },
+      "sha256": "e523ec697d050a2f734b864b71c9907e06c67750085bea5a78a9b8fbd9af7dd0",
+      "nominal_duration_s": 8.085,
+      "duration_s": 8.085,
       "start_node": "Flip:start",
-      "end_node": "Dump:end"
+      "end_node": "Dump:end",
+      "source": "20261104 verified upright fast reference",
+      "validation": {
+        "tracking_rms_mm": 9.957217950428856,
+        "tracking_peak_mm": 18.41094756228781,
+        "coupling_rms_mm": 0.437427986284525,
+        "coupling_peak_mm": 0.9576460293454114,
+        "physics_dt_s": 0.002,
+        "non_ground_collision_violations": 0,
+        "reference_source_sha256": "44e3e2038a1c23a78d6c4d16aab173cbfdbf02640692e298da9b6724c31fd75d",
+        "validation_scope": "full PhysX reference replay; 20ms export checked separately",
+        "packaged_reference": {
+          "samples_2ms": 4044,
+          "maximum_grasp_position_m": 0.0007703437338360863,
+          "maximum_grasp_axis_rad": 0.0005597944859446285,
+          "minimum_extra_margin_rad": 0.0009999965692684479,
+          "passed": true
+        }
+      }
     }
   },
   "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
-  "replay_code_sha256": "832f6990cdb5b7ac1db60b4a4997b9ef463ac452df5aa49014f738ed4342cb95",
+  "replay_code_sha256": "bc91021bd761a46d0c76d7b55faa468daa044104f8871f7d0d11d38ae050e32d",
   "source_commits": {
-    "snowbot_base": "ff1b464",
-    "bindu": "6c9cc8f0ece983bbe74bd4c1cda0daed871d4fd4",
-    "branch": "xavier/impedance-control"
+    "snowbot_base": "5fc6cd911dd520c4f807fdc0ae2ac5f0339a117d",
+    "bindu": "e933ce93d0738ab1c8fc585be88222e235c56a1c",
+    "branch": "xavier/impedance-control",
+    "reference_validation_framework_base": "14b58b686e989e14cde6f23e95123396d965f2a0",
+    "reference_validation_application_base": "7693ce938494467b59c9ad1d377102180a628a68"
   },
-  "validation_kind": "certified primitives plus native target-stream and field-waist tested transfer graph",
+  "validation_kind": "20261104 upright fast fit_timed references; 2ms PhysX primitives and bridges; 20ms export contract and grasp checks",
   "transfers": {
     "BridgeForward": {
       "targets": "BridgeForward.json.gz",
-      "sha256": "d13502e810d8b231aaac220072e41d193c0f0d6085e9778a77c7adac56026655",
+      "sha256": "2c5d8dc2f7e5e478f75c36f1b1638ca5634937576c763f8f085620e1c31cab04",
+      "nominal_duration_s": 20.307666,
+      "duration_s": 20.307666,
+      "start_node": "Push:start",
+      "end_node": "SideScoop:start",
+      "source": "20261104 verified upright fast reference",
       "validation": {
-        "position_coupling_rms_mm": 1.1364271801237986,
-        "position_coupling_peak_mm": 4.276294898004345,
+        "tracking_rms_mm": 4.2954634575325645,
+        "tracking_peak_mm": 6.951066930525704,
+        "coupling_rms_mm": 0.36231354198269716,
+        "coupling_peak_mm": 0.4350855109813504,
+        "physics_dt_s": 0.002,
         "non_ground_collision_violations": 0,
-        "physics": {
-          "status": "passed",
-          "whole": {
-            "edge_rms_mm": 6.699420066975149,
-            "edge_peak_mm": 13.99767502532563,
-            "rotation_rms_deg": 0.3183634916529788,
-            "rotation_peak_deg": 0.6391111238709853,
-            "closure_rms_mm": 1.1775213079352218,
-            "closure_peak_mm": 4.12373594670358,
-            "orthogonality_peak_deg": 0.3979710581251663
-          },
-          "phases": {},
-          "actual_peak_edge_speed_m_s": 0.20939808381645458,
-          "waist_tilt_range_deg": [
-            -8.052397734246819,
-            -2.446749424626284
-          ],
-          "geometry": {
-            "violations": 0,
-            "minimum_tool_robot_clearance_mm": 32.32251534999824,
-            "minimum_tool_ground_clearance_mm": 2.381362623329636,
-            "failures": []
-          }
+        "reference_source_sha256": "919de183c075fd5284b65c2c85b35657ba46266d075f94f392ca28cdc352dcc7",
+        "validation_scope": "full PhysX reference replay; 20ms export checked separately",
+        "packaged_reference": {
+          "samples_2ms": 10155,
+          "maximum_grasp_position_m": 9.085170752407504e-05,
+          "maximum_grasp_axis_rad": 0.00013486805137266023,
+          "minimum_extra_margin_rad": 0.0010000000000000044,
+          "passed": true
         }
       }
     },
     "BridgeReverse": {
       "targets": "BridgeReverse.json.gz",
-      "sha256": "03c33896509901ac37774fc1c3cd4bca4a2f35631348359bba3ad240d43c000f",
+      "sha256": "5854da376a9a2fb73a1970f785377cf9ea0196638aff58ad2dc58049092bc656",
+      "nominal_duration_s": 20.307666,
+      "duration_s": 20.307666,
+      "start_node": "SideScoop:start",
+      "end_node": "Push:start",
+      "source": "20261104 verified upright fast reference",
       "validation": {
-        "position_coupling_rms_mm": 1.1751759188405548,
-        "position_coupling_peak_mm": 2.991189533164805,
+        "tracking_rms_mm": 4.434842635843771,
+        "tracking_peak_mm": 7.776224238121365,
+        "coupling_rms_mm": 0.3617185250654667,
+        "coupling_peak_mm": 0.4359703589102562,
+        "physics_dt_s": 0.002,
         "non_ground_collision_violations": 0,
-        "physics": {
-          "status": "passed",
-          "whole": {
-            "edge_rms_mm": 6.456546956770879,
-            "edge_peak_mm": 11.677727361786362,
-            "rotation_rms_deg": 0.3225572347634749,
-            "rotation_peak_deg": 0.5550510490977293,
-            "closure_rms_mm": 1.2225597201885947,
-            "closure_peak_mm": 3.1462741293783987,
-            "orthogonality_peak_deg": 0.2341544135935942
-          },
-          "phases": {},
-          "actual_peak_edge_speed_m_s": 0.20984796718800192,
-          "waist_tilt_range_deg": [
-            -8.028770402360452,
-            -2.4240384053057564
-          ],
-          "geometry": {
-            "violations": 0,
-            "minimum_tool_robot_clearance_mm": 32.31875416308399,
-            "minimum_tool_ground_clearance_mm": 0.8640038870138256,
-            "failures": []
-          }
+        "reference_source_sha256": "09ec150c5d7e1e81e0ab9b2778bfb64d0072e7373daded586d067a3e10cb8b9c",
+        "validation_scope": "full PhysX reference replay; 20ms export checked separately",
+        "packaged_reference": {
+          "samples_2ms": 10155,
+          "maximum_grasp_position_m": 9.359611479755039e-05,
+          "maximum_grasp_axis_rad": 0.0001383977098923761,
+          "minimum_extra_margin_rad": 0.0010000000000000044,
+          "passed": true
         }
       }
     },
     "PushReverse": {
       "targets": "PushReverse.json.gz",
-      "sha256": "776d8359105eefd1753ab3cb9c7614f1ae28c2f3aa3f1f1dc6eab6a8904450dc",
+      "sha256": "6309b495292bf8aacf934ee57aa4199e79d2c3c6e6632076992ba5bf858dfd20",
+      "nominal_duration_s": 5.745,
+      "duration_s": 5.745,
+      "start_node": "Push:end",
+      "end_node": "Push:start",
+      "source": "20261104 verified upright fast reference",
       "validation": {
-        "position_coupling_rms_mm": 0.02125013087849278,
-        "position_coupling_peak_mm": 0.15559732941645618,
-        "non_ground_collision_violations": 0
+        "validation_scope": "prefix or time reversal of the same verified reference path; no independent PhysX replay claimed",
+        "packaged_reference": {
+          "samples_2ms": 2874,
+          "maximum_grasp_position_m": 0.00012454086848988631,
+          "maximum_grasp_axis_rad": 0.000172350300023927,
+          "minimum_extra_margin_rad": 0.000999999594325271,
+          "passed": true
+        }
       }
     },
     "ScoopPrefix": {
       "targets": "ScoopPrefix.json.gz",
-      "sha256": "ed3efb5e12e437793a4272437afe37e6564b0016e951ba566d86f0b2d2fae0e6",
+      "sha256": "c7dbf6762d60749848f045b5d826dd2320390e08144ffa41e87d0645071f92cd",
+      "nominal_duration_s": 4.445,
+      "duration_s": 4.445,
+      "start_node": "SideScoop:start",
+      "end_node": "Flip:start",
+      "source": "20261104 verified upright fast reference",
       "validation": {
-        "position_coupling_rms_mm": 0.04046720430102816,
-        "position_coupling_peak_mm": 0.24247269594581616,
-        "non_ground_collision_violations": 0
+        "validation_scope": "prefix or time reversal of the same verified reference path; no independent PhysX replay claimed",
+        "packaged_reference": {
+          "samples_2ms": 2224,
+          "maximum_grasp_position_m": 0.00030450667632407163,
+          "maximum_grasp_axis_rad": 0.0007642670298894632,
+          "minimum_extra_margin_rad": 0.000999995387742137,
+          "passed": true
+        }
       }
     },
     "ScoopPrefixReverse": {
       "targets": "ScoopPrefixReverse.json.gz",
-      "sha256": "92c58f50083c02a9cd28e3a7541b2281a4eacc29aec18c3396b86fd5091d8b66",
+      "sha256": "7ee6576e09fac35634944a9126c2d96b37e769b57794f8e08216dd664bd6bcf6",
+      "nominal_duration_s": 4.445,
+      "duration_s": 4.445,
+      "start_node": "Flip:start",
+      "end_node": "SideScoop:start",
+      "source": "20261104 verified upright fast reference",
       "validation": {
-        "position_coupling_rms_mm": 0.051240350190555076,
-        "position_coupling_peak_mm": 0.33420684545736334,
-        "non_ground_collision_violations": 0
+        "validation_scope": "prefix or time reversal of the same verified reference path; no independent PhysX replay claimed",
+        "packaged_reference": {
+          "samples_2ms": 2224,
+          "maximum_grasp_position_m": 0.0003043965435706526,
+          "maximum_grasp_axis_rad": 0.0007640122867050851,
+          "minimum_extra_margin_rad": 0.0009999956988102632,
+          "passed": true
+        }
       }
     },
     "FlipReverse": {
       "targets": "FlipReverse.json.gz",
-      "sha256": "081c2a1a1c9ffc2d2dfe9d44d673d9dd79feb4c0240fb8a5a9283e69936b5663",
+      "sha256": "c26e9a2c6b459cf7f2bd845740bd4e16661a69c96bb259547e6cd29e11d5c096",
+      "nominal_duration_s": 8.085,
+      "duration_s": 8.085,
+      "start_node": "Dump:end",
+      "end_node": "Flip:start",
+      "source": "20261104 verified upright fast reference",
       "validation": {
-        "position_coupling_rms_mm": 0.2148648457108547,
-        "position_coupling_peak_mm": 1.021978642213101,
-        "non_ground_collision_violations": 0
+        "validation_scope": "prefix or time reversal of the same verified reference path; no independent PhysX replay claimed",
+        "packaged_reference": {
+          "samples_2ms": 4044,
+          "maximum_grasp_position_m": 0.0007700321325305363,
+          "maximum_grasp_axis_rad": 0.000559529606145457,
+          "minimum_extra_margin_rad": 0.0009999968107501714,
+          "passed": true
+        }
       }
     }
   },
@@ -191,21 +252,21 @@
     ],
     "Push:end": [
       0.1551295020677216,
-      0.19731344401848092,
-      -0.9515286672194836,
+      0.19731344401848094,
+      -0.9515286672194835,
       0.028453292519963348,
-      0.751862437738253,
-      -0.2830657226305026,
-      -1.525207962532299,
+      0.7518624377382529,
+      -0.28306572263050256,
+      -1.5252079625322987,
       0.6486585686476469,
       0.8742017239186733,
       0.7289021068889381,
       -0.028453292519943305,
-      -0.35830497276152173,
-      -0.7501330527882094,
+      -0.3583049727615218,
+      -0.7501330527882095,
       0.10663606937936,
-      -0.4635385945345821,
-      0.28227057481732865
+      -0.46353859453458207,
+      0.2822705748173287
     ],
     "SideScoop:start": [
       0.11573753524633504,
@@ -217,49 +278,49 @@
       -1.940559169828511,
       0.029715555578290552,
       0.3833934343031332,
-      -3.1115467074800565,
-      -2.5961799733855786,
-      2.537332370745722,
+      0.030045946109736654,
+      -0.5454126802042145,
+      -0.6042602828440713,
       0.20992494382694685,
       0.25670234478589454,
       -0.10066724183752589,
       0.10940743497845025
     ],
+    "Flip:start": [
+      0.17443509882444863,
+      -0.11170775548726025,
+      -0.08670192821290833,
+      0.2539676845194095,
+      0.8394624586096554,
+      -0.7438794046141377,
+      -1.7379905284585921,
+      0.2967360089055776,
+      0.15319499486939792,
+      0.06665129453296852,
+      -0.5787103634319374,
+      -0.5339724765238537,
+      -0.2593678201840234,
+      0.07650212990889849,
+      -0.5832906545007995,
+      0.043282853857409494
+    ],
     "Dump:end": [
       0.03613418675784917,
-      -0.15368635288565466,
+      -0.1536863528856547,
       -0.9694477825540259,
-      0.9501162227719485,
+      0.9501162227719484,
       0.27759670729019414,
-      -0.9757574727063388,
-      -1.2067325197046912,
-      -1.280546682633042,
+      -0.9757574727063387,
+      -1.206732519704691,
+      -1.2805466826330418,
       0.45620941291025574,
-      -2.786620040203759,
-      -2.770503081902976,
-      2.6181193832271337,
+      0.35497261338603403,
+      -0.371089571686817,
+      -0.5234732703626594,
       0.5381835424357806,
       -0.6410742262517973,
-      0.5937765432757424,
-      0.03643378094936291
-    ],
-    "Flip:start": [
-      0.1744350988244643,
-      -0.11170775548734155,
-      -0.08670192821287907,
-      0.2539676845193916,
-      0.8394624586096369,
-      -0.7438794046140886,
-      -1.7379905284586443,
-      0.2967360089055589,
-      0.15319499486940907,
-      -3.0749413590568504,
-      -2.5628822901578543,
-      2.6076201770659146,
-      -0.2593678201840841,
-      0.07650212990892646,
-      -0.5832906545008121,
-      0.04328285385741508
+      0.5937765432757425,
+      0.0364337809493629
     ]
   },
   "home_node": "SideScoop:start",
@@ -308,8 +369,8 @@
   "grasp": {
     "shaft_separation_m": -0.42000000000000004,
     "bar_separation_m": 0.015000000000000001,
-    "max_position_error_m": 0.01,
-    "max_axis_error_rad": 0.05,
+    "max_position_error_m": 0.04,
+    "max_axis_error_rad": 0.17453292519943295,
     "left_frame": "arm_l_ft_sensor",
     "left_grip_in_flange_m": [
       0.119,
@@ -350,5 +411,13 @@
     "directed_checks": 39,
     "hardware_motion_executed": false,
     "completion_basis": "sampled nominal arrival and measured stationary feedback; measured arrival reported separately"
+  },
+  "validation_reference": "artifacts/experiments/prepare-shoulder-20261104/fast-three-actions-smoothed/validation-summary.json",
+  "runtime_validation": {
+    "arm_velocity_rad_s": 1.25,
+    "target_stream_velocity_ceiling_rad_s": 1.25,
+    "same_native_reference_certified": true,
+    "packaged_reference_check_step_s": 0.002,
+    "evidence": "artifacts/experiments/prepare-shoulder-20261104/fast-three-actions-smoothed/packaged-reference-validation.json"
   }
 }
