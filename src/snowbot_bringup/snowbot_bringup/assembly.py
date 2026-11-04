@@ -28,10 +28,8 @@ def assemble(context):
     mode = resolve_mode(value('runtime_mode', 'simulation'))
     position_contract=enabled('position_contract','false')
     execution_mode=value('execution_mode','position')
-    if execution_mode not in ('position','impedance'):
+    if execution_mode != 'position':
         raise ValueError('SNOWBOT_EXECUTION_MODE')
-    if execution_mode=='impedance' and (mode!='real' or value('position_protocol') != 'session_v1' or not position_contract):
-        raise ValueError('IMPEDANCE_REQUIRES_REAL_SESSION')
     if position_contract and value('device_backend') not in ('kinematic','snowbot_vendor','external_simulation'):
         raise ValueError('POSITION_CONTRACT_BACKEND')
     if value('gripper_config') and mode != 'real' and not position_contract:

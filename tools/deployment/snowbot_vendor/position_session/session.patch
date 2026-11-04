@@ -1542,3 +1542,17 @@
 
  bool EtherCAT_isOperational() {
      return g_ecat_driver && g_ecat_driver->isOperational();
+--- a/servo_control/CMakeLists.txt
++++ b/servo_control/CMakeLists.txt
+@@ -129,11 +128,0 @@
+-# 安装 Python 测试脚本 (阻抗控制). 每个 install(PROGRAMS) 只能 RENAME 一次,
+-# 故分多次写入, 安装后通过 ros2 run snowbot_servo_control <name> 调用.
+-install(PROGRAMS scripts/impedance_enable.py
+-  DESTINATION lib/${PROJECT_NAME} RENAME impedance_enable)
+-install(PROGRAMS scripts/impedance_status_monitor.py
+-  DESTINATION lib/${PROJECT_NAME} RENAME impedance_status_monitor)
+-install(PROGRAMS scripts/impedance_hold_test.py
+-  DESTINATION lib/${PROJECT_NAME} RENAME impedance_hold_test)
+-install(PROGRAMS scripts/impedance_keyboard_teleop.py
+-  DESTINATION lib/${PROJECT_NAME} RENAME impedance_keyboard_teleop)
+-

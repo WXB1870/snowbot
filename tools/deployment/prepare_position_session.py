@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a local vendor session; optional impedance is never enabled here."""
+"""Prepare a local position-only vendor session; never starts a device."""
 import argparse
 import hashlib
 import json
@@ -62,7 +62,7 @@ def source_identity(path):
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None,prediction_urdf=None,prediction_tool=None,waist_velocity_ratio=None,waist_feedforward_gain=0.):
+def prepare(source,output,*,observation_only=False,execution_source=None,prediction_urdf=None,prediction_tool=None,waist_velocity_ratio=None,waist_feedforward_gain=0.):
     if (type(waist_feedforward_gain) not in (int,float) or not math.isfinite(waist_feedforward_gain)
             or not 0 <= waist_feedforward_gain <= .1):raise ValueError('WAIST_FEEDFORWARD_GAIN_INVALID')
     if waist_velocity_ratio is None:
@@ -70,10 +70,9 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
     else:
         if (not isinstance(waist_velocity_ratio,(tuple,list)) or len(waist_velocity_ratio)!=2 or any(type(x) not in (int,float) or not math.isfinite(x)
                 or not 1 <= x <= 200 for x in waist_velocity_ratio)):raise ValueError('WAIST_VELOCITY_RATIO_INVALID')
-        if observation_only or with_impedance:raise ValueError('WAIST_UNITS_REQUIRES_POSITION_SESSION')
+        if observation_only:raise ValueError('WAIST_UNITS_REQUIRES_POSITION_SESSION')
     if bool(prediction_urdf)!=bool(prediction_tool):raise ValueError('RIGID_PREDICTION_MODEL_AND_TOOL_REQUIRED')
-    if prediction_urdf and (observation_only or with_impedance):raise ValueError('RIGID_PREDICTION_REQUIRES_TARGET_STREAM')
-    if observation_only and with_impedance:raise ValueError("IMPEDANCE_REQUIRES_FULL_SESSION")
+    if prediction_urdf and (observation_only):raise ValueError('RIGID_PREDICTION_REQUIRES_TARGET_STREAM')
     source,output=Path(source).resolve(),Path(output).absolute()
     if not source.is_dir() or source==output or source in output.parents or output in source.parents:
         raise ValueError('POSITION_SOURCE_OUTPUT_OVERLAP_OR_MISSING')
@@ -114,36 +113,30 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 destination=stage/'src/servo_control'/folder/'bindu_execution_native'/name
                 destination.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copy2(native/name,destination)
-        if with_impedance:
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'impedance')
         if not observation_only:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'receipt.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             shutil.copy2(ASSETS/'position_receipt.h',stage/'src/servo_control/include/position_receipt.h')
             patches=(*patches,'receipt')
-            # The target stream is a pure-position extension. Keep the optional
-            # impedance assembly's original ingress and PAUSE behavior byte-for-byte.
-            if not with_impedance:
-                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'target.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-                patches=(*patches,'target')
-                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'pause_hold.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-                patches=(*patches,'pause_hold')
-                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-                patches=(*patches,'drive_maintenance')
-                if prediction_urdf:
-                    from bindu_kinematics import model_codegen
-                    generator=Path(model_codegen.__file__)
-                    model_tool=json.loads(Path(prediction_tool).read_text())
-                    model_names=[f'arm_{side}_joint_{i}' for side in ('l','r') for i in range(1,8)]+['body_joint_1','body_joint_2']
-                    arm_reference_margin=model_tool.get('posture_reference_margin_rad',0.)
-                    if (type(arm_reference_margin) not in (int,float) or not math.isfinite(arm_reference_margin)
-                            or not 0 <= arm_reference_margin < .2):raise ValueError('ARM_REFERENCE_MARGIN_INVALID')
-                    header=model_codegen.model_header(prediction_urdf,model_names,model_tool['left_frame'],model_tool['right_frame'])
-                    header+='\n#define SNOWBOT_ARM_REFERENCE_MARGIN '+repr(float(arm_reference_margin))+'\n'
-                    (stage/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').write_text(header)
-                    subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'prediction.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-                    patches=(*patches,'prediction')
-        if not observation_only and not with_impedance:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'target.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'target')
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'pause_hold.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'pause_hold')
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'drive_maintenance')
+            if prediction_urdf:
+                from bindu_kinematics import model_codegen
+                generator=Path(model_codegen.__file__)
+                model_tool=json.loads(Path(prediction_tool).read_text())
+                model_names=[f'arm_{side}_joint_{i}' for side in ('l','r') for i in range(1,8)]+['body_joint_1','body_joint_2']
+                arm_reference_margin=model_tool.get('posture_reference_margin_rad',0.)
+                if (type(arm_reference_margin) not in (int,float) or not math.isfinite(arm_reference_margin)
+                        or not 0 <= arm_reference_margin < .2):raise ValueError('ARM_REFERENCE_MARGIN_INVALID')
+                header=model_codegen.model_header(prediction_urdf,model_names,model_tool['left_frame'],model_tool['right_frame'])
+                header+='\n#define SNOWBOT_ARM_REFERENCE_MARGIN '+repr(float(arm_reference_margin))+'\n'
+                (stage/'src/servo_control/include/bindu_execution_native/prediction_model.hpp').write_text(header)
+                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'prediction.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                patches=(*patches,'prediction')
+        if not observation_only:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'runtime_timing.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'runtime_timing')
         if waist_velocity_ratio is not None:
@@ -153,14 +146,11 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             (stage/'src/servo_control/include/position_waist_units.h').write_text(header)
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'waist_units.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'waist_units')
-        feedback_units=not observation_only and not with_impedance and waist_velocity_ratio is None
+        feedback_units=not observation_only and waist_velocity_ratio is None
         if feedback_units:
             shutil.copy2(ASSETS/'position_waist_feedback.h',stage/'src/servo_control/include/position_waist_feedback.h')
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'waist_feedback.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'waist_feedback')
-        if not observation_only and not with_impedance:
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'deployed_vendor.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'deployed_vendor')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
@@ -186,10 +176,10 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             baseline_manifest_sha256=digest(ASSETS/'baseline_manifest.json'),
             components={n:digest(ASSETS/(n+'.patch')) for n in patches},shared_helpers={} if observation_only else {n:digest(ASSETS/n) for n in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h')},files=changed,
             rigid_prediction=(dict(enabled=True,recipe_version=3,urdf_sha256=digest(Path(prediction_urdf)),tool_sha256=digest(Path(prediction_tool)),generator_sha256=digest(generator),names=model_names,left_frame=model_tool['left_frame'],right_frame=model_tool['right_frame']) if prediction_urdf else dict(enabled=False)),
-            feedback_publication=dict(isolated=not observation_only and not with_impedance,
-                mode='latest_only_worker' if not observation_only and not with_impedance else 'original',
-                max_sample_age_ms=20 if not observation_only and not with_impedance else None,
-                timestamp='acquisition_start' if not observation_only and not with_impedance else None,fastdds_default='ASYNCHRONOUS' if not observation_only and not with_impedance else None,
+            feedback_publication=dict(isolated=not observation_only,
+                mode='latest_only_worker' if not observation_only else 'original',
+                max_sample_age_ms=20 if not observation_only else None,
+                timestamp='acquisition_start' if not observation_only else None,fastdds_default='ASYNCHRONOUS' if not observation_only else None,
                 site_override_preserved=True),
             csp_diagnostics=dict(version=1,slots=[16,17,18,19],command_source='pre_send_pdo_buffer',
                 feedback_source='same_receive_attempt',sdo_reads_added=False,physical_units_verified=False),
@@ -205,12 +195,12 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 provisional_ratio=[101,101],read_failure_policy='explicit_provisional_101',
                 invalid_response_policy='refuse_initialization',velocity_command_scaled=False,
                 physical_units_verified=False,helper_sha256=digest(ASSETS/'position_waist_feedback.h') if feedback_units else None),
-            stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only and not with_impedance,
+            stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only,
             session_wire_version=3,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=contract_ttl_ms('maximum_target_ttl'),target_pause_ttl_ms=contract_ttl_ms('maximum_target_pause_ttl'),
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
-            native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,
-            impedance_calibration_confirmed=False,source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
+            native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},
+            source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
         (stage/'position_release.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
         stage.rename(output)
     except BaseException:
@@ -224,7 +214,6 @@ if __name__=='__main__':
     destination.add_argument('--release-id',help='Unique immutable candidate name under snowbot/releases; latest/current/final are rejected')
     destination.add_argument('--output',type=Path,help='Explicit output for temporary checks or externally managed assembly')
     p.add_argument('--observation-only',action='store_true')
-    p.add_argument('--with-impedance',action='store_true',help='Include optional backend; default execution mode remains position')
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
     p.add_argument('--prediction-urdf',type=Path,help='Reviewed actual kinematic URDF for rigid prediction; local generation only')
     p.add_argument('--prediction-tool',type=Path,help='Reviewed tool config selecting the two end frames; must accompany prediction-urdf')
@@ -232,4 +221,4 @@ if __name__=='__main__':
     p.add_argument('--waist-feedforward-gain',type=float,default=0.,help='Optional waist CSP 0x60B1 gain, 0..0.1; requires explicit velocity ratios; default preserves 0x60FF')
     a=p.parse_args()
     output=release_output(a.release_id) if a.release_id is not None else a.output
-    print(prepare(a.source,output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))
+    print(prepare(a.source,output,observation_only=a.observation_only,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))

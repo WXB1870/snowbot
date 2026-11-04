@@ -132,16 +132,12 @@ void check_position_pdo_output(){
 
 
 def write_receipt_poll_check(source, work, root):
-    """Reuse the existing poll fixture without its unrelated Eigen controller."""
-    fixture=(root/'test_session_impedance.cpp').read_text()
+    """Compile the production admission poll with the position-only fixture."""
+    fixture=(root/'test_position_poll.cpp').read_text()
     text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
-    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
-    preamble='\n'.join(line for line in preamble.splitlines() if
-        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
-    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
-    body='\n'.join(line for line in body.splitlines() if
-        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.index(' void start(')]
+    preamble=fixture[:fixture.index('position_session::Observation snapshot;')]
+    body=fixture[fixture.index('position_session::Observation snapshot;'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body=body[:body.rindex('\n};')]
     if 'void ServoNode::position_target_dispatch()' in text:
         body+=TARGET_FIELDS
     body+='};\n'
@@ -153,22 +149,11 @@ def write_receipt_poll_check(source, work, root):
     if 'void ServoNode::position_interrupt()' in text:
         begin=text.index('void ServoNode::position_interrupt()');end=text.index('void ServoNode::position_submit(',begin)
         poll=text[begin:end]+poll
-    ready=''
-    if 'bool ServoNode::session_impedance_ready() const' in text:
-        start=text.index('bool ServoNode::session_impedance_ready() const')
-        ready=text[start:text.index('\n}',start)+2]+'\n'
-    described=fixture[fixture.index('TrajectoryWire described('):fixture.index('void check_adapter_memory')]
-    checks=fixture[fixture.index('void check_production_poll()'):fixture.index('void check_trajectory_impedance')]
-    if not ready:
-        checks=checks.replace('invalid<5','invalid<1')
-        checks=checks.replace('initialized/calibration/sensor admission gates','initialized admission gate (position-only candidate)')
-        body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
-        checks=checks.replace('if(sensor_age)snapshot.sensor_sampled_ns.fill(steady_ns()-sensor_age);','(void)sensor_age;')
-        checks=checks.replace('snapshot.sensor_valid_mask=invalid==3?1:3;','').replace('snapshot.sensor_valid_mask=3;','')
-    main='\nint main(){\n snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);snapshot.sensor_valid_mask=3;\n snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;\n check_production_poll();\n}\n'
-    if not ready:main=main.replace('snapshot.sensor_valid_mask=3;','')
+    described=fixture[fixture.index('TrajectoryWire described('):fixture.index('void check_production_poll')]
+    checks=fixture[fixture.index('void check_production_poll()'):]
+    main='\nint main(){\n snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);\n snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;\n check_production_poll();\n}\n'
     path=work/'test_production_receipt.cpp'
-    path.write_text(preamble+body+poll+ready+described+checks+main)
+    path.write_text(preamble+body+poll+described+checks+main)
     return path
 
 TARGET_FIELDS = r"""
@@ -184,16 +169,11 @@ TARGET_FIELDS = r"""
 
 
 def write_target_poll_check(source, work, root):
-    fixture=(root/'test_session_impedance.cpp').read_text()
+    fixture=(root/'test_position_poll.cpp').read_text()
     text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
-    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
-    preamble='\n'.join(line for line in preamble.splitlines() if
-        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
-    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
-    body='\n'.join(line for line in body.splitlines() if
-        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.index(' void start(')]+TARGET_FIELDS+'};\n'
-    body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
+    preamble=fixture[:fixture.index('position_session::Observation snapshot;')]
+    body=fixture[fixture.index('position_session::Observation snapshot;'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body=body[:body.rindex('\n};')]+TARGET_FIELDS+'};\n'
     start=text.index('void ServoNode::position_interrupt()') if 'void ServoNode::position_interrupt()' in text else text.index('void ServoNode::position_submit(')
     methods=text[start:text.index('void ServoNode::position_step()',start)]
     methods=methods.replace('snowbot_ctl_msgs::msg::PositionSessionServo','Packet')
@@ -202,17 +182,13 @@ def write_target_poll_check(source, work, root):
     path=work/'test_production_target.cpp';path.write_text(preamble+body+methods+checks+main);return path
 
 def write_position_cycle_check(source, work, root):
-    fixture=(root/'test_session_impedance.cpp').read_text()
+    fixture=(root/'test_position_poll.cpp').read_text()
     text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
-    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
-    preamble='\n'.join(line for line in preamble.splitlines() if
-        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
+    preamble=fixture[:fixture.index('position_session::Observation snapshot;')]
     clock='int64_t cycle_ros_offset_ns=0;int64_t cycle_now_ns=1000000000;int64_t cycle_clock(){cycle_now_ns+=100;return cycle_now_ns;}\nposition_session::OutputCache* active_cycle_cache=nullptr;\n'
-    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
-    body='\n'.join(line for line in body.splitlines() if
-        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.index(' void start(')]+TARGET_FIELDS+'};\n'
-    body=body.replace('snapshot.sensor_sampled_ns.fill(t);','').replace('position_session::steady_ns()','cycle_clock()')
+    body=fixture[fixture.index('position_session::Observation snapshot;'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body=body[:body.rindex('\n};')]+TARGET_FIELDS+'};\n'
+    body=body.replace('position_session::steady_ns()','cycle_clock()')
     body=body.replace('nanoseconds()const{return cycle_clock();}', 'nanoseconds()const{return cycle_clock()+cycle_ros_offset_ns;}')
     body=body.replace('position_feedback_.ready_ros=t;', 'position_feedback_.ready_ros=t+cycle_ros_offset_ns;')
     body=body.replace('position_feedback_.progress=position_feedback_.source=t;', 'position_feedback_.progress=t;position_feedback_.source=t+cycle_ros_offset_ns;')
@@ -297,7 +273,7 @@ def main():
     if (args.source/'servo_control/include/position_receipt.h').is_file():
         sources.append(args.source/'servo_control/include/position_receipt.h')
         names.extend(('test_position_receipt','test_production_receipt'))
-        sources.extend((args.source/'servo_control/src/ros_controller/rosLoop.cpp',root/'test_session_impedance.cpp'))
+        sources.extend((args.source/'servo_control/src/ros_controller/rosLoop.cpp',root/'test_position_poll.cpp'))
     native_include=args.source/'servo_control/include/bindu_execution_native'
     native_sources=[args.source/'servo_control/src/bindu_execution_native'/name
                     for name in ('interpolation.cpp','adaptive_stream.cpp')]

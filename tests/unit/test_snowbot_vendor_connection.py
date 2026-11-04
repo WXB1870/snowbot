@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -92,32 +92,39 @@ class PositionReleaseTests(unittest.TestCase):
         subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True)
 
-    def test_optional_impedance_is_explicit_and_stays_disabled(self):
-        output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
-        manifest=json.loads((output/'position_release.json').read_text())
-        self.assertEqual(set(manifest['components']),{*(set(vendor.COMPONENTS)-{'target'}),'impedance'})
-        self.assertFalse(manifest['target_stream_available'])
-        self.assertFalse(manifest['feedback_publication']['isolated'])
-        self.assertEqual(manifest['feedback_publication']['mode'],'original')
-        self.assertNotIn('feedback_send', (output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
-        self.assertNotIn('target_stream', (output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
-        self.assertEqual(manifest['execution_mode'],'position')
-        self.assertTrue(manifest['impedance_available'])
-        self.assertFalse(manifest['impedance_calibration_confirmed'])
-        self.assertEqual(manifest['stop_policy'],'unconfirmed')
-        default=json.loads((self.release/'position_release.json').read_text())
-        self.assertFalse(default['impedance_available'])
-        self.assertTrue(default['target_stream_available'])
-        self.assertEqual((default['target_wire_version'],default['target_reference_mode']),(5,2))
-        self.assertEqual(default['session_wire_version'],3)
-        self.assertEqual(default['target_prepare_ms'],10.)
-        self.assertEqual((self.release/'src/servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes(),
-                         (self.baseline/'servo_control/src/impedance/cartesian_impedance_controller.cpp').read_bytes())
-        for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
-            rel='ctl_msgs/msg/'+name+'.msg'
-            self.assertEqual((self.baseline/rel).read_bytes(),(output/'src'/rel).read_bytes())
-        with self.assertRaisesRegex(ValueError,'IMPEDANCE_REQUIRES_FULL_SESSION'):
-            vendor.prepare(self.baseline,self.work/'invalid-impedance',with_impedance=True,observation_only=True)
+    def test_position_release_rejects_legacy_impedance_and_keeps_gravity_model(self):
+        manifest=json.loads((self.release/'position_release.json').read_text())
+        self.assertNotIn('impedance_available',manifest)
+        self.assertNotIn('impedance_calibration_confirmed',manifest)
+        self.assertTrue(manifest['target_stream_available'])
+        self.assertEqual((manifest['target_wire_version'],manifest['target_reference_mode']),(5,2))
+        self.assertEqual(manifest['session_wire_version'],3)
+        self.assertEqual(manifest['target_prepare_ms'],10.)
+        servo=self.release/'src/servo_control'
+        for name in ('include/impedance/cartesian_impedance_controller.h',
+                     'src/impedance/cartesian_impedance_controller.cpp'):
+            self.assertEqual((servo/name).read_bytes(),(self.baseline/'servo_control'/name).read_bytes())
+        self.assertEqual((self.release/'src/ctl_msgs/config/impedance_params.yaml').read_bytes(),
+                         (self.baseline/'ctl_msgs/config/impedance_params.yaml').read_bytes())
+        cmake=(servo/'CMakeLists.txt').read_text()
+        self.assertNotIn('install(PROGRAMS scripts/impedance_',cmake)
+        self.assertIn('src/impedance/cartesian_impedance_controller.cpp',cmake)
+        loop=(servo/'src/ros_controller/rosLoop.cpp').read_text()
+        callback=loop[loop.index('    impedance_enable_sub_ ='):loop.index('    // 前馈力矩测试订阅:')]
+        source=self.work/'reject-impedance.cpp'
+        source.write_text('#include <memory>\n#include <string>\n#include <cassert>\n'
+            '#define RCLCPP_WARN(logger,...) ((void)(logger))\n'
+            'namespace std_msgs::msg {struct Bool {using SharedPtr=std::shared_ptr<Bool>;bool data;};}\n'
+            'struct Servo {bool impedance_enable_=false;int get_logger(){return 0;}\n'
+            'template<class T,class F> int create_subscription(const std::string&,int,F f){\n'
+            'for(bool enabled:{true,false}){auto msg=std::make_shared<T>();msg->data=enabled;f(msg);assert(!impedance_enable_);}return 0;}\n'
+            'void check(){int '+callback.strip()+'(void)impedance_enable_sub_;} };\n'
+            'int main(){Servo node;node.check();}\n')
+        binary=self.work/'reject-impedance'
+        subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True)
+        subprocess.run([str(binary)],check=True)
+        self.assertIn('computeGravityLive(q_full, dq_full)',loop)
+        self.assertIn('EtherCAT_setGravityFF(i,',loop)
 
     def test_rigid_model_is_explicit_hashed_and_incompatible_modes_rejected(self):
         urdf=ROOT/'src/snowbot_description/urdf/snowbot_control.urdf'
@@ -133,7 +140,7 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertIn('TARGET_PREDICTION ',(output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
         self.assertFalse(list((output/'src').rglob('*.orig')))
         self.assertFalse(json.loads((self.release/'position_release.json').read_text())['rigid_prediction']['enabled'])
-        for options in ({'observation_only':True},{'with_impedance':True}):
+        for options in ({'observation_only':True},):
             with self.assertRaisesRegex(ValueError,'REQUIRES_TARGET_STREAM'):
                 vendor.prepare(self.baseline,self.work/'bad-rigid',prediction_urdf=urdf,prediction_tool=tool,**options)
         with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
@@ -212,8 +219,7 @@ int main(){check_position_pdo_output();MappingProbe probe;
         invalid=({'waist_feedforward_gain':.05}, {'waist_velocity_ratio':(25.25,)},
             {'waist_velocity_ratio':(float('nan'),25.25)},
             {'waist_velocity_ratio':(25.25,25.25),'waist_feedforward_gain':.2},
-            {'waist_velocity_ratio':(25.25,25.25),'observation_only':True},
-            {'waist_velocity_ratio':(25.25,25.25),'with_impedance':True})
+            {'waist_velocity_ratio':(25.25,25.25),'observation_only':True})
         for options in invalid:
             with self.subTest(options=options),self.assertRaisesRegex(ValueError,'WAIST_'):
                 vendor.prepare(self.baseline,self.work/'invalid-waist',**options)

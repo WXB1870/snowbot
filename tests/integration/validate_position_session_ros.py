@@ -15,7 +15,7 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--bindu-root',type=Path,help='Optional Bindu checkout with the installed session preflight')
     parser.add_argument('--position-protocol',choices=('session_v1','session_v3'),default='session_v1')
-    parser.add_argument('--execution-mode',choices=('position','impedance'),default='position',help='Synthetic servo state/observation mode; never starts an impedance controller')
+    parser.add_argument('--execution-mode',choices=('position',),default='position',help='Synthetic position servo state/observation mode')
     parser.add_argument('--preflight-discovery-timeout',type=float,default=2.,help='New DDS observer discovery window; all feedback and contract freshness checks remain unchanged')
     args=parser.parse_args()
     if not 0 < args.preflight_discovery_timeout <= 10:parser.error('Require 0 < preflight discovery timeout <= 10 seconds')

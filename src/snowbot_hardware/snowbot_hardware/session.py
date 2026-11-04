@@ -89,11 +89,7 @@ class SessionHealth:
         return True
 
     def confirmed_hold(self, request):
-        """Return the adopted fixed reference, never physical-stop confirmation.
-
-        A trajectory impedance PAUSE adopts a fixed nominal reference and keeps
-        its controller. Executor confirms measured rest separately from arrival.
-        """
+        """Return the adopted fixed reference, never physical-stop confirmation."""
         if self.hold_failure(request):
             return None
         return dict(zip(CONTROL_NAMES, self.observation.hold_position))
@@ -169,16 +165,6 @@ class SessionHealth:
                 raise RuntimeError('SNOWBOT_SESSION_PROTOCOL_CONFLICT:'+layer)
             if self.reference_mode and layer == 'servo' and getattr(state, 'reference_mode', 0) != self.reference_mode:
                 raise RuntimeError('SNOWBOT_TRAJECTORY_PROTOCOL_CONFLICT:'+layer)
-        if self.execution_mode == 'impedance':
-            # The optional vendor build places force data in this exact PDO sample.
-            wrench = getattr(obs, 'wrench', ())
-            age = getattr(obs, 'sensor_age', ())
-            stamp = obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9
-            if (getattr(obs, 'sensor_valid_mask', 0) != 3 or
-                    obs.valid_mask != 0xfffff or not all(math.isfinite(x) for x in wrench) or
-                    not all(math.isfinite(a) and 0 <= a and
-                        self.now()-stamp+a <= .02 for a in age)):
-                raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
         if obs.session_reason >= 2 and not acquiring:
             raise RuntimeError('SNOWBOT_SESSION_STOPPED:'+str(obs.session_reason))
 

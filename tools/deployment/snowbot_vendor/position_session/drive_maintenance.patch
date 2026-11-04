@@ -169,14 +169,6 @@
      });
      position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
      position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
-@@ -515,6 +536,7 @@
-     impedance_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
-         "~/impedance_enable", 10,
-         [this](const std_msgs::msg::Bool::SharedPtr msg) {
-+            if(EtherCAT_driveResetBusy())return;
-             if (!impedance_inited_ && msg->data) {
-                 RCLCPP_WARN(this->get_logger(),
-                             "Impedance not initialized, ignore enable");
 @@ -1320,6 +1342,7 @@
  
      position_initialized_=true;position_init_error_.clear();
@@ -298,3 +290,53 @@
  
  bool EtherCAT_isOperational() {
      return g_ecat_driver && g_ecat_driver->isOperational();
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -1,4 +1 @@
+-    // 默认不上电启用, 由上位机通过 ~/impedance_enable 切换.
+-    // 左/右参考位姿由控制器内部直接订阅:
+-    //   ~/impedance/arm_l_link_7/reference  (左臂)
+-    //   ~/impedance/arm_r_link_7/reference  (右臂)
++    // Position releases retain the original gravity model, but expose no impedance control.
+@@ -8,40 +5 @@
+-            if (!impedance_inited_ && msg->data) {
+-                RCLCPP_WARN(this->get_logger(),
+-                            "Impedance not initialized, ignore enable");
+-                return;
+-            }
+-            const bool was_enabled = impedance_enable_;
+-            impedance_enable_ = msg->data;
+-            RCLCPP_INFO(this->get_logger(), "Impedance enable -> %s",
+-                        impedance_enable_ ? "ON" : "OFF");
+-            if (impedance_enable_ && !was_enabled) {
+-                // 上升沿: 标记 just_enabled, 由 applyImpedanceControl 在 RT
+-                // 线程上下文捕获当前末端位姿/sensor bias (避免与 EtherCAT
+-                // 线程并发读 motor feedback). 同步使能双臂+双夹爪电机,
+-                // 让 CiA402 在下一个 PDO 周期内走完 enable 序列.
+-                impedance_just_enabled_.store(true, std::memory_order_release);
+-                bool arm_mask[TOTAL_SLAVES] = {};
+-                for (int i = 0; i < LARMDOF; i++) arm_mask[i] = true;        // 左臂 J1~J7
+-                arm_mask[7] = true;                                            // 左夹爪
+-                // arm_mask[5] = true;
+-                for (int i = 0; i < RARMDOF; i++) arm_mask[8 + i] = true;    // 右臂 J1~J7
+-                arm_mask[15] = true;                                           // 右夹爪
+-                // arm_mask[14] = true;
+-                // arm_mask[13] = true;
+-                // arm_mask[12] = true;
+-                // arm_mask[10] = true;
+-                EtherCAT_setMotorEnable(true);
+-                EtherCAT_setPerMotorEnable(arm_mask);
+-                RCLCPP_INFO(this->get_logger(),
+-                            "Impedance enable: motors enabled (arms+grippers)");
+-            } else if (!impedance_enable_ && was_enabled) {
+-                // 下降沿: 立即清 bias 和参考, 并失能双臂+双夹爪电机,
+-                // 让机械臂回到回零后的锁死状态 (与原有失能逻辑一致)
+-                if (impedance_left_)  impedance_left_->disable();
+-                if (impedance_right_) impedance_right_->disable();
+-                bool all_off_mask[TOTAL_SLAVES] = {};
+-                EtherCAT_setPerMotorEnable(all_off_mask);
+-                EtherCAT_setMotorEnable(false);
+-                RCLCPP_INFO(this->get_logger(),
+-                            "Impedance disable: motors disabled (arms+grippers)");
+-            }
++            if (msg->data) RCLCPP_WARN(this->get_logger(), "Position release rejects impedance enable");
