@@ -192,6 +192,8 @@ def decode_feedback(msg):
         q, v = getattr(msg, prefix+'_position', None), getattr(msg, prefix+'_speed', None)
         if prefix in ('torso', 'head') and q is None and v is None:
             continue
+        if q is None or v is None:
+            raise ValueError('SNOWBOT_FEEDBACK_LAYOUT')
         if sample is not None and prefix in ('torso', 'head'):
             mask = SLOT_MASKS[groups[0]]
             if msg.feedback_valid_mask & mask != mask:
