@@ -728,21 +728,20 @@ def interactive_replay(args, parser):
         'dumped': {'': ('Home', 'ready')},
     }
     prompts = {
-        'ready': '1 前推    2 侧前铲    q 退出',
-        'pushed': '前推完成；Enter 拉回，q 退出',
-        'scooped': '侧前铲完成；3 翻倒，Enter 回到侧前铲初始位，q 退出',
-        'dumped': '翻倒完成；Enter 回到侧前铲初始位，q 退出',
+        'ready': '输入 1 前推或 2 侧前铲，按 Enter 执行；q 退出',
+        'pushed': '前推完成，直接按 Enter 拉回；q 退出',
+        'scooped': '侧前铲完成，输入 3 后按 Enter 翻倒，或直接按 Enter 回到侧前铲初始位；q 退出',
+        'dumped': '翻倒完成，直接按 Enter 连续退回侧前铲初始位；q 退出',
     }
     while True:
-        print('\n'+prompts[state])
         try:
-            choice = input('请输入：').strip()
+            choice = input('\n等待输入（'+prompts[state]+'）：').strip()
         except (EOFError, KeyboardInterrupt):
             return
         if choice.lower() == 'q':
             return
         if choice not in commands[state]:
-            print('当前可用操作：'+prompts[state])
+            print('当前状态不能执行该输入。')
             continue
         action, following = commands[state][choice]
         selected = argparse.Namespace(**vars(args))
