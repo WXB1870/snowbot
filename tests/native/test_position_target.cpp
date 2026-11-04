@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 #include <new>
 #include <limits>
 thread_local bool periodic=false;
@@ -301,7 +302,7 @@ void rigid_reference_recipe(){
 #endif
 }
 
-int replay_targets(bool rigid){
+int replay_targets(bool rigid,bool trace){
  unsigned axes,count;std::cin>>axes>>count;assert(axes==16&&count);Wire wire;wire.version=rigid?3:2;
  double low,high,maxv=0,maxa=0,maxj=0;
  for(unsigned i=0;i<16;++i){std::cin>>low>>high>>wire.max_velocity[i]>>wire.max_acceleration[i]>>wire.max_jerk[i];maxv=std::max(maxv,wire.max_velocity[i]);maxa=std::max(maxa,wire.max_acceleration[i]);maxj=std::max(maxj,wire.max_jerk[i]);}
@@ -323,6 +324,7 @@ int replay_targets(bool rigid){
   }
   if(!sequence)continue;
   periodic=true;const bool valid=queue.sample(now);periodic=false;assert(valid);++samples;
+  if(trace&&tick%20==0){std::cout<<std::setprecision(17)<<"SAMPLE "<<t;for(double x:queue.q)std::cout<<' '<<x;std::cout<<'\n';}
   for(unsigned i=0;i<16;++i){assert(std::isfinite(queue.q[i])&&queue.q[i]>=lower[i]-1e-8&&queue.q[i]<=upper[i]+1e-8);ratio=std::max({ratio,std::abs(queue.v[i])/wire.max_velocity[i],std::abs(queue.a[i])/wire.max_acceleration[i],std::abs(queue.j[i])/wire.max_jerk[i]});}
  }
  assert(ratio<=1.00001&&paused&&queue.phase(base+ns(times.back()+1.5))==4&&!allocated&&!deleted);
@@ -389,4 +391,4 @@ void independent_waist_timing(){
  assert(queue.phase(source.stamp+1900000000)==4&&!allocated&&!deleted);
  std::cout<<"PASS independent waist timing: standalone group curves, early waist hold, C2 adoption, limits, original deadline/PAUSE and zero periodic allocation\n";
 }
-int main(int argc,char**){if(argc>1)return replay_targets(argc==2);independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+int main(int argc,char** argv){if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}

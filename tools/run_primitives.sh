@@ -44,6 +44,7 @@ if [[ "$mode" == executor ]]; then
         profile:="$cfg/snowbot_real_position.json" \
         parameters_config:="$cfg/runtime_parameters.json" gripper_config:="$cfg/grippers.json" \
         position_protocol:=session_v3 execution_mode:=impedance command_enabled:=true \
+        trajectory_max_velocity:=1.25 trajectory_max_acceleration:=4.5 trajectory_max_jerk:=259.2 \
         recording_mode:=compact output:="$runs"
 fi
 
