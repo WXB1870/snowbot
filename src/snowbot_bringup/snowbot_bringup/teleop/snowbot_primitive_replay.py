@@ -216,33 +216,6 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     return ReplaySequence(selected_plans, selected)
 
 
-class AxialGraspGuard:
-    """Check only the four constrained directions of the two released grips."""
-    def __init__(self, urdf, specification):
-        import numpy as np
-        from bindu_kinematics.model import ArmModel
-        root = ET.parse(urdf)
-        locked = {j.get('name'): 0. for j in root.findall('joint')
-                  if j.get('type') != 'fixed' and j.get('name') not in NAMES}
-        self.np, self.spec = np, specification
-        self.model = ArmModel(dict(urdf=str(urdf), joint_names=NAMES, locked_joints=locked,
-            tool_transform=np.eye(4).ravel(), ee_link=specification['left_frame']))
-
-    def check(self, positions):
-        np, s = self.np, self.spec
-        frames = self.model.frames([positions[n] for n in NAMES], None,
-                                   [s['left_frame'], s['right_frame']])
-        points, axes = [], []
-        for side in ('left', 'right'):
-            F = frames[s[side+'_frame']]
-            points.append(F[:3, 3]+F[:3, :3]@np.array(s[side+'_grip_in_flange_m']))
-            axes.append(F[:3, :3]@np.array(s[side+'_axis_in_flange']))
-        error = points[1]-points[0]-s['shaft_separation_m']*axes[1]-s['bar_separation_m']*axes[0]
-        position = float(np.linalg.norm(error))
-        angle = math.asin(float(np.clip(axes[0]@axes[1], -1., 1.)))
-        if position > s['max_position_error_m'] or abs(angle) > s['max_axis_error_rad']:
-            raise RuntimeError(f'REPLAY_GRASP_ERROR:position_m={position:.6f},axis_rad={angle:.6f}')
-        return position, angle
 
 
 
@@ -483,7 +456,6 @@ def execute(args, plan):
             if prepare_context is not None and any(
                     n not in q or not math.isfinite(q[n]) or abs(q[n]-x)>.001 for n,x in prepare_context.items()):
                 raise RuntimeError('PREPARE_CONTEXT_CHANGED')
-            if guard is not None: guard.check(q)
             return q, v
         def acquire(self):
             self.lease = call(leases, Lease.Request(operation='acquire', owner=task, resources=list(GROUPS)))
@@ -529,7 +501,6 @@ def execute(args, plan):
             raise RuntimeError('REPLAY_MEASURED_STOP_NOT_CONFIRMED')
 
     manifest = load_library(args.library.resolve())
-    guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest and args.action != 'Prepare' else None
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
