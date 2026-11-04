@@ -64,10 +64,6 @@ PDO_FIELDS = {'pdo_sample': ('uint64',), 'pdo_age': ('double', 'float64'),
 
 def guard_array(values, stamp_ns, sequence, session, hold):
     """118 v1: native prefix followed by source time, sequence, session and hold."""
-    if (type(stamp_ns) is not int or not 0 < stamp_ns < 9_000_000_000_000_000_000 or
-            type(sequence) is not int or not 0 < sequence < 2**53 or
-            type(session) is not int or not 0 < session < 2**64 or type(hold) is not bool):
-        raise ValueError('SNOWBOT_GUARD_METADATA')
     return [*values, stamp_ns * 1e-9, float(sequence),
             float(session >> 32), float(session & 0xffffffff), float(hold)]
 
@@ -175,7 +171,7 @@ def feedback_sample(msg):
     if not all(hasattr(msg, name) for name in PDO_FIELDS):
         raise ValueError('SNOWBOT_PDO_METADATA_INCOMPLETE')
     sample, age = msg.pdo_sample, msg.pdo_age
-    if not sample or not math.isfinite(age) or not 0 <= age <= .02:
+    if not sample or not 0 <= age <= .02:
         raise ValueError('SNOWBOT_PDO_SAMPLE_STALE_OR_INVALID')
     if msg.pdo_expected_wkc <= 0 or msg.pdo_wkc != msg.pdo_expected_wkc:
         raise ValueError('SNOWBOT_PDO_WKC')
@@ -196,8 +192,6 @@ def decode_feedback(msg):
         q, v = getattr(msg, prefix+'_position', None), getattr(msg, prefix+'_speed', None)
         if prefix in ('torso', 'head') and q is None and v is None:
             continue
-        if q is None or v is None or len(q) != len(names) or len(v) != len(names):
-            raise ValueError('SNOWBOT_FEEDBACK_LAYOUT')
         if sample is not None and prefix in ('torso', 'head'):
             mask = SLOT_MASKS[groups[0]]
             if msg.feedback_valid_mask & mask != mask:

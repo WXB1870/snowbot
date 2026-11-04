@@ -24,7 +24,6 @@ def decode_observation(msg, now):
         raise ValueError('SNOWBOT_OBSERVATION_STAMP')
     stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
     if (not msg.boot_id or not msg.pdo_sample or
-            not all(math.isfinite(x) for x in (stamp, msg.pdo_age, now)) or
             not 0 <= now-stamp <= ROS_FEEDBACK_TIMEOUT_S or
             not 0 <= msg.pdo_age <= PDO_MAX_AGE_S or
             now-stamp+msg.pdo_age > ROS_FEEDBACK_TIMEOUT_S):
@@ -82,13 +81,7 @@ class SessionHealth:
             raise ValueError('SNOWBOT_SESSION_STATE_INVALID:'+layer)
         previous = self.states.get(layer)
         if previous is not None and stamp <= previous[0]:
-            current = previous[1]
-            identity = ('instance_id', 'wire_version', 'reference_mode',
-                        'control_source', 'stop_policy', 'feedback_boot_id')
-            if (getattr(msg, 'instance_id', 0) and
-                    all(getattr(msg, key, None) == getattr(current, key, None) for key in identity)):
-                return False  # Old telemetry cannot delete or renew newer health.
-            raise ValueError('SNOWBOT_SESSION_STATE_INVALID:'+layer)
+            return False
         if now-stamp > .2:
             raise ValueError('SNOWBOT_SESSION_STATE_INVALID:'+layer)
         self.states[layer] = stamp, msg

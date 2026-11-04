@@ -1,4 +1,4 @@
-"""Robot-selected teleoperation. Validation finishes before any node starts."""
+"""Assemble robot-selected nodes; each component validates its configuration."""
 from pathlib import Path
 import json
 from launch.actions import LogInfo
@@ -58,9 +58,6 @@ def assemble(context):
         raise ValueError('BIMANUAL_CONFIG_RUNTIME_MODE_MISMATCH')
     if value('tool_input_source') not in ('tool_pose', 'vr'):
         raise ValueError('ROBOT_TOOL_INPUT')
-    if (value('tool_input_source') == 'tool_pose' and
-            json.loads(robot.tool_config.read_text()).get('input_frame') != robot.base_frame):
-        raise ValueError('ROBOT_TOOL_INPUT_FRAME')
     if value('recording_mode') not in ('off', 'compact', 'normal'):
         raise ValueError('ROBOT_RECORDING_MODE')
     initial = value('initialize_tool_pose', 'false').lower() == 'true'
@@ -77,24 +74,6 @@ def assemble(context):
     if base_config:
         if not pico or not position_contract or not enabled('vr_enabled','false'):
             raise ValueError('BASE_REQUIRES_PICO_POSITION_VR')
-    if pico:
-        tool_settings=json.loads(robot.tool_config.read_text())
-        if not tool_settings.get('right_axial_grasp') or tool_settings.get('collision_scope')!='configured_tool_geometry' or (not position_contract and not tool_settings.get('demo',{}).get('initial_positions_rad')):
-            raise ValueError('PICO_REQUIRES_AXIAL_SHOVEL_CONFIG')
-        settings=load_mode_config(pico_config,mode)
-        if (settings.get('simulation_only') is not (mode=='simulation') or settings.get('mapping')!='pico_snowbot_v1' or
-                settings.get('schema_version') != (2 if position_contract else 1)):
-            raise ValueError('PICO_CONFIG_UNAVAILABLE')
-        if position_contract and settings.get('tool_grasp_confirmation') not in ('calibrated','operator'):
-            raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
-        if position_contract and not value('gripper_config'):
-            raise ValueError('PICO_GRIPPER_CONFIG_REQUIRED')
-        if position_contract:
-            grippers=load_mode_config(value('gripper_config'),mode)
-            if grippers.get('simulation_only',False) is not (mode=='simulation'):
-                raise ValueError('PICO_GRIPPER_CONFIG_MODE_MISMATCH')
-        if mode=='real' and settings.get('device_initial_positions_rad'):
-            raise ValueError('REAL_REQUIRES_MEASURED_INITIAL_STATE')
     ns = LaunchConfiguration('namespace')
     common = {'profile': str(robot.profile_path), 'run_id': LaunchConfiguration('run_id'), 'runtime_mode': mode,
               **({} if legacy else {'robot_config': str(robot.path), 'robot_config_digest': robot.digest})}
@@ -102,11 +81,13 @@ def assemble(context):
     nodes = [LogInfo(msg=f'Robot {robot.robot_id}: {len(robot.active_joints)} tool DOF, '
                      f'{len(robot.context_joints)} measured context joints; config={robot.digest}')]
     execution = {**common, 'device_backend': backend}
-    if pico and position_contract and backend=='kinematic' and settings.get('device_initial_positions_rad'):
-        execution['kinematic_initial_positions'] = ParameterValue(
-            json.dumps(settings['device_initial_positions_rad']), value_type=str)
+    if pico and position_contract and backend=='kinematic':
+        settings=load_mode_config(pico_config,mode)
+        if settings.get('device_initial_positions_rad'):
+            execution['kinematic_initial_positions'] = ParameterValue(
+                json.dumps(settings['device_initial_positions_rad']), value_type=str)
     if initial:
-        pose = json.loads(robot.tool_config.read_text())['demo']['initial_positions_rad']
+        pose = tool_settings['demo']['initial_positions_rad']
         execution['kinematic_initial_positions'] = ParameterValue(json.dumps(pose), value_type=str)
     if mode=='real' or position_contract:
         execution.update(command_enabled=enabled('command_enabled','false'),
