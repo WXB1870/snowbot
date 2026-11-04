@@ -2,11 +2,12 @@
 
 Preview is offline. --execute uses an already running session_v3 executor;
 Prepare is an empty-hand entry to the side-scoop ready pose. No driver
-startup, motor enabling, encoder homing, or gripper/base commands are performed.
+startup, motor enabling, encoder homing, or base commands are performed.
+Prepare opens/closes the grippers only after separate operator Enter confirmations.
 """
 import argparse
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 import hashlib
 import gzip
@@ -17,7 +18,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
-from .snowbot_waist_test import GROUPS, NAMES, checked_state, checked_pdo, checked_pdo_source
+from .snowbot_waist_test import GROUPS, NAMES, checked_state
 
 
 def kinematic_digest(path):
@@ -44,6 +45,9 @@ class Replay:
     backend_ready: bool = False
     reference_margin_rad: float = 0.
     empty_prepare: bool = False
+    measured_start: tuple = ()
+    start_reference_source: str = 'measured'
+    reverse_prepare: bool = False
 
     @property
     def duration(self):
@@ -61,6 +65,12 @@ class Replay:
         return waist[:2]+arms[2:]
 
     def validate_profile(self, profile):
+        if self.reverse_prepare:
+            # Apply the same hard limits and margin rule in the original direction.
+            replace(self, times=tuple(self.times[-1]-t for t in reversed(self.times)),
+                    points=tuple(reversed(self.points)), empty_prepare=True,
+                    reverse_prepare=False).validate_profile(profile)
+            return
         if tuple(n for g in GROUPS for n in profile.groups.get(g, ())) != self.names:
             raise ValueError('REPLAY_GROUP_LAYOUT')
         for row in self.points:
@@ -177,7 +187,7 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     """Select a route from current measurements over the cached certified graph."""
     import heapq
     manifest, edges, plans = replay_graph(path, speed, waist_lead_s)
-    if not 0 < tolerance <= .0175 or not set(NAMES) <= set(measured):
+    if not set(NAMES) <= set(measured):
         raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
     if any(not math.isfinite(measured[n]) for n in NAMES):
         raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
@@ -219,25 +229,58 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
 
 
 
-def plan_prepare(path, robot, measured, speed=1.):
+def load_prepare_return(path, prepare_log, speed=1.):
+    """One-time empty-hand reversal of the old zero-to-Prepare target stream."""
+    home = load_replay(path, 'SideScoop', speed, waist_lead_s=0.)
+    rows = [json.loads(line) for line in Path(prepare_log).read_text().splitlines()]
+    metadata = next(r for r in rows if r['kind'] == 'plan')
+    targets = [r for r in rows if r['kind'] == 'target']
+    if (metadata['action'] != 'Prepare' or metadata['tool_present'] or not targets or
+            targets[-1]['source_stamp']-targets[0]['source_stamp'] < metadata['duration_s']-1e-6):
+        raise ValueError('RETURN_ZERO_REQUIRES_COMPLETE_PREPARE')
+    end = targets[-1]['source_stamp']
+    return replace(home, times=tuple(end-r['source_stamp'] for r in reversed(targets)),
+                   points=tuple(tuple(r['q']) for r in reversed(targets)), reverse_prepare=True)
+
+
+def plan_prepare(path, robot, measured, speed=1., *, reference=None):
     """Empty-hand entry from measured joints; validate before acquiring a lease."""
     import numpy as np
     from bindu_execution.interpolation import Curve, State
     from bindu_kinematics.tool_geometry import make_collision_checker
+    from bindu_kinematics.bimanual_worker import prepare_limit_reference
     from snowbot_hardware.parameters import load_mode_config
 
     manifest = load_library(Path(path).resolve())
     home = load_replay(path, manifest['home_node'].split(':')[0], speed, waist_lead_s=0.)
     profile = robot.profile
+    tool = json.loads(robot.tool_config.read_text())
+    tolerance = float(tool.get('measured_joint_limit_tolerance_rad', 0.))
+    if not math.isfinite(tolerance) or not 0 <= tolerance <= math.pi:
+        raise ValueError('BIMANUAL_MEASURED_LIMIT_TOLERANCE_CONFIG')
     context = tuple(n for group in profile.groups.values() for n in group)
     for name in context:
         if name not in measured or not math.isfinite(measured[name]):
             raise ValueError('PREPARE_MEASUREMENT_REQUIRED:'+name)
-        if not profile.limits[name][0] <= measured[name] <= profile.limits[name][1]:
+        if not profile.limits[name][0]-tolerance <= measured[name] <= profile.limits[name][1]+tolerance:
             raise ValueError('PREPARE_START_JOINT_LIMIT:'+name)
-    before = tuple(measured[n] for n in NAMES)
     after = tuple(manifest['nodes'][manifest['home_node']])
     config = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')
+    recovering = any(not profile.limits[n][0] <= measured[n] <= profile.limits[n][1] for n in NAMES)
+    start = measured
+    reference_source = 'measured'
+    if recovering:
+        if all(max(profile.limits[n][0]-measured[n], measured[n]-profile.limits[n][1], 0.)
+               <= profile.feedback_tolerances['joint_position'] for n in NAMES):
+            start = {n: min(profile.limits[n][1], max(profile.limits[n][0], measured[n])) for n in NAMES}
+            reference_source = 'boundary_roundoff'
+        else:
+            if reference is None:
+                raise ValueError('PREPARE_HELD_REFERENCE_REQUIRED')
+            start = prepare_limit_reference(profile, NAMES, measured, reference, dict(zip(NAMES, after)),
+                                            tolerance, float(config['prepare_position_tolerance_rad']))
+            reference_source = 'confirmed_pause'
+    before = tuple(start[n] for n in NAMES)
     duration = float(config['prepare_duration'])
     for name, a, b in zip(NAMES, before, after):
         shared = name.startswith('body_')
@@ -255,46 +298,45 @@ def plan_prepare(path, robot, measured, speed=1.):
     times = tuple(k*.02 for k in range(round(duration/.02)+1))
     plan = Replay(times, tuple(curve.sample(t).q for t in times), NAMES,
                   home.tool_id, home.kinematics, speed, 0., home.backend_ready,
-                  home.reference_margin_rad, empty_prepare=True)
+                  home.reference_margin_rad, empty_prepare=True,
+                  measured_start=tuple(measured[n] for n in NAMES) if recovering else (),
+                  start_reference_source=reference_source)
     plan.validate_profile(profile)
-    tool = json.loads(robot.tool_config.read_text())
     recipe = dict(tool['demo'])
     recipe['left_grip_in_tool_m'] = (np.linalg.inv(np.array(tool['left_to_tool']).reshape(4,4)) @
         np.r_[recipe['grip_offset_m'], 1.])[:3].tolist()
     checker = make_collision_checker(robot.display_urdf, recipe, conservative_convex=True,
                                      tool_present=False, validation_only=True)
     # A rest-to-rest quintic shares one scalar progress across every joint.
-    count = max(1, math.ceil(max(abs(a-b) for a,b in zip(before,after))/.005))
     samples = []
-    for k in range(count+1):
-        u = k/count
-        q = dict(measured)
-        q.update({n: (1-u)*a+u*b for n,a,b in zip(NAMES,before,after)})
-        samples.append(dict(t=u, q=q, tool=np.eye(4)))
+    waypoints = ([plan.measured_start] if recovering else [])+[before, after]
+    for leg, (begin, end) in enumerate(zip(waypoints, waypoints[1:])):
+        count = max(1, math.ceil(max(abs(a-b) for a,b in zip(begin,end))/.005))
+        for k in range(count+1):
+            if samples and k == 0:
+                continue
+            u = k/count
+            q = dict(measured)
+            q.update({n: (1-u)*a+u*b for n,a,b in zip(NAMES,begin,end)})
+            samples.append(dict(t=leg+u, q=q, tool=np.eye(4)))
     checker(samples)
     return plan
 
 
-def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5.,
-               velocity_tolerance=.005, settle_time=.2, command_ttl=.25):
+
+
+
+def run_replay(plan, port, *, settle_timeout=5., velocity_tolerance=.005, settle_time=.2, command_ttl=.25):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
-    if not 0 < start_tolerance <= .0175 or not 0 < follow_tolerance <= .15:
-        raise ValueError('REPLAY_TOLERANCE')
-    measured, velocity = port.check(False)
-    if (max(abs(measured[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance or
-            max(abs(velocity[n]) for n in plan.names) > velocity_tolerance):
-        raise RuntimeError('REPLAY_START_POSE_MISMATCH: prepare the exported start pose')
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
         attempted = True
         port.acquire()
         acquired = True
-        initial, velocity = port.check(True)
-        if max(abs(initial[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance:
-            raise RuntimeError('REPLAY_START_MOVED')
         start = due = renewed = port.steady()
         ros_start = port.ros()
         rest_since = None
+        measured_at_goal = False
         while True:
             port.wait_until(due)
             now = port.steady()
@@ -305,8 +347,6 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             q, v = port.check(True)
             elapsed = due-start
             goal = plan.sample(elapsed)
-            if max(abs(q[n]-x) for n, x in zip(plan.names, goal)) > follow_tolerance:
-                raise RuntimeError('REPLAY_TRACKING_ERROR')
             if now-renewed >= .5:
                 port.renew()
                 renewed = port.steady()
@@ -316,8 +356,11 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             port.send(goal, ros_start+elapsed)
             sent += 1
             if elapsed >= plan.duration:
-                resting = (all(abs(q[n]-x) <= port.arrival_tolerance(n)
-                               for n, x in zip(plan.names, plan.points[-1])) and
+                arrival = q
+                measured_at_goal = all(abs(q[n]-x) <= port.arrival_tolerance(n)
+                                       for n,x in zip(plan.names,plan.points[-1]))
+                resting = (arrival is not None and all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
+                               for n,x in zip(plan.names,plan.points[-1])) and
                            all(abs(v[n]) <= velocity_tolerance for n in plan.names))
                 rest_since = now if resting and rest_since is None else rest_since if resting else None
                 if rest_since is not None and now-rest_since >= settle_time:
@@ -334,7 +377,8 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
                 stopped = port.release_and_confirm_stop() is True
             except (Exception, KeyboardInterrupt) as exc:
                 failure = (failure+'; ' if failure else '')+'STOP_UNCONFIRMED:'+str(exc)
-    result = dict(targets_sent=sent, measured_arrival_confirmed=arrived,
+    result = dict(targets_sent=sent, measured_arrival_confirmed=arrived and measured_at_goal,
+                  measured_end_error_rad={n:q[n]-x for n,x in zip(plan.names,plan.points[-1])} if arrived else None,
                   stop_confirmed=stopped, completed=arrived and failure is None,
                   error=failure, driver_started=False, snow_removal_verified=False)
     if failure:
@@ -342,13 +386,23 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
     return result
 
 
+def confirm_prepare_grippers(port, operation):
+    message = ('Prepare 已到位；按 Enter 打开双爪以装夹雪铲：' if operation == 'open' else
+               '装夹雪铲后按 Enter 关闭双爪：')
+    if input(message).strip():
+        raise RuntimeError('PREPARE_OPERATOR_CANCELED')
+    port.grippers(operation)
+
+
 def execute(args, plan):
     # Deliberately absent from offline preview and unit tests.
     import rclpy
     from rclpy.signals import SignalHandlerOptions
     from rclpy.qos import qos_profile_sensor_data
-    from bindu_interfaces.msg import ExecutionState, MotionCommand, RuntimeEvent
-    from bindu_interfaces.srv import Lease, SubmitMotion
+    from bindu_interfaces.msg import ExecutionState, MotionCommand, RuntimeEvent, GripperState
+    from bindu_interfaces.srv import Lease, SubmitMotion, GripperControl
+    from std_srvs.srv import Trigger
+    from bindu_runtime.stop_evidence import sampled_nominal_reference
     from snowbot_ctl_msgs.msg import PositionObservation
     from bindu_runtime.robot_setup import RobotSetup
     from bindu_runtime.common import stamp
@@ -363,12 +417,16 @@ def execute(args, plan):
     settle_time = settings['execution']['stop_confirmation_window_s']
     settle_timeout = settings['pico']['motion_completion_grace_s']
     prepare_tolerance = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')['prepare_position_tolerance_rad']
-    configured_margin = json.loads(robot.tool_config.read_text()).get('posture_reference_margin_rad', 0.)
+    tool_config = json.loads(robot.tool_config.read_text())
+    from snowbot_hardware.parameters import load_mode_config
+    gripper_config = load_mode_config(robot.tool_config.with_name('grippers.json'), 'real')
+    configured_margin = tool_config.get('posture_reference_margin_rad', 0.)
     if abs(configured_margin-plan.reference_margin_rad) > 1e-10:
         raise ValueError('REPLAY_REFERENCE_MARGIN_CONFIG_MISMATCH')
     if kinematic_digest(robot.urdf) != plan.kinematics:
         raise ValueError('REPLAY_KINEMATICS_MISMATCH')
-    if args.action != 'Prepare' and args.tool_id != plan.tool_id:
+    empty_handed = args.action in ('Prepare', 'ReturnZero')
+    if not empty_handed and args.tool_id != plan.tool_id:
         raise ValueError('REPLAY_TOOL_ID_MISMATCH')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     log = args.output.open('x')
@@ -398,6 +456,11 @@ def execute(args, plan):
     node.create_subscription(RuntimeEvent, ns+'/events', event, 100)
     leases = node.create_client(Lease, ns+'/execution/lease')
     submit = node.create_client(SubmitMotion, ns+'/execution/submit')
+    holds = node.create_client(Trigger, ns+'/execution/held_reference')
+    gripper_leases = node.create_client(Lease, ns+'/gripper/lease')
+    gripper_control = node.create_client(GripperControl, ns+'/gripper/control')
+    node.create_subscription(GripperState, ns+'/gripper/state',
+        lambda msg: latest.update({'gripper_'+msg.side: (msg, time.monotonic())}), 10)
 
     def wait(predicate, timeout):
         end = time.monotonic()+timeout
@@ -416,18 +479,67 @@ def execute(args, plan):
             raise RuntimeError(reply.code)
         return reply
 
-    prepare_context = None
-
     class Port:
         lease = None
         boot = None
-        sample = None
-        progress = None
         instance = None
         @staticmethod
         def steady(): return time.monotonic()
         @staticmethod
         def ros(): return node.get_clock().now().nanoseconds*1e-9
+
+        def grippers(self, operation):
+            # Reuse the adapter's configured endpoints, leases and measured completion.
+            confirmed_at = self.ros()
+            wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= confirmed_at and
+                 latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= confirmed_at, 1.)
+            self.check(False)
+            lease = call(gripper_leases, Lease.Request(operation='acquire', owner=task,
+                         resources=['left_tool_axis', 'right_tool_axis']))
+            sequence = 0
+            def command(operation, side=''):
+                nonlocal sequence
+                sequence += 1
+                call(gripper_control, GripperControl.Request(operation=operation, side=side,
+                    lease_id=lease.lease_id, epoch=lease.epoch, sequence=sequence,
+                    stamp=stamp(self.ros()), valid_for=gripper_config['command_ttl'], load_state='unknown'))
+            try:
+                command('authorize_direct')
+                for side in ('left', 'right'):
+                    command(operation, side)
+                renewed = self.steady()
+                end = renewed+gripper_config['motion_timeout']+gripper_config['stop_timeout']
+                while True:
+                    self.check(False)
+                    if all('gripper_'+side in latest for side in ('left', 'right')):
+                        states = [latest['gripper_'+side][0] for side in ('left', 'right')]
+                        current = all(m.epoch == lease.epoch and m.control_sequence == sequence for m in states)
+                        if current and any(m.state == 'FAILED' or
+                                m.state == 'CANCELED' and m.code != 'MANUAL_ENDPOINT_STOPPED' for m in states):
+                            raise RuntimeError('REPLAY_GRIPPER_FAILED:'+','.join(m.code for m in states))
+                        if current and all(m.state == 'SUCCEEDED' or
+                                m.state == 'CANCELED' and m.code == 'MANUAL_ENDPOINT_STOPPED' for m in states):
+                            record('gripper_stopped', operation=operation,
+                                   codes={m.side:m.code for m in states})
+                            break
+                    if self.steady() >= end:
+                        raise RuntimeError('REPLAY_GRIPPER_'+operation.upper()+'_TIMEOUT')
+                    if self.steady()-renewed >= .5:
+                        call(gripper_leases, Lease.Request(operation='renew', lease_id=lease.lease_id, epoch=lease.epoch))
+                        renewed = self.steady()
+                    rclpy.spin_once(node, timeout_sec=.005)
+            finally:
+                released = call(gripper_leases, Lease.Request(operation='release', lease_id=lease.lease_id, epoch=lease.epoch))
+                record('gripper_release', operation=operation, epoch=released.epoch)
+                wait(lambda: all('gripper_'+side in latest and
+                     latest['gripper_'+side][0].epoch == released.epoch and
+                     not latest['gripper_'+side][0].lease_active and
+                     latest['gripper_'+side][0].state not in ('MOVING', 'STOPPING', 'FAILED')
+                     for side in ('left', 'right')), gripper_config['stop_timeout'])
+            q, v = self.check(False)
+            record('grippers', operation=operation, measured_q_rad={n:q[n] for n in ('arm_l_joint_8', 'arm_r_joint_8')})
+            if operation == 'close':
+                print('双爪关爪已停止，请现场确认雪铲已夹牢。')
         @staticmethod
         def wait_until(due): wait(lambda: time.monotonic() >= due, max(.1, due-time.monotonic()+.1))
         def check(self, owned):
@@ -437,26 +549,50 @@ def execute(args, plan):
             now, steady = self.ros(), self.steady()
             q, v = checked_state(s, now, received, steady, robot.profile.digest,
                                  owned=owned, epoch=self.lease.epoch if self.lease else 0,
-                                 stationary=False)
+                                 stationary=False, state_max_age=.2, feedback_max_age=.3)
             if self.instance is None: self.instance = s.instance_id
             if not self.instance or s.instance_id != self.instance:
                 raise RuntimeError('REPLAY_EXECUTOR_CHANGED')
-            p, received = latest['pdo']
+            p, _ = latest['pdo']
             if self.boot is None: self.boot = p.boot_id
             if not self.boot: raise RuntimeError('REPLAY_BOOT_MISSING')
-            checked_pdo(p, now, received, steady, self.boot)
-            checked_pdo_source(node.get_publishers_info_by_topic(topic+'/bindu/position/observation'))
-            if not p.session_selected or p.reference_mode != 2:
-                raise RuntimeError('REPLAY_REQUIRES_SESSION_V3_TARGET_STREAM')
-            if self.sample is not None and p.pdo_sample < self.sample:
-                raise RuntimeError('REPLAY_PDO_REVERSED')
-            if p.pdo_sample != self.sample: self.sample, self.progress = p.pdo_sample, steady
-            if steady-self.progress > .05 or latest.get('error'):
-                raise RuntimeError(latest.get('error', 'REPLAY_PDO_NOT_ADVANCING'))
-            if prepare_context is not None and any(
-                    n not in q or not math.isfinite(q[n]) or abs(q[n]-x)>.001 for n,x in prepare_context.items()):
-                raise RuntimeError('PREPARE_CONTEXT_CHANGED')
+            if p.execution_mode != 0:
+                raise RuntimeError('REPLAY_EXECUTION_MODE_MISMATCH:'+args.execution_mode)
+            if latest.get('error'):
+                raise RuntimeError(latest['error'])
             return q, v
+        def nominal_reference(self):
+            state = latest['state'][0]
+            if self.lease and getattr(self, 'commanded', False):
+                sample = sampled_nominal_reference(state, NAMES, self.lease.epoch,
+                    self.ros(), tool_config['feedback_max_age'],
+                    wait_until=getattr(self,'reference_ready_by',0.), steady_now=self.steady())
+                if sample is None: return None
+                self.reference_ready_by = 0.
+                return dict(zip(NAMES, sample[0]))
+            if not holds.service_is_ready():
+                raise RuntimeError('REPLAY_HELD_REFERENCE_UNAVAILABLE')
+            future = holds.call_async(Trigger.Request())
+            wait(future.done, .25)
+            reply = future.result()
+            if not reply.success: raise RuntimeError(reply.message)
+            data = json.loads(reply.message)
+            state = latest['state'][0]
+            expected = self.lease.lease_id if self.lease else ''
+            epoch = self.lease.epoch if self.lease else state.lease_epoch
+            if (data['instance_id'] != self.instance or data['profile_hash'] != robot.profile.digest or
+                    data['lease_id'] != expected or data['epoch'] != epoch or data['revision'] != state.revision or
+                    data['boot_id'] != self.boot or not 0 <= self.ros()-data['stamp'] <= tool_config['feedback_max_age'] or
+                    set(data['positions']) != set(NAMES) or
+                    any(not math.isfinite(q) or not robot.profile.limits[n][0]<=q<=robot.profile.limits[n][1]
+                        for n,q in data['positions'].items())):
+                raise RuntimeError('REPLAY_HELD_REFERENCE_IDENTITY')
+            identity = (data['boot_id'], data['session'], data['sequence'], data['positions'])
+            if getattr(self,'held_identity',None) is not None and identity != self.held_identity:
+                raise RuntimeError('REPLAY_HELD_REFERENCE_CHANGED')
+            self.held_identity = identity
+            return data['positions']
+
         def acquire(self):
             self.lease = call(leases, Lease.Request(operation='acquire', owner=task, resources=list(GROUPS)))
             if self.lease.profile_hash != robot.profile.digest:
@@ -474,6 +610,9 @@ def execute(args, plan):
                 positions=list(goal), stamp=stamp(source), valid_for=.25)
             commands.add(msg.command_id)
             call(submit, SubmitMotion.Request(command=msg))
+            if not getattr(self,'commanded',False):
+                self.reference_ready_by=self.steady()+tool_config['feedback_max_age']
+            self.commanded = True
             record('target', source_stamp=source, q=list(goal))
         @staticmethod
         def arrival_tolerance(name):
@@ -487,51 +626,42 @@ def execute(args, plan):
             wait(lambda: latest['state'][1] > released and
                  not latest['state'][0].lease_active and latest['state'][0].state != 'STOPPING',
                  robot.profile.stop_timeout+.2)
-            rest_since = None
-            end = self.steady()+.5
-            while self.steady() < end:
-                q, v = self.check(False)
-                now = self.steady()
-                resting = all(abs(v[n]) <= velocity_tolerance for n in NAMES)
-                rest_since = now if resting and rest_since is None else rest_since if resting else None
-                if rest_since is not None and now-rest_since >= .1:
-                    self.lease = None
-                    return True
-                rclpy.spin_once(node, timeout_sec=.005)
-            raise RuntimeError('REPLAY_MEASURED_STOP_NOT_CONFIRMED')
+            self.check(False)
+            self.lease = None
+            return True
 
     manifest = load_library(args.library.resolve())
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
-        rest_since = None
-        end = time.monotonic()+settle_timeout
-        while True:
-            q, v = port.check(False)
-            now = time.monotonic()
-            resting = all(abs(v[n]) <= velocity_tolerance for n in NAMES)
-            rest_since = now if resting and rest_since is None else rest_since if resting else None
-            if rest_since is not None and now-rest_since >= settle_time: break
-            if now >= end: raise RuntimeError('REPLAY_START_NOT_SETTLED')
-            rclpy.spin_once(node, timeout_sec=.005)
+        q, v = port.check(False)
         if args.action == 'Prepare':
             initial = dict(q)
-            plan = plan_prepare(args.library, robot, initial, args.speed)
-            prepare_context = {n:x for n,x in initial.items() if n not in NAMES}
-            checked_at = time.monotonic()
-            wait(lambda: latest['state'][1]>checked_at and latest['pdo'][1]>checked_at, 1.)
-            current, _ = port.check(False)
-            if any(n not in current or abs(current[n]-x)>.001 for n,x in initial.items()):
-                raise RuntimeError('PREPARE_START_CHANGED_AFTER_VALIDATION')
-        elif manifest.get('transition_validation_passed'):
-            plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
-            plan.validate_profile(robot.profile)
-        record('plan', tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
+            record('prepare_start', measured_q_rad=initial)
+            reference = port.nominal_reference() if any(
+                max(robot.profile.limits[n][0]-initial[n], initial[n]-robot.profile.limits[n][1], 0.)
+                > robot.profile.feedback_tolerances['joint_position'] for n in NAMES) else None
+            plan = plan_prepare(args.library, robot, initial, args.speed, reference=reference)
+            record('prepare_reference', source=plan.start_reference_source,
+                   reference_q_rad=dict(zip(NAMES, plan.points[0])))
+            # Validation blocks callbacks; receipt time alone can admit queued old samples.
+            checked_at = port.ros()
+            wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= checked_at and
+                 latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= checked_at, 1.)
+            port.check(False)
+        elif args.action != 'ReturnZero':
+            if manifest.get('transition_validation_passed'):
+                plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
+                plan.validate_profile(robot.profile)
+        record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
-        result = run_replay(plan, port, start_tolerance=min(args.start_tolerance,.001) if args.action=='Prepare' else args.start_tolerance,
-                            follow_tolerance=args.follow_tolerance, velocity_tolerance=velocity_tolerance,
-                            settle_time=settle_time, settle_timeout=settle_timeout)
+        result = run_replay(plan, port,
+                            velocity_tolerance=velocity_tolerance, settle_time=settle_time,
+                            settle_timeout=settle_timeout)
+        if args.action == 'Prepare':
+            confirm_prepare_grippers(port, 'open')
+            confirm_prepare_grippers(port, 'close')
         record('result', **result)
         print(json.dumps(result))
     except (Exception, KeyboardInterrupt) as exc:
@@ -547,48 +677,89 @@ def execute(args, plan):
         log.close()
 
 
+def replay_action(args, parser):
+    manifest = load_library(args.library.resolve())
+    if args.action == 'Prepare':
+        plan = load_replay(args.library, manifest['home_node'].split(':')[0], args.speed, waist_lead_s=0.)
+        if not args.execute:
+            print(json.dumps(dict(action='Prepare', execution_mode=args.execution_mode, empty_handed=True,
+                start_source='fresh measured joints on execute; full path checked before lease',
+                goal_q_rad=dict(zip(plan.names,manifest['nodes'][manifest['home_node']])),
+                posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
+            return
+    elif args.action == 'ReturnZero':
+        plan = load_prepare_return(args.library, args.prepare_log, args.speed)
+    elif manifest.get('transition_validation_passed'):
+        start = args.from_node or manifest['home_node']
+        plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])),
+                                 args.speed, args.waist_lead, args.start_tolerance)
+    else:
+        plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
+    if args.execute:
+        if not args.output or (args.action not in ('Prepare', 'ReturnZero') and not args.tool_id):
+            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare/ReturnZero')
+        if not plan.backend_ready:
+            parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
+        execute(args, plan)
+    else:
+        print(json.dumps(dict(execution_mode=args.execution_mode, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
+                              waist_lead_s=plan.waist_lead_s, posture_reference_margin_rad=plan.reference_margin_rad,
+                              start_q_rad=dict(zip(plan.names, plan.points[0])),
+                              end_q_rad=dict(zip(plan.names, plan.points[-1])),
+                              tool_id=plan.tool_id, hardware_commands=False)))
+
+
+def interactive_replay(args, parser):
+    actions = {'1': 'Push', '2': 'SideScoop', '3': 'Flip'}
+    while True:
+        print('\n1 前推    2 侧前铲    3 翻倒    q 退出')
+        try:
+            choice = input('输入编号并按 Enter 执行：').strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice.lower() == 'q':
+            return
+        if choice not in actions:
+            print('请输入 1、2、3 或 q。')
+            continue
+        selected = argparse.Namespace(**vars(args))
+        selected.action = actions[choice]
+        selected.output = args.output_dir/(time.strftime('%Y%m%d-%H%M%S')+'-'+
+                                          selected.action+'-'+uuid.uuid4().hex[:8]+'.jsonl')
+        replay_action(selected, parser)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library', type=Path, required=True)
-    parser.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare'), required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare', 'ReturnZero'))
+    parser.add_argument('--prepare-log', type=Path, help='ReturnZero: old empty-hand Prepare JSONL')
+    selection.add_argument('--interactive', action='store_true', help='Select 1=Push, 2=SideScoop, 3=Flip; Enter executes')
     parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--execution-mode', choices=('position',), default='position',
+                        help='Must match the already running backend; never switches its mode')
     parser.add_argument('--robot-config', type=Path)
     parser.add_argument('--tool-id')
     parser.add_argument('--namespace', default='bindu_snowbot')
     parser.add_argument('--vendor-namespace', default='')
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--start-tolerance', type=float, default=.01)
-    parser.add_argument('--follow-tolerance', type=float, default=.10)
+    parser.add_argument('--output-dir', type=Path, help='Interactive mode: one new JSONL log per selected action')
+    parser.add_argument('--start-tolerance', type=float, default=math.radians(2),
+                        help='Start-node matching tolerance in rad; default/max 2 deg')
     args = parser.parse_args(argv)
-    manifest = load_library(args.library.resolve())
-    if args.action == 'Prepare':
-        plan = load_replay(args.library, manifest['home_node'].split(':')[0], args.speed, waist_lead_s=0.)
-        if not args.execute:
-            print(json.dumps(dict(action='Prepare', empty_handed=True,
-                start_source='fresh measured joints on execute; full path checked before lease',
-                goal_q_rad=dict(zip(plan.names,manifest['nodes'][manifest['home_node']])),
-                posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
-            return
-    elif manifest.get('transition_validation_passed'):
-        start = args.from_node or manifest['home_node']
-        plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])), args.speed, args.waist_lead)
-    else:
-        plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
-    if args.execute:
-        if not args.output or (args.action != 'Prepare' and not args.tool_id):
-            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare')
-        if not plan.backend_ready:
-            parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
-        execute(args, plan)
-    else:
-        print(json.dumps(dict(route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
-                              waist_lead_s=plan.waist_lead_s, posture_reference_margin_rad=plan.reference_margin_rad,
-                              start_q_rad=dict(zip(plan.names, plan.points[0])),
-                              end_q_rad=dict(zip(plan.names, plan.points[-1])),
-                              tool_id=plan.tool_id, hardware_commands=False)))
+    if args.action == 'ReturnZero' and not args.prepare_log:
+        parser.error('ReturnZero requires --prepare-log')
+    if args.interactive:
+        if not args.execute or not args.tool_id or not args.output_dir or args.output:
+            parser.error('--interactive requires --execute --tool-id --output-dir; omit --output')
+        return interactive_replay(args, parser)
+    if args.output_dir:
+        parser.error('--output-dir requires --interactive')
+    return replay_action(args, parser)
 
 
 if __name__ == '__main__':

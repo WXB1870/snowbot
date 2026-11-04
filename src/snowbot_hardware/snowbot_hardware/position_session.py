@@ -442,11 +442,19 @@ class PositionSessionDevices:
                 return  # Discovery/fresh measured feedback may not yet be ready.
             self.startup_hold_state = 'takeover'
             names = tuple(n for group in ('waist', 'left_arm', 'right_arm') for n in GROUPS[group])
-            motion = Motion('startup_hold_'+lease, lease, epoch, self.io.profile.digest,
-                'startup_hold', '', 'joint_target', '', now, parameters_for(self,'execution')['startup_hold_ttl_s'], names=names,
-                positions=tuple(engine.feedback.positions[n] for n in names),
-                schema_version=2, resource_groups=('waist', 'left_arm', 'right_arm'), runtime_mode='real')
             try:
+                measured = tuple(engine.feedback.positions[n] for n in names)
+                tolerance = self.io.profile.feedback_tolerances['joint_position']
+                positions = []
+                for name, q in zip(names, measured):
+                    lo, hi = self.io.profile.limits[name]
+                    if not math.isfinite(q) or not lo-tolerance <= q <= hi+tolerance:
+                        raise Rejected('STARTUP_HOLD_JOINT_LIMIT:'+name)
+                    positions.append(min(hi, max(lo, q)))
+                motion = Motion('startup_hold_'+lease, lease, epoch, self.io.profile.digest,
+                    'startup_hold', '', 'joint_target', '', now, parameters_for(self,'execution')['startup_hold_ttl_s'], names=names,
+                    positions=tuple(positions),
+                    schema_version=2, resource_groups=('waist', 'left_arm', 'right_arm'), runtime_mode='real')
                 engine.submit(motion, now)
                 engine.tick(now)
             except (Rejected, RuntimeError) as exc:
@@ -454,7 +462,8 @@ class PositionSessionDevices:
                 self.startup_hold_state = 'failed'
                 self.node.event('STARTUP_HOLD_FAILED', str(exc))
                 return
-            self.node.event('STARTUP_HOLD_REQUESTED', 'MEASURED_POSITION', command_id=motion.command_id)
+            self.node.event('STARTUP_HOLD_REQUESTED', 'BOUNDARY_REFERENCE' if tuple(positions)!=measured else 'MEASURED_POSITION',
+                            command_id=motion.command_id)
         elif state == 'takeover':
             if engine.stopping or self.target_fault or engine.active is None:
                 self.startup_hold_state = 'failed'
@@ -574,7 +583,7 @@ class PositionSessionDevices:
         if self.health.reference_mode:
             mapping = {k: metadata[k] for k in ('session', 'sequence', 'operation', 'source_stamp_ns', 'expires_at_ns')}
             mapping.update(lease_id=msg.meta.lease_id, epoch=msg.meta.epoch,
-                           execution_mode='position', reference_mode=2,
+                           execution_mode=self.health.execution_mode, reference_mode=2,
                            target_recipe_version=msg.trajectory.version,
                            rigid_reference=msg.trajectory.version==3)
             self.node.event('TARGET_SENT', 'SNOWBOT_TARGET:'+json.dumps(mapping, separators=(',', ':')),
