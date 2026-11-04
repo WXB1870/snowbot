@@ -403,6 +403,9 @@ class DeploymentEntryTests(unittest.TestCase):
             menu=replay_commands('menu',cfg,runs,mode,'run')
             self.assertEqual(len(menu),1)
             self.assertNotIn('Prepare',menu[0])
+            prepare=replay_commands('prepare',cfg,runs,mode,'run')
+            for command in [*commands,*menu,*prepare]:
+                self.assertEqual(float(command[command.index('--speed')+1]),1/3)
 
     def test_vr_replay_share_upper_lock_and_release_it(self):
         from unittest.mock import patch
