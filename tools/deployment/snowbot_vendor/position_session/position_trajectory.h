@@ -57,7 +57,7 @@ template<class Packet> const char* inspect_servo_command(const Packet& packet,co
  result.source=meta(packet.meta);result.frame=packet.frame_sequence;result.target_stream=packet.meta.reference_mode==2;
  result.feedback_boot=packet.meta.feedback_boot_id;result.feedback_sample=packet.meta.feedback_sample;
  result.middle_instance=packet.meta.middle_instance_id;result.identity.epoch=packet.meta.epoch;
- if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&(packet.trajectory.version==2||packet.trajectory.version==3)))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
+ if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&(packet.trajectory.version==2||packet.trajectory.version==3||packet.trajectory.version==4||packet.trajectory.version==5)))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
  if(!result.identity.command.assign(packet.meta.source_command_id)||!result.identity.lease.assign(packet.meta.lease_id)||
     !result.identity.profile.assign(packet.meta.profile_hash)||!result.identity.command.size||!result.identity.lease.size||!result.identity.profile.size)return "source_identity_layout";
  for(unsigned i=0;i<7;++i){
@@ -108,7 +108,7 @@ struct TargetTuning {
 };
 class TrajectoryQueue {
  using Segment=bindu::execution::PreparedSegment;
- struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false,inner_reference=false;};
+ struct Entry {TargetTrend trend{};std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,replay_id=0,admission=0;int64_t effective=0,start=0,deadline=0;bool target_stream=false,inner_reference=false,replay=false;};
  std::array<Entry,8> entries_{};unsigned count_=0;const Entry* selected_=nullptr;int64_t clock_offset_=0;uint64_t version_=0;
  static_assert(std::atomic<const Segment*>::is_always_lock_free,"lock-free retirement required");
  std::array<std::atomic<const Segment*>,8> retired_{};
@@ -154,7 +154,7 @@ public:
  TargetTuning tuning()const noexcept{return tuning_;}
  struct Prepared {
   PredictionTrace prediction{};TargetTrend trend{};
-  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false,inner_reference=false;
+  std::unique_ptr<const Segment> segment;Meta source{};uint64_t id=0,admission=0;int64_t effective=0;uint64_t version=0;bool target_stream=false,held_takeover=false,inner_reference=false,replay=false,heartbeat=false;
   std::array<double,joint_count> velocity{},acceleration{},jerk{},q{},v{},a{};
  };
  std::array<double,joint_count> q{},v{},a{},j{};
@@ -164,17 +164,19 @@ public:
  template<class Wire> static std::unique_ptr<Prepared> prepare(const Wire& wire,const Meta& source,
    double max_v=.25,double max_a=.5,double max_j=162.) {
   using namespace bindu::execution;
-  require(wire.version==1 && wire.segment_id==source.sequence,"trajectory_version_or_identity");
+  require((wire.version==1||wire.version==4||wire.version==5) && wire.segment_id==source.sequence,"trajectory_version_or_identity");
   const auto pieces=wire.duration.size();
-  require(pieces>0 && pieces<=64 && wire.piece_start.size()==pieces && wire.source_duration.size()==pieces &&
+  const unsigned maximum=wire.version>=4?256:64;
+  require(pieces>0 && pieces<=maximum && wire.piece_start.size()==pieces && wire.source_duration.size()==pieces &&
           wire.source_elapsed.size()==pieces && wire.control_count.size()==pieces*joint_count &&
-          wire.controls.size()<=64*joint_count*6,"trajectory_layout");
+          wire.controls.size()<=maximum*joint_count*6,"trajectory_layout");
   auto result=std::make_unique<Prepared>();JointLimits limits;limits.reserve(joint_count);
   for(unsigned i=0;i<joint_count;++i){
    const double speed=wire.max_velocity[i],accel=wire.max_acceleration[i],jerk=wire.max_jerk[i];
    require(std::isfinite(speed)&&std::isfinite(accel)&&std::isfinite(jerk)&&speed>0&&accel>0&&jerk>0&&
            speed<=max_v&&accel<=max_a&&jerk<=max_j,"trajectory_dynamic_limits");
-   limits.push_back({lower[i],upper[i],speed,accel,jerk});
+   const double margin=wire.version==4&&i<14?SNOWBOT_ARM_REFERENCE_MARGIN:0.;
+   limits.push_back({lower[i]+margin,upper[i]-margin,speed,accel,jerk});
    result->velocity[i]=speed;result->acceleration[i]=accel;result->jerk[i]=jerk;
   }
   std::vector<CurveDescriptor> description;description.reserve(pieces);size_t offset=0;
@@ -192,6 +194,22 @@ public:
   const auto first=next.sample(next.start()),last=next.sample(next.end());
   for(unsigned i=0;i<joint_count;++i){require(std::abs(last.v[i])<1e-8&&std::abs(last.a[i])<1e-8,"trajectory_endpoint_not_rest");result->q[i]=first.q[i];result->v[i]=first.v[i];result->a[i]=first.a[i];}
   result->source=source;result->id=wire.segment_id;result->effective=wire.effective_at_ns;return result;
+ }
+ template<class Wire> static std::unique_ptr<Prepared> prepare_replay(const Wire& wire,const Meta& source,
+   const TargetSnapshot& snapshot,double max_v,double max_a,double max_j){
+  require((wire.version==4||wire.version==5)&&source.operation!=2,"replay_version_or_operation");
+  if(source.operation==1){
+   auto result=prepare(wire,source,max_v,max_a,max_j);
+   result->replay=true;result->inner_reference=wire.version==4;result->held_takeover=snapshot.held_takeover;
+   if(result->inner_reference)result->trend.grasp=result->q;
+   return result;
+  }
+  require(wire.duration.empty()&&wire.piece_start.empty()&&wire.source_duration.empty()&&
+          wire.source_elapsed.empty()&&wire.control_count.empty()&&wire.controls.empty(),"replay_heartbeat_payload");
+  auto result=std::make_unique<Prepared>();result->heartbeat=true;result->replay=true;
+  result->source=source;result->id=wire.segment_id;result->effective=wire.effective_at_ns;
+  for(unsigned i=0;i<joint_count;++i){result->velocity[i]=wire.max_velocity[i];result->acceleration[i]=wire.max_acceleration[i];result->jerk[i]=wire.max_jerk[i];}
+  return result;
  }
  // The worker uses a dated q/v/a seed, never a moving measured seed. Ordinary
  // targets cannot invalidate this snapshot; only a committed switch changes it.
@@ -282,6 +300,21 @@ public:
  const char* commit(Prepared& input,int64_t ros,int64_t steady,
    const std::array<double,joint_count>& measured_q,const std::array<double,joint_count>& measured_v)noexcept {
   const auto& source=input.source;
+  if(input.heartbeat){
+   if(!count_||source.operation!=0)return "replay_heartbeat_without_path";
+   auto& entry=entries_[count_-1];
+   if(!entry.replay||entry.replay_id!=input.id||entry.effective!=input.effective||entry.source.session!=source.session||
+      source.sequence<=entry.source.sequence||steady>=entry.deadline||
+      std::abs((steady-ros)-clock_offset_)>2000000)return "replay_heartbeat_identity_or_expiry";
+   for(unsigned i=0;i<joint_count;++i)if(input.velocity[i]!=velocity_[i]||input.acceleration[i]!=acceleration_[i]||input.jerk[i]!=jerk_[i])return "trajectory_limits_changed";
+   // Renew only source authority. The immutable curve and its start time are
+   // retained; neither fitting nor geometric/dynamic recertification occurs.
+   entry.source=source;entry.deadline=source.expires+clock_offset_;entry.admission=input.admission;
+   // PDO segment_id continues to identify its current admitted source, so
+   // existing sample/sequence freshness checks need no replay exception.
+   entry.id=source.sequence;
+   selected_=nullptr;return nullptr;
+  }
   if(input.target_stream&&input.version!=version_)return "target_snapshot_changed";
   if(input.target_stream&&input.effective<ros+1000000)return "target_generation_late";
   if(input.effective<ros+(input.target_stream?1000000:2000000) || input.effective>ros+150000000 || input.effective>=source.expires)return "trajectory_late_or_expired";
@@ -317,7 +350,7 @@ public:
    if(slot.compare_exchange_strong(empty,entries_[i].segment.get(),std::memory_order_release,std::memory_order_relaxed)){entries_[i].segment.release();break;}}
   for(unsigned i=0;i<kept;++i)if(remove)entries_[i]=std::move(entries_[i+remove]);
   count_=kept;auto& entry=entries_[count_++];entry.segment=std::move(input.segment);entry.source=source;
-  entry.inner_reference=input.inner_reference;entry.trend=input.trend;entry.target_stream=input.target_stream;entry.id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
+  entry.inner_reference=input.inner_reference;entry.trend=input.trend;entry.target_stream=input.target_stream;entry.replay=input.replay;entry.id=input.id;entry.replay_id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
   velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;++version_;return nullptr;
  }
  // Non-periodic convenience for native fixtures and offline callers.
@@ -403,7 +436,7 @@ private:
    }
    auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
    const auto began=std::chrono::steady_clock::now();
-   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
+   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
    result->prepare_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-began).count();
    // Observation-only callback; its failure cannot alter control acceptance.

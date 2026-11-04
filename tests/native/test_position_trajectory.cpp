@@ -100,6 +100,43 @@ int main(){
  auto goal=initial.q;goal[0]+=.02;goal[14]+=.01;
  auto first=PreparedSegment::target(limits,initial,goal,0.,30.,.2);
  std::array<double,16> measured{},speed{};std::copy(initial.q.begin(),initial.q.end(),measured.begin());
+ // A prepared replay is imported once. Heartbeats renew only its dated
+ // authority, leaving the original start, q/v/a and polynomial identity intact.
+ {
+  TrajectoryQueue replay;Meta source{71,1,1000000000,1250000000,1};
+  auto full=wire(first,1,1120000000);full.version=4;TargetSnapshot snapshot;
+  auto imported=TrajectoryQueue::prepare_replay(full,source,snapshot,.25,.5,162.);
+  assert(!replay.commit(*imported,1000000000,1000000000,measured,speed));
+  auto beat=full;beat.piece_start.clear();beat.duration.clear();beat.source_duration.clear();
+  beat.source_elapsed.clear();beat.control_count.clear();beat.controls.clear();
+  Meta heartbeat{71,2,1130000000,1380000000,0};
+  auto ready=TrajectoryQueue::prepare_replay(beat,heartbeat,snapshot,.25,.5,162.);
+  count_periodic_memory=true;
+  assert(!replay.commit(*ready,1130000000,1130000000,measured,speed));
+  assert(replay.sample(1140000000));
+  count_periodic_memory=false;
+  assert(periodic_allocations==0&&periodic_deletions==0);
+  const auto expected=first.sample(.02);
+  for(unsigned i=0;i<16;++i){assert(std::abs(replay.q[i]-expected.q[i])<1e-10);
+   assert(std::abs(replay.v[i]-expected.v[i])<1e-10);assert(std::abs(replay.a[i]-expected.a[i])<1e-10);}
+  assert(replay.id()==2&&replay.deadline()==1380000000);
+  ready->id=2;assert(replay.commit(*ready,1140000000,1140000000,measured,speed));
+  ready->id=1;ready->source.sequence=3;
+  assert(replay.commit(*ready,1380000000,1380000000,measured,speed));
+  TargetSnapshot braking;
+  assert(replay.snapshot(1150000000,1150000000,2,20000000,measured,braking));
+  Wire pause;pause.version=2;pause.segment_id=3;pause.max_velocity=full.max_velocity;
+  pause.max_acceleration=full.max_acceleration;pause.max_jerk=full.max_jerk;
+  Meta stop{71,3,1150000000,3150000000,2};
+  auto stopping=TrajectoryQueue::prepare_target(pause,stop,braking,measured,.25,.5,162.);
+  assert(!replay.commit(*stopping,1150000000,1150000000,measured,speed));
+  assert(replay.sample(2000000000)&&replay.phase(2000000000)==4);
+  assert(replay.commit(*ready,1160000000,1160000000,measured,speed)); // Cannot revive after PAUSE.
+  TrajectoryQueue empty;full.version=5;Meta entry{72,1,1000000000,1250000000,1};
+  auto empty_ready=TrajectoryQueue::prepare_replay(full,entry,snapshot,.25,.5,162.);
+  assert(!empty_ready->inner_reference);
+  assert(!empty.commit(*empty_ready,1000000000,1000000000,measured,speed));
+ }
  TrajectoryQueue queue;Meta m{7,1,1000000000,1200000000,1};auto a=wire(first,1,1060000000);
  queue.accept(a,m,1000000000,1000000000,measured,speed);
  assert(queue.sample(1001000000)&&queue.phase(1001000000)==1&&queue.q==measured);

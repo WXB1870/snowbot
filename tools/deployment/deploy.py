@@ -423,7 +423,7 @@ def executor_command(cfg, runs, execution_mode, namespace):
 def replay_commands(frontend, cfg, runs, execution_mode, stamp):
     common = [sys.executable, '-u', '-m', 'snowbot_bringup.teleop.snowbot_primitive_replay',
               '--library', str(cfg/'primitive-library/manifest.json'),
-              '--execution-mode', execution_mode, '--speed', str(1/3), '--execute']
+              '--execution-mode', execution_mode, '--speed', '1.0', '--execute']
     result = []
     if frontend in ('replay', 'prepare'):
         result.append([*common, '--action', 'Prepare', '--output', str(runs/f'Prepare-{stamp}.jsonl')])

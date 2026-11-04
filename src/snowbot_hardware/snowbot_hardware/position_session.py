@@ -148,6 +148,7 @@ class PositionSessionDevices:
         self.io.trajectory_reference = bool(self.health.reference_mode)
         self.io.target_stream = self.health.reference_mode == 2
         self.io.supports_rigid_reference = self.health.reference_mode == 2
+        self.io.supports_prepared_replay = self.health.reference_mode == 2
         self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s'] if self.health.reference_mode == 2 else 0.
         self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
         self.io.stop_requires_arrival = self.health.reference_mode != 2
@@ -567,6 +568,23 @@ class PositionSessionDevices:
             msg.trajectory.version = (3 if not self.io.sending_hold and
                                       getattr(self.io.source_motion,'rigid_reference',False) else 2)
             msg.trajectory.segment_id = metadata['sequence']
+            prepared = getattr(self.io, 'prepared_replay', None)
+            if prepared is not None and not self.io.sending_hold:
+                msg.trajectory.version = 4 if prepared.inner_reference else 5
+                msg.trajectory.effective_at_ns = round(prepared.effective*1e9)
+                if self.io.source_motion.mode != 'trajectory_heartbeat':
+                    self.replay_segment_id = metadata['sequence']
+                    # Existing Bernstein wire representation; never refit q.
+                    order = [self.io.source_motion.names.index(n) for n in CONTROL_NAMES]
+                    for start, duration, source_duration, elapsed, controls in prepared.description:
+                        msg.trajectory.piece_start.append(start)
+                        msg.trajectory.duration.append(duration)
+                        msg.trajectory.source_duration.append(source_duration)
+                        msg.trajectory.source_elapsed.append(elapsed)
+                        for i in order:
+                            msg.trajectory.control_count.append(len(controls[i]))
+                            msg.trajectory.controls.extend(controls[i])
+                msg.trajectory.segment_id = self.replay_segment_id
             for field, getter, ceiling in (('max_velocity', self.io.profile.speed, self.trajectory_limits['trajectory_max_velocity']),
                     ('max_acceleration', self.io.profile.acceleration, self.trajectory_limits['trajectory_max_acceleration']),
                     ('max_jerk', self.io.profile.jerk, self.trajectory_limits.get('trajectory_max_jerk', 162.))):

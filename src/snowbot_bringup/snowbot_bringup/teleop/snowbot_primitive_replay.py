@@ -48,6 +48,9 @@ class Replay:
     measured_start: tuple = ()
     start_reference_source: str = 'measured'
     reverse_prepare: bool = False
+    velocities: tuple = ()
+    accelerations: tuple = ()
+    curves: tuple = ()
 
     @property
     def duration(self):
@@ -55,9 +58,38 @@ class Replay:
 
     def _at(self, elapsed):
         t = min(max(0., elapsed * self.speed), self.times[-1])
+        if self.curves:
+            return self.state(elapsed)[0]
         i = min(bisect.bisect_right(self.times, t)-1, len(self.times)-2)
         u = (t-self.times[i])/(self.times[i+1]-self.times[i])
         return tuple(a+(b-a)*u for a, b in zip(self.points[i], self.points[i+1]))
+
+    def state(self, elapsed):
+        """q/v/a from the same accepted Bernstein polynomial."""
+        if not self.curves:
+            return self._at(elapsed), (), ()
+        t = min(max(0., elapsed*self.speed), self.times[-1])
+        index = min(bisect.bisect_right([p[0] for p in self.curves], t)-1, len(self.curves)-1)
+        start, duration, source, offset, axes = self.curves[index]
+        u = (offset+min(duration, max(0., t-start)))/source
+        def value(controls):
+            values = list(controls)
+            while len(values) > 1:
+                values = [(1-u)*a+u*b for a,b in zip(values, values[1:])]
+            return values[0]
+        q, v, a = [], [], []
+        for controls in axes:
+            degree = len(controls)-1
+            first = [degree*(y-x)/source for x,y in zip(controls,controls[1:])]
+            second = [(degree-1)*(y-x)/source for x,y in zip(first,first[1:])]
+            q.append(value(controls)); v.append(value(first)*self.speed); a.append(value(second)*self.speed**2)
+        return tuple(q), tuple(v), tuple(a)
+
+    def trajectory_knots(self):
+        if not self.curves or self.waist_lead_s:
+            raise ValueError('REPLAY_PREPARED_CURVE_REQUIRED')
+        times = [p[0]/self.speed for p in self.curves]+[self.duration]
+        return tuple((t, *self.state(t)) for t in times)
 
     def sample(self, elapsed):
         waist = self._at(elapsed)
@@ -129,7 +161,10 @@ def load_replay(path, action, speed=1., waist_lead_s=None):
     samples = data['samples']
     times, points = tuple(s['t'] for s in samples), tuple(tuple(s['q']) for s in samples)
     return Replay(times, points, NAMES, manifest['tool_id'],
-                  manifest['kinematic_sha256'], speed, lead, manifest.get('backend_ready') is True, margin)
+                  manifest['kinematic_sha256'], speed, lead, manifest.get('backend_ready') is True, margin,
+                  velocities=tuple(tuple(s['qd']) for s in samples) if 'qd' in samples[0] else (),
+                  accelerations=tuple(tuple(s['qdd']) for s in samples) if 'qdd' in samples[0] else (),
+                  curves=tuple(data.get('curves', ())))
 
 
 
@@ -165,8 +200,28 @@ class ReplaySequence:
             elapsed -= segment.duration+self.hold_s
         return self.segments[-1].sample(elapsed)
 
+    def state(self, elapsed):
+        for segment in self.segments[:-1]:
+            if elapsed <= segment.duration+self.hold_s:
+                return segment.state(min(elapsed, segment.duration))
+            elapsed -= segment.duration+self.hold_s
+        return self.segments[-1].state(elapsed)
+
     def validate_profile(self, profile):
         for segment in self.segments: segment.validate_profile(profile)
+
+    def trajectory_knots(self):
+        knots, offset = [], 0.
+        for i, segment in enumerate(self.segments):
+            current = segment.trajectory_knots()
+            if knots and max(abs(a-b) for a,b in zip(knots[-1][1],current[0][1])) > 1e-8:
+                raise ValueError('REPLAY_SEGMENT_DISCONTINUITY')
+            knots.extend((t+offset,q,v,a) for t,q,v,a in current[bool(knots):])
+            offset += segment.duration
+            if i < len(self.segments)-1 and self.hold_s:
+                offset += self.hold_s
+                knots.append((offset, *current[-1][1:]))
+        return tuple(knots)
 
 
 @lru_cache(maxsize=16)
@@ -199,6 +254,8 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     if not errors or min(errors.values()) > tolerance:
         raise RuntimeError('REPLAY_UNKNOWN_START: use a certified action start/end pose')
     source = min(errors, key=errors.get)
+    if action == 'Flip' and source != manifest['actions']['Flip']['start_node']:
+        raise RuntimeError('REPLAY_FLIP_REQUIRES_COMPLETED_SIDE_SCOOP')
     items = manifest.get('transfers', {}) | manifest['actions']
     target = manifest['home_node'] if action == 'Home' else items[action]['start_node']
     queue, costs = [(0., source, ())], {source: 0.}
@@ -246,6 +303,239 @@ def load_prepare_return(path, prepare_log, speed=1.):
                    points=tuple(tuple(r['q']) for r in reversed(targets)), reverse_prepare=True)
 
 
+def optimize_presets(library, config_path, profile_path, description, output):
+    """Offline QP planning; export only the final constrained 50 Hz reference.
+
+    Uses the existing dual-axial shovel recipe and native curve validator. No
+    ROS imports or device transport. Output is a candidate until PhysX checks.
+    """
+    import numpy as np
+    from scipy.interpolate import make_interp_spline, PPoly, BPoly
+    from scipy.spatial.transform import Rotation, Slerp
+    from bindu_contracts.profile import Profile
+    from bindu_kinematics.bimanual import BimanualQP
+    from bindu_execution.interpolation import PreparedSegment
+
+    library, output = Path(library), Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(library.read_text())
+    config = json.loads(Path(config_path).read_text())
+    profile = Profile.load(profile_path)
+    margin = float(manifest['posture_reference_margin_rad'])
+    curve_profile = replace(profile, limits={n:(lo+margin,hi-margin) if n.startswith('arm_') else (lo,hi)
+                                              for n,(lo,hi) in profile.limits.items()})
+    config.update(urdf=str(Path(description)/'snowbot_control.urdf'),
+                  simulation_only=True, coupled_locked_joints=[],
+                  tracking_feedback='reference', tool_velocity_feedforward=True,
+                  posture_gain=.1, shared_target_weight=100., shared_target_gain=1.)
+    # Preserve the existing 1 mrad planning reserve above the runtime margin;
+    # interpolating QP boundary points otherwise crossed it by 4e-5 rad.
+    config['posture_reference_margin_rad'] = margin+.001
+    config['demo']['display_urdf'] = str(Path(description)/'snowbot_display.urdf')
+    # Both waist axes participate via smooth phase goals. No inverse-model
+    # pre-emphasis and no substitution of one axis's response parameters.
+    initial = dict(config['demo']['initial_positions_rad'])
+    initial.update(zip(NAMES, manifest['nodes']['Push:start']))
+    solver = BimanualQP(config, profile)
+    solver.capture(initial, 'right_axial')
+
+    def pose(q):
+        values = solver._q(q)
+        result = np.empty((4, 4), dtype=np.float64)
+        if not solver.lib.bq_tool_pose(solver.handle, solver._ptr(values), solver.nq, solver._ptr(result)):
+            raise ValueError(solver._error())
+        return result
+
+    sources = {}
+    for key in ('Push', 'ScoopPrefix', 'Flip'):
+        data = json.loads(gzip.decompress((library.parent/manifest.get('transfers', {}).get(
+            key, manifest['actions'].get(key))['targets']).read_bytes()))
+        rows = []
+        for row in data['samples']:
+            q = dict(initial); q.update(zip(NAMES, row['q']))
+            rows.append(pose(q))
+        sources[key] = (np.array([r['t'] for r in data['samples']]), np.array(rows),
+                        np.array([r['q'] for r in data['samples']]))
+
+    def interpolate(times, poses, t):
+        if len(times) <= 3:
+            i = min(np.searchsorted(times, t, side='right')-1, len(times)-2)
+            u = (t-times[i])/(times[i+1]-times[i])
+            t = times[i]+u**3*(10.-15.*u+6.*u*u)*(times[i+1]-times[i])
+        target = np.eye(4)
+        target[:3, 3] = [np.interp(t, times, poses[:, j, 3]) for j in range(3)]
+        target[:3, :3] = Slerp(times, Rotation.from_matrix(poses[:, :3, :3]))([t]).as_matrix()[0]
+        return target
+
+    accepted, summary = {}, {}
+
+    def plan(key, start, duration, times, poses, end_q=None, waist_goal=None):
+        duration = math.ceil(duration/.02)*.02
+        grid = np.arange(round(duration/.02)+1)*.02
+        q = dict(start)
+        solver.posture_reference = np.array([q[n] for n in NAMES])
+        solver.capture(q, 'right_axial')
+        reference = np.array([q[n] for n in NAMES])
+        rows = [reference.copy()]
+        for t in grid[1:]:
+            u = min(1., t/(duration-1.))
+            blend = u
+            target = interpolate(times, poses, times[0]+blend*(times[-1]-times[0]))
+            if waist_goal is not None:
+                progress = min(1.,t/(duration-1.))
+                progress = progress**3*(10.-15.*progress+6.*progress*progress)
+                solver.set_shared_targets({n:(1-progress)*start[n]+progress*waist_goal[n]
+                                           for n in ('body_joint_1','body_joint_2')})
+            reference, _ = solver.solve(q, target, reference=reference, dt=.02, target_stamp=float(t))
+            q.update(zip(NAMES, reference)); rows.append(np.array(reference))
+        if key == 'PushReverse':
+            forward = accepted['Push']
+            rows = np.array([s['q'] for s in reversed(forward['samples'])])
+            duration = forward['samples'][-1]['t']
+            grid = np.arange(len(rows))*.02
+            q.update(zip(NAMES, rows[-1]))
+        print('goal error', key, float(np.linalg.norm(pose(q)[:3,3]-poses[-1,:3,3])), flush=True)
+        if end_q is not None:
+            goal = np.array([end_q[n] for n in NAMES])
+            for k in range(max(0, len(rows)-101), len(rows)):
+                u = (k-(len(rows)-101))/100.
+                blend = u*u*u*(10.-15.*u+6.*u*u)
+                rows[k] = (1.-blend)*rows[k]+blend*goal
+        # A sparse quintic removes QP sample noise, with explicit resting ends.
+        # Certification and grasp/collision checks below concern this final
+        # curve, never the earlier QP proposal or a separately filtered trace.
+        indices = np.unique(np.r_[np.arange(0, len(grid)-1, 10), len(grid)-1])
+        spline = make_interp_spline(grid[indices], np.array(rows)[indices], k=5,
+                                   bc_type=([(1, np.zeros(16)), (2, np.zeros(16))],)*2)
+        polynomials = [BPoly.from_power_basis(PPoly.from_spline((spline.t, spline.c[:, j], 5)))
+                       for j in range(16)]
+        pieces = []
+        for k, (a, b) in enumerate(zip(polynomials[0].x, polynomials[0].x[1:])):
+            if b > a:
+                pieces.append((float(a), float(b-a), float(b-a), 0.,
+                               tuple(tuple(p.c[:, k]) for p in polynomials)))
+        fractions = [float(np.max(np.abs(spline(grid, nu=d))/
+              np.array([getattr(profile, getter)(n) for n in NAMES])))
+              for d, getter in ((1, 'speed'), (2, 'acceleration'), (3, 'jerk'))]
+        scale = max(1., fractions[0], math.sqrt(fractions[1]), fractions[2]**(1/3))
+        if scale > 1.:
+            extended = math.ceil(duration*scale*1.01/.02)*.02
+            scale = extended/duration
+            pieces = [(a*scale, h*scale, source*scale, elapsed*scale, controls)
+                      for a,h,source,elapsed,controls in pieces]
+            duration = extended
+            grid = np.arange(round(duration/.02)+1)*.02
+        print('candidate', key, 'dynamic fractions', fractions, 'scale', scale, flush=True)
+        curve = PreparedSegment.from_description(curve_profile, NAMES, tuple(pieces))
+        samples = [curve.sample(float(t)) for t in grid]
+        # Check between exported points too, using the existing geometry step.
+        before = dict(start)
+        for t in np.arange(0., duration+.001, .01):
+            end = curve.sample(float(t)).q
+            solver.check_path(before, end)
+            before.update(zip(NAMES, end))
+        payload = dict(schema_version=2, joint_names=list(NAMES), sample_period_s=.02,
+                       stage='accepted_after_qp_spline_dynamic_grasp_collision_checks',
+                       planning_speed_vs_original=.5, playback_speed=1.,
+                       curves=pieces, samples=[dict(t=float(t), q=list(s.q), qd=list(s.v), qdd=list(s.a))
+                                              for t, s in zip(grid, samples)])
+        raw = gzip.compress(json.dumps(payload, separators=(',', ':')).encode(), mtime=0)
+        (output/(key+'.json.gz')).write_bytes(raw)
+        accepted[key] = payload
+        summary[key] = dict(duration_s=duration, samples=len(samples), sha256=hashlib.sha256(raw).hexdigest(),
+                            peak_velocity_rad_s=np.max(np.abs([s.v for s in samples]), axis=0).tolist(),
+                            joint_travel_rad=np.abs(np.diff([s.q for s in samples], axis=0)).sum(axis=0).tolist())
+        print(key, duration, flush=True)
+        end = dict(start); end.update(zip(NAMES, samples[-1].q))
+        return end
+
+    try:
+        ts, poses, _ = sources['Push']
+        push_goal = dict(initial);push_goal.update(zip(NAMES,manifest['nodes']['Push:end']))
+        push_end = plan('Push', initial, 2*ts[-1], ts, poses, waist_goal=push_goal)
+        # Raise only enough for the ground sweep, then rotate and descend along
+        # one spatial arc. No old multistage bridge or its reverse is retained.
+        side = dict(initial); side.update(zip(NAMES, manifest['nodes']['SideScoop:start']))
+        a, b = pose(initial), pose(side)
+        middle = interpolate([0., 1.], np.array([a, b]), .5)
+        middle[2, 3] = max(a[2, 3], b[2, 3])+.12
+        side_start = plan('BridgeForward', initial, 12., np.array([0., .5, 1.]), np.array([a, middle, b]), waist_goal=side)
+        ts, poses, _ = sources['ScoopPrefix']
+        scoop_goal = dict(initial);scoop_goal.update(zip(NAMES,manifest['nodes']['Flip:start']))
+        scoop_end = plan('SideScoop', side_start, 2*ts[-1], ts, poses, waist_goal=scoop_goal)
+        ts, poses, _ = sources['Flip']
+        # Keep the loaded lift/swing/roll geometry, remove resting prefixes and
+        # duplicated middle poses. Waist goals move smoothly with the arms.
+        knots = np.array([0., .4, 1.])*ts[-1]
+        middle = interpolate(ts, poses, float(ts[-1]*.4))
+        middle[:3,3] = [1.37, -.55, .22]
+        selected = np.array([poses[0], middle, poses[-1]])
+        dump_goal = dict(initial);dump_goal.update(zip(NAMES,manifest['nodes']['Dump:end']))
+        dump_end = plan('Flip', scoop_end, 2*ts[-1], knots, selected, waist_goal=dump_goal)
+        a, b = pose(dump_end), pose(side_start)
+        # Restore the blade outside the body, then descend diagonally to ready.
+        middle = interpolate(ts, poses, float(ts[-1]*.40))
+        middle[:3,3] = [1.38, -.66, .18]
+        plan('DumpReturn', dump_end, 14., np.array([0., .45, 1.]), np.array([a, middle, b]), side_start, side_start)
+        # A canceled loaded scoop needs its own return; it cannot execute Flip.
+        a, b = pose(scoop_end), pose(side_start)
+        plan('ScoopReturn', scoop_end, 8., np.array([0., 1.]), np.array([a, b]), side_start, side_start)
+        # Forward push is independent and still returns on explicit Enter.
+        a, b = pose(push_end), pose(initial)
+        plan('PushReverse', push_end, 2*sources['Push'][0][-1], np.array([0., 1.]), np.array([a, b]), initial)
+        a, b = pose(side_start), pose(initial)
+        middle = interpolate([0., 1.], np.array([a, b]), .5); middle[2, 3] = max(a[2, 3], b[2, 3])+.12
+        plan('BridgeReverse', side_start, 12., np.array([0., .5, 1.]), np.array([a, middle, b]), initial, initial)
+        recipe = dict(config['demo'])
+        recipe['grasp_schedule'] = [dict(t=0., mode='right_axial')]
+        recipe['left_grip_in_tool_m'] = (np.linalg.inv(np.array(config['left_to_tool']).reshape(4,4)) @
+            np.r_[recipe['grip_offset_m'], 1.])[:3].tolist()
+        recipe['right_grip_in_tool_m'] = (np.linalg.inv(np.array(config['right_to_tool']).reshape(4,4)) @
+            np.r_[recipe['right_grip_offset_m'], 1.])[:3].tolist()
+        combined, windows, offset = [], [], 0.
+        route = ('Push', 'PushReverse', 'BridgeForward', 'SideScoop', 'Flip',
+                 'DumpReturn', 'SideScoop', 'ScoopReturn', 'BridgeReverse')
+        for key in route:
+            payload = accepted[key]
+            for start,h,source,elapsed,controls in payload['curves']:
+                combined.append((start+offset,h,source,elapsed,controls))
+            duration = payload['samples'][-1]['t']
+            windows.append(dict(action=key, start_s=offset, end_s=offset+duration))
+            offset += duration
+            if key != 'BridgeForward':
+                last = payload['samples'][-1]['q']
+                combined.append((offset,1.,1.,0.,tuple((q,)*6 for q in last)))
+                offset += 1.
+        curve = PreparedSegment.from_description(curve_profile,NAMES,tuple(combined))
+        samples = []
+        for k in range(round(offset/.02)+1):
+            t = k*.02
+            state = curve.sample(t)
+            q = dict(initial);q.update(zip(NAMES,state.q))
+            samples.append(dict(t=t,q=q,qd=list(state.v),qdd=list(state.a),tool=pose(q).tolist()))
+        np.savez_compressed(output/'joint_plan.npz', executed=np.array([
+            curve.sample(k*.002).q for k in range(round(offset/.002)+1)]), names=NAMES, dt=.002,
+            stage='exact_polynomial_samples_no_refit')
+        frozen_config = output/'config.json'
+        frozen_config.write_text(json.dumps(config,indent=2)+'\n')
+        display = Path(description)/'snowbot_display.urdf'
+        sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+        motion = dict(schema=2, units='m, rad, s', frame='fixed URDF base',duration_s=offset,
+            joint_names=list(NAMES), sample_period_s=.02,
+            input_contract='offline_preset_reference',tool_input_path=str(library.resolve()),
+            tool_input_sha256=sha(library), source_sha256={str(Path(__file__).resolve()):sha(__file__)},
+            config_path=str(frozen_config.resolve()),config_sha256=sha(frozen_config),
+            display_urdf=str(display.resolve()),display_sha256=sha(display),
+            left_frame=config['left_frame'],right_frame=config['right_frame'],left_to_tool=config['left_to_tool'],
+            home=samples[0]['tool'], recipe=recipe, samples=samples, action_windows=windows,
+            playback_speed=1., requested_planning_speed_vs_original=.5)
+        (output/'motion.json').write_text(json.dumps(motion,separators=(',',':'))+'\n')
+    finally:
+        solver.close()
+    (output/'planning.json').write_text(json.dumps(summary, indent=2)+'\n')
+    return accepted, summary
+
+
 def plan_prepare(path, robot, measured, speed=1., *, reference=None):
     """Empty-hand entry from measured joints; validate before acquiring a lease."""
     import numpy as np
@@ -284,12 +574,12 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
                                             tolerance, float(config['prepare_position_tolerance_rad']))
             reference_source = 'confirmed_pause'
     before = tuple(start[n] for n in NAMES)
-    duration = float(config['prepare_duration'])
+    # Preset entry has its own floor; VR retains teleop.prepare_duration.
+    duration = float(manifest['preparation'].get('minimum_duration_s', 2.))
     for name, a, b in zip(NAMES, before, after):
-        shared = name.startswith('body_')
-        velocity = min(profile.speed(name)*.8, .025) if shared else profile.speed(name)*.8
-        acceleration = min(profile.acceleration(name)*.8, .12) if shared else profile.acceleration(name)*.8
-        jerk = min(profile.jerk(name)*.8, .8) if shared else profile.jerk(name)*.8
+        velocity = profile.speed(name)*.8
+        acceleration = profile.acceleration(name)*.8
+        jerk = profile.jerk(name)*.8
         distance = abs(b-a)
         duration = max(duration, 1.875*distance/velocity,
                        math.sqrt(10/math.sqrt(3)*distance/acceleration),
@@ -303,7 +593,10 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
                   home.tool_id, home.kinematics, speed, 0., home.backend_ready,
                   home.reference_margin_rad, empty_prepare=True,
                   measured_start=tuple(measured[n] for n in NAMES) if recovering else (),
-                  start_reference_source=reference_source)
+                  start_reference_source=reference_source,
+                  velocities=tuple(curve.sample(t).v for t in times),
+                  accelerations=tuple(curve.sample(t).a for t in times),
+                  curves=((0., duration, duration, 0., tuple((a,a,a,b,b,b) for a,b in zip(before,after))),))
     plan.validate_profile(profile)
     recipe = dict(tool['demo'])
     recipe['left_grip_in_tool_m'] = (np.linalg.inv(np.array(tool['left_to_tool']).reshape(4,4)) @
@@ -368,6 +661,13 @@ def run_replay(plan, port, *, settle_timeout=5., execution_mode='position', velo
         acquired = True
         start = due = renewed = port.steady()
         ros_start = port.ros()
+        if getattr(port, 'prepared', None) is not None:
+            # One dated trajectory, followed by TTL heartbeats. The lead covers
+            # admission, never changes the trajectory's recorded timing.
+            port.begin(plan, ros_start+.12)
+            start += .12
+            due = start
+            ros_start += .12
         rest_since = None
         measured_at_goal = False
         while True:
@@ -477,6 +777,14 @@ def execute(args, plan):
     def receive(kind):
         def callback(msg):
             latest[kind] = (msg, time.monotonic())
+            if kind == 'state':
+                record('diagnostic', stamp=msg.stamp.sec+msg.stamp.nanosec*1e-9,
+                       feedback_stamp=msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9,
+                       reference_stamp=msg.reference.header.stamp.sec+msg.reference.header.stamp.nanosec*1e-9,
+                       joint_names=list(msg.joints.name), measured_q=list(msg.joints.position),
+                       measured_qd=list(msg.joints.velocity), reference_names=list(msg.reference.name),
+                       reference_q=list(msg.reference.position), reference_qd=list(msg.reference.velocity),
+                       reference_qdd=list(msg.reference_accelerations))
         return callback
 
     node.create_subscription(ExecutionState, ns+'/execution/state', receive('state'), 10)
@@ -641,12 +949,41 @@ def execute(args, plan):
             wait(lambda: latest['state'][0].lease_active, .25)
         def renew(self):
             call(leases, Lease.Request(operation='renew', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
+        def begin(self, plan, effective):
+            from trajectory_msgs.msg import JointTrajectoryPoint
+            from builtin_interfaces.msg import Duration
+            source = self.ros()
+            self.replay_identity = uuid.uuid4().hex
+            msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=self.replay_identity,
+                task_id=task, observation_id=str(latest['pdo'][0].pdo_sample),
+                profile_hash=robot.profile.digest, lease_id=self.lease.lease_id, epoch=self.lease.epoch,
+                mode='prepared_entry' if empty_handed else 'prepared_trajectory', resource_groups=list(GROUPS), joint_names=list(NAMES),
+                stamp=stamp(source), valid_for=.25)
+            for t,q,v,a in self.prepared:
+                at = stamp(effective-source+t)
+                msg.points.append(JointTrajectoryPoint(positions=list(q), velocities=list(v),
+                    accelerations=list(a), time_from_start=Duration(sec=at.sec, nanosec=at.nanosec)))
+            commands.add(msg.command_id)
+            call(submit, SubmitMotion.Request(command=msg))
+            self.commanded = True
+            self.reference_ready_by = self.steady()+tool_config['feedback_max_age']
+            record('trajectory', identity=self.replay_identity, effective_stamp=effective,
+                   joint_names=list(NAMES), sample_period_s=.02, stage='final_accepted_reference')
+            for k in range(math.ceil(plan.duration/.02)+1):
+                t = min(k*.02, plan.duration)
+                q,v,a = plan.state(t)
+                record('trajectory_sample', t=t, q=q, qd=v, qdd=a)
+
         def send(self, goal, source):
             msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=uuid.uuid4().hex,
                 task_id=task, observation_id=str(latest['pdo'][0].pdo_sample),
                 profile_hash=robot.profile.digest, lease_id=self.lease.lease_id, epoch=self.lease.epoch,
                 mode='joint_target', resource_groups=list(GROUPS), joint_names=list(NAMES),
                 positions=list(goal), stamp=stamp(source), valid_for=.25)
+            if self.prepared is not None:
+                msg.mode = 'trajectory_heartbeat'
+                msg.observation_id = self.replay_identity
+                msg.positions = []
             commands.add(msg.command_id)
             call(submit, SubmitMotion.Request(command=msg))
             if not getattr(self,'commanded',False):
@@ -697,6 +1034,8 @@ def execute(args, plan):
         record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
+        segments = getattr(plan, 'segments', (plan,))
+        port.prepared = plan.trajectory_knots() if all(s.curves for s in segments) else None
         result = run_replay(plan, port, execution_mode=args.execution_mode,
                             velocity_tolerance=velocity_tolerance, settle_time=settle_time,
                             settle_timeout=settle_timeout)
