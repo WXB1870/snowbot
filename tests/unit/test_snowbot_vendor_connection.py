@@ -304,6 +304,56 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_base_has_three_native_layers_and_mode_override(self):
+        from unittest.mock import patch
+        from tools.deployment.deploy import base_commands
+        with patch.dict(os.environ, {'VIRTUAL_ENV':'upper', 'LD_LIBRARY_PATH':'upper-pin'}):
+            for mode in ('impedance', 'position'):
+                plan = base_commands(Path('/deployment/artifacts/robot'), mode)
+                self.assertEqual([name for name, _, _ in plan], ['servo','middle','upper'])
+                self.assertEqual(plan[0][1][-2:], ['-p', 'execution_mode:='+mode])
+                for _, _, env in plan:
+                    self.assertNotIn('VIRTUAL_ENV', env)
+                    self.assertNotIn('LD_LIBRARY_PATH', env)
+            self.assertEqual(base_commands(Path('/deployment'))[0][1][-1], 'execution_mode:=impedance')
+
+    def test_upper_inherits_actual_base_mode_after_startup(self):
+        from types import SimpleNamespace as State
+        from tools.deployment.deploy import base_mode
+        states = {name:State(startup_complete=False,control_source='position') for name in ('servo','middle','upper')}
+        self.assertIsNone(base_mode(states))
+        for state in states.values():state.startup_complete=True
+        self.assertEqual(base_mode(states), 'position')
+        states['servo'].control_source='impedance'
+        self.assertEqual(base_mode(states), 'impedance')
+        states.pop('middle')
+        self.assertIsNone(base_mode(states))
+
+    def test_replay_sequence_and_executor_use_same_observed_mode(self):
+        from tools.deployment.deploy import executor_command,replay_commands
+        cfg,runs=Path('/config'),Path('/runs')
+        for mode in ('position','impedance'):
+            self.assertIn('execution_mode:='+mode,executor_command(cfg,runs,mode,'bindu_snowbot'))
+            commands=replay_commands('replay',cfg,runs,mode,'run')
+            self.assertEqual(len(commands),2)
+            self.assertEqual(commands[0][commands[0].index('--action')+1],'Prepare')
+            self.assertIn('--interactive',commands[1])
+            for command in commands:
+                self.assertEqual(command[command.index('--execution-mode')+1],mode)
+            menu=replay_commands('menu',cfg,runs,mode,'run')
+            self.assertEqual(len(menu),1)
+            self.assertNotIn('Prepare',menu[0])
+
+    def test_vr_replay_share_upper_lock_and_release_it(self):
+        from unittest.mock import patch
+        from snowbot_bringup.teleop.run_vr import session_lock
+        with tempfile.TemporaryDirectory() as tmp,patch('tempfile.gettempdir',return_value=tmp):
+            with session_lock(7,'test_upper'):
+                with self.assertRaisesRegex(RuntimeError,'ROS'):
+                    session_lock(7,'test_upper')
+            with session_lock(7,'test_upper'):
+                pass
+
     def test_service_log_keeps_wkc_changes_and_faults_without_healthy_spam(self):
         from tools.deployment.deploy import keep_service_log
         previous = []

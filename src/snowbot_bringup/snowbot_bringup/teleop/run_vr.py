@@ -183,6 +183,19 @@ def run(args):
     return result
 
 
+def session_lock(domain_id, namespace):
+    """Shared single upper owner for VR and primitive replay."""
+    token = hashlib.sha256(f'{domain_id}/{namespace}'.encode()).hexdigest()[:20]
+    path = Path(tempfile.gettempdir())/f'bindu-vr-{os.getuid()}-{token}.lock'
+    lock = path.open('a')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        lock.close()
+        raise RuntimeError('该 ROS 域和命名空间已有上层启动器运行。') from exc
+    return lock
+
+
 def run_session(args, manifest):
     os.environ['ROS_DOMAIN_ID']=str(args.domain_id)
     if args.declare_load:
@@ -193,13 +206,7 @@ def run_session(args, manifest):
         declare_load(args)
         return 0
     # Held for the full session; ports alone do not protect a shared ROS namespace.
-    token = hashlib.sha256(f'{args.domain_id}/{args.namespace}'.encode()).hexdigest()[:20]
-    lock_path = Path(tempfile.gettempdir())/f'bindu-vr-{os.getuid()}-{token}.lock'
-    with lock_path.open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError('该 ROS 域和命名空间已有启动器运行。') from exc
+    with session_lock(args.domain_id, args.namespace):
         report = check(args)
         if args.check:
             print(json.dumps(report, ensure_ascii=False))
@@ -339,6 +346,8 @@ def parse_args(argv=None):
     parser.add_argument('--check-robot', action='store_true', help='配合 --check，只读核对机器人端点、实测反馈和保护状态')
     parser.add_argument('--enable-commands', action='store_true',
                         help='为本次真机位置或阻抗会话开放运动写入；保留在线预检，不修改现场配方')
+    parser.add_argument('--execution-mode', choices=('position', 'impedance'),
+                        help='本次运行模式；由统一入口读取底层模式后传入')
     parser.add_argument('--robot-check-timeout', type=float, default=2., help='只读机器人检查时长，秒，最多30秒')
     parser.add_argument('--physics', action='store_true', help='启用Isaac物理反馈，保留浏览器显示；仅允许仿真配置')
     parser.add_argument('--domain-id', type=int, default=int(os.environ.get('ROS_DOMAIN_ID','0')))
@@ -374,6 +383,8 @@ def parse_args(argv=None):
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
     args.launch_package=json.loads(Path(args.config).read_text()).get('robot_package','bindu_runtime')
     d=args.deployment
+    if args.execution_mode:
+        d['execution_mode'] = args.execution_mode
     from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, braking_lead, load_mode_config
     d['parameters_config']=d.get('parameters_config') or str(default_path())
     args.runtime_parameters=load_parameters(d['parameters_config'])
