@@ -304,6 +304,56 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_service_log_keeps_wkc_changes_and_faults_without_healthy_spam(self):
+        from tools.deployment.deploy import keep_service_log
+        previous = []
+        healthy = '[ECAT-MON] pdo=100 WKC=67/67 bad_wkc=0 good_age_ms=0.2\n'
+        self.assertTrue(keep_service_log(healthy, previous, 0.))
+        self.assertFalse(keep_service_log(healthy.replace('100', '101'), previous, 1.))
+        self.assertTrue(keep_service_log(healthy, previous, 5.))
+        self.assertTrue(keep_service_log(healthy.replace('67/67', '45/67'), previous, 5.1))
+        self.assertTrue(keep_service_log(healthy, previous, 5.2))
+        self.assertTrue(keep_service_log(healthy.replace('bad_wkc=0', 'bad_wkc=1'), previous, 5.3))
+        self.assertFalse(keep_service_log('TARGET_PREDICTION accepted=1 error=\n', previous, 6.))
+        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=0 error=joint_limit\n', previous, 6.))
+        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=1 error=admission_failed\n', previous, 6.))
+        self.assertTrue(keep_service_log('[ERROR] drive fault\n', previous, 6.))
+
+    def test_service_wait_uses_readiness_and_never_advances_after_exit(self):
+        import threading
+        from unittest.mock import Mock
+        from tools.deployment.deploy import wait_service
+        stopped = threading.Event(); state = []
+        child = Mock(); child.poll.return_value = None
+        spin = Mock(side_effect=lambda:state.append('ready'))
+        self.assertTrue(wait_service([('servo', child)], lambda:bool(state), spin, stopped))
+        spin.assert_called_once()
+        child.poll.return_value = 3
+        with self.assertRaisesRegex(RuntimeError, 'servo exited: code=3'):
+            wait_service([('servo', child)], lambda:True, spin, stopped)
+        stopped.set()
+        self.assertFalse(wait_service([], lambda:False, spin, stopped))
+        stopped.clear()
+        with self.assertRaisesRegex(RuntimeError, 'STARTUP_TIMEOUT'):
+            wait_service([], lambda:False, spin, stopped, timeout=0.)
+
+    def test_service_exit_is_reverse_order_and_never_force_kills(self):
+        import signal
+        from unittest.mock import Mock, patch
+        from tools.deployment import deploy
+        children = []
+        for index, name in enumerate(('servo', 'middle', 'upper', 'executor'), 1):
+            child = Mock(pid=index); child.poll.return_value = None; child.wait.return_value = 0
+            children.append((name, child))
+        children[-1][1].wait.side_effect = [subprocess.TimeoutExpired('executor', 60.), 0]
+        with patch.object(deploy.os, 'killpg') as send:
+            self.assertTrue(deploy.stop_services(children))
+        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (4,3,2,1)])
+        self.assertEqual(children[-1][1].wait.call_count, 2)
+        children[0][1].wait.return_value = 2
+        with patch.object(deploy.os, 'killpg'):
+            self.assertFalse(deploy.stop_services(children[:1]))
+
     def test_lock_fetches_exact_revision_and_preserves_existing_checkouts(self):
         from unittest.mock import patch
         from tools.deployment import deploy
