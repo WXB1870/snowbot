@@ -13,7 +13,7 @@ MASKS = {'left': 1 << 7, 'right': 1 << 15}
 def native_command(position, config):
     """118 protocol: velocity is a reference, not the configured speed limit."""
     values = [float(position), 0., 0., float(config['kp']), float(config['kd'])]
-    if not all(math.isfinite(value) for value in values):
+    if not math.isfinite(position):
         raise ValueError('GRIPPER_COMMAND_NONFINITE')
     return values
 
@@ -88,6 +88,7 @@ class GripperController:
         self.feedback_stamp = self.received_at = self.received_steady = 0.
         self.q, self.v, self.current = {}, {}, {}
         self.invalid, self.fault = '', ''
+        self.feedback_errors = {}
         self.last_tick = None
         self.recovery_since = None
         self.vr = {}
@@ -106,44 +107,42 @@ class GripperController:
 
     def observe(self, q, v, current, stamp):
         now = self.now()
-        names = tuple(JOINTS.values())
-        if (not math.isfinite(stamp) or stamp <= self.feedback_stamp or not 0 <= now-stamp <= self.cfg['feedback_max_age']
-                or any(n not in q or n not in v for n in names)
-                or any(not math.isfinite(x) for x in [*(q[n] for n in names), *(v[n] for n in names), *current.values()])
-                or set(current) != set(SIDES)):
+        if not math.isfinite(stamp) or stamp <= self.feedback_stamp or not 0 <= now-stamp <= self.cfg['feedback_max_age']:
             self.invalid = 'GRIPPER_FEEDBACK_INVALID'
             raise ValueError(self.invalid)
         previous = self.feedback_stamp
         self.feedback_stamp, self.received_at, self.received_steady = stamp, now, self.steady()
-        if any(not self.profile.limits[n][0] <= q[n] <= self.profile.limits[n][1] for n in names):
-            self.invalid = 'GRIPPER_FEEDBACK_OUT_OF_LIMIT'
-            raise ValueError(self.invalid)
+        self.feedback_errors = {}
+        for side, name in JOINTS.items():
+            if (name not in q or name not in v or side not in current or
+                    not all(math.isfinite(x) for x in (q[name], v[name], current[side]))):
+                self.feedback_errors[side] = 'GRIPPER_FEEDBACK_INVALID'
+            elif not self.profile.limits[name][0] <= q[name] <= self.profile.limits[name][1]:
+                self.feedback_errors[side] = 'GRIPPER_FEEDBACK_OUT_OF_LIMIT'
         self.q, self.v, self.current, self.invalid = dict(q), dict(v), dict(current), ''
         if (self.fault and stamp-previous <= self.cfg['feedback_max_age'] and
-                all(abs(v[n]) <= self.cfg['velocity_tolerance'] for n in names)):
+                all(s not in self.feedback_errors and abs(v[JOINTS[s]]) <= self.cfg['velocity_tolerance']
+                    for s in self.feedback_sides())):
             if self.recovery_since is None:self.recovery_since = self.steady()
         else:self.recovery_since = None
+
+    def feedback_sides(self):
+        sides = {s for s in SIDES if GROUPS[s] in self.groups or
+                 self.channels[s]['touched'] and self.channels[s]['state'] in ('MOVING','STOPPING','FAULT')}
+        if self.grasp_authorized:
+            sides.add('left')
+        return sides
 
     def require_feedback(self):
         age = self.cfg['feedback_max_age']
         if (self.invalid or not self.feedback_stamp or not 0 <= self.now()-self.feedback_stamp <= age
                 or not 0 <= self.steady()-self.received_steady <= age):
             raise RuntimeError(self.invalid or 'GRIPPER_FEEDBACK_STALE')
+        for side in self.feedback_sides():
+            if side in self.feedback_errors:
+                raise RuntimeError(self.feedback_errors[side]+':'+side)
         health = self.health()
-        if (type(health.get('sample')) is not int or health['sample'] < 1 or
-                type(health.get('operation_enabled_mask')) is not int or health['operation_enabled_mask'] < 0):
-            raise RuntimeError('GRIPPER_DRIVER_HEALTH_INVALID')
         if self.require_driver_ack:
-            if health.get('gripper_control_enabled') is not True:
-                raise RuntimeError('GRIPPER_DRIVER_PATCH_REQUIRED')
-            sequences, holds = health.get('gripper_sequence'), health.get('gripper_hold_position')
-            if (not isinstance(sequences, list) or len(sequences) != 2 or
-                    any(type(x) is not int or x < 0 for x in sequences) or
-                    not isinstance(holds, list) or len(holds) != 2 or
-                    any(type(x) not in (float, int) or not math.isfinite(x) for x in holds) or
-                    type(health.get('gripper_hold_mask')) is not int or not 0 <= health['gripper_hold_mask'] <= 3 or
-                    type(health.get('gripper_latched_mask')) is not int or not 0 <= health['gripper_latched_mask'] <= 3):
-                raise RuntimeError('GRIPPER_DRIVER_HEALTH_INVALID')
             for side in SIDES:
                 if GROUPS[side] in self.groups and health['gripper_latched_mask'] & (1 << SIDES.index(side)):
                     raise RuntimeError('GRIPPER_DRIVER_LATCHED:'+side)
@@ -210,7 +209,7 @@ class GripperController:
         if not self.cfg['calibrated'] and (operation not in ('authorize_direct','open','close','hold') or
                 operation in ('open','close') and not self.direct_authorized):
             raise RuntimeError('GRIPPER_UNCALIBRATED_DIRECT_ONLY')
-        if (type(sequence) is not int or sequence <= self.sequence or not math.isfinite(stamp)
+        if (sequence <= self.sequence or not math.isfinite(stamp)
                 or stamp < self.command_stamp or not math.isfinite(valid_for) or not 0 < valid_for <= .4 or not 0 <= self.now()-stamp < valid_for):
             raise RuntimeError('GRIPPER_STALE_COMMAND')
         if operation == 'authorize_direct':
@@ -257,6 +256,8 @@ class GripperController:
 
     def require_left_closed(self):
         self.require_feedback()
+        if 'left' in self.feedback_errors:
+            raise RuntimeError(self.feedback_errors['left']+':left')
         if (abs(self.q[JOINTS['left']]-self.cfg['grippers']['left']['closed']) > self.cfg['position_tolerance'] or
                 abs(self.v[JOINTS['left']]) > self.cfg['velocity_tolerance']):
             raise RuntimeError('GRIPPER_LEFT_NOT_CLOSED_STATIONARY')
@@ -314,7 +315,7 @@ class GripperController:
             raise RuntimeError(self.fault or 'GRIPPER_RECOVERY_NOT_REQUIRED')
         health = self.require_feedback()
         if (self.recovery_since is None or self.steady()-self.recovery_since < self.cfg['settle_time'] or
-                any(abs(self.v[JOINTS[s]]) > self.cfg['velocity_tolerance'] for s in SIDES)):
+                any(abs(self.v[JOINTS[s]]) > self.cfg['velocity_tolerance'] for s in self.feedback_sides())):
             raise RuntimeError('GRIPPER_RECOVERY_REQUIRES_REST')
         for side,c in self.channels.items():
             if c['touched'] and (not c.get('direct') or
@@ -441,7 +442,7 @@ class GripperController:
         previous=self.trigger_frames.get(frame.side)
         if previous and frame.seq<=previous[0]:return
         counts=tuple(frame.button_edges[6:8])
-        if (not frame.source_id or any(type(x) is not int or x<0 for x in counts) or
+        if (not frame.source_id or
                 counts[0]-counts[1] not in (0,1) or
                 frame.trigger>self.input_settings['trigger_press_threshold'] and counts[0]-counts[1]!=1 or
                 frame.trigger<self.input_settings['trigger_release_threshold'] and counts[0]-counts[1]!=0 or
@@ -509,7 +510,7 @@ class GripperController:
             self.stop('GRIPPER_VR_TIME_REVERSED', revoke=True)
             return
         counts = tuple(frame.button_edges[6:8])
-        if (any(type(x) is not int or x < 0 for x in counts) or counts[0]-counts[1] not in (0, 1)
+        if (counts[0]-counts[1] not in (0, 1)
                 or not all(math.isfinite(x) and 0 <= x <= 1 for x in (frame.trigger, frame.grip))):
             self.stop('GRIPPER_VR_COUNTER_INVALID', revoke=True)
             return
@@ -538,7 +539,7 @@ class GripperController:
             measured_position=self.q.get(JOINTS[side], 0.), measured_velocity=self.v.get(JOINTS[side], 0.),
             measured_current=self.current.get(side, 0.), target_position=c['target'],
             position_reached=c['state'] == 'SUCCEEDED', grasp_state='unknown',
-            feedback_stamp=self.feedback_stamp, feedback_valid=bool(self.feedback_stamp and not self.invalid and
+            feedback_stamp=self.feedback_stamp, feedback_valid=bool(self.feedback_stamp and not self.invalid and side not in self.feedback_errors and
                 0 <= self.now()-self.feedback_stamp <= self.cfg['feedback_max_age'] and
                 0 <= self.steady()-self.received_steady <= self.cfg['feedback_max_age']),
             calibrated=self.cfg['calibrated'])

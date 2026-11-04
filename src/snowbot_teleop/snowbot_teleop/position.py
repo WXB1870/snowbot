@@ -225,15 +225,16 @@ class PositionOperations:
             raise RuntimeError('PICO_GRIPPER_STOP_UNCONFIRMED:'+str(exc)) from exc
 
     async def close_grippers(self, intent, *, allow_command=True):
-        """Confirm configured closed endpoints; this is not contact/force evidence."""
+        """Accept a completed close or its confirmed hold; neither proves grip."""
         n = self.node
         n.current(intent)
         if not n.feedback().healthy or not n.feedback().stopped:
             raise RuntimeError('PICO_AUTO_CLOSE_REQUIRES_STOPPED')
         tolerance = target_position_tolerance(self.config, direct=True)
         def closed():
-            return all(s.state not in ('MOVING', 'STOPPING', 'FAILED') and
-                abs(s.measured_position-self.config['grippers'][side]['closed']) <= tolerance and
+            return all(s.state not in ('MOVING', 'STOPPING', 'FAILED', 'FAULT') and
+                (abs(s.measured_position-self.config['grippers'][side]['closed']) <= tolerance or
+                 s.state == 'CANCELED' and s.code in ('CLOSE_STOPPED', 'MANUAL_ENDPOINT_STOPPED')) and
                 abs(s.measured_velocity) <= self.config['velocity_tolerance']
                 for side in SIDES for s in (self.reading(side),))
         if not closed():
@@ -286,10 +287,9 @@ class PositionOperations:
                 for side,s in states.items():
                     if s.state=='FAULT':
                         raise RuntimeError('PICO_GRIPPER_OPERATION_FAILED')
-                    if (sent_modes[side]=='closed' and s.state=='CANCELED' and s.code=='CLOSE_STOPPED' and
+                    if (sent_modes[side]=='closed' and s.state=='CANCELED' and s.code in ('CLOSE_STOPPED','MANUAL_ENDPOINT_STOPPED') and
                             s.epoch==lease.epoch and s.control_sequence>=expected[side][1] and
                             seconds(s.stamp)>expected[side][2]):
-                        if automatic or not direct:raise RuntimeError('PICO_GRIPPERS_CLOSED_FEEDBACK_REQUIRED')
                         closed_stopped.add(side)
                     if (s.state=='FAILED' and s.epoch==lease.epoch and
                             s.control_sequence>=expected[side][1] and

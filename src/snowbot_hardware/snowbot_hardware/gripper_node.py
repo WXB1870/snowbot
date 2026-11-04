@@ -55,23 +55,24 @@ class SnowbotGrippers:
              not engine.lease_id and not engine.active and not engine.stopping))
 
     def health(self):
-        self.devices.io.require_feedback()
+        sides = self.core.feedback_sides()
         if self.session_protocol:
-            from snowbot_hardware.session import CONTROL_GROUPS
-            self.devices.health.require(CONTROL_GROUPS, acquiring=True)
-            obs = self.devices.health.observation
+            obs = self.devices.health.require_observation()
             for side, slot in (('left', 7), ('right', 15)):
+                if side not in sides:
+                    continue
                 if not obs.valid_mask & MASKS[side]:
                     raise RuntimeError(f'GRIPPER_DRIVER_FEEDBACK_INVALID:{side}:slot={slot}')
                 if obs.status[slot] & 8:
                     raise RuntimeError(f'GRIPPER_DRIVER_FAULT:{side}:slot={slot}:status=0x{obs.status[slot]:04x}')
         else:
+            self.devices.io.require_feedback()
             self.devices.check_health(set(self.core.groups))
-        for side in SIDES:
+        for side in sides:
             topic = self.topics[side]
-            if side not in self.publishers or self.node.count_publishers(topic) != 1:
+            if side not in self.publishers or self.devices.graph.count_publishers(topic) != 1:
                 raise RuntimeError('GRIPPER_COMMAND_PUBLISHER_CONFLICT:'+side)
-            readers = self.node.get_subscriptions_info_by_topic(topic)
+            readers = self.devices.graph.get_subscriptions_info_by_topic(topic)
             if not any(info.node_namespace.rstrip('/')+'/'+info.node_name == self.devices.receivers['head']
                        and info.topic_type == 'std_msgs/msg/Float64MultiArray' for info in readers):
                 raise RuntimeError('GRIPPER_RECEIVER_UNAVAILABLE:'+side)

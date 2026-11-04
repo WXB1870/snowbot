@@ -910,7 +910,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             await self.arrival(error=.001,primitive=True,tick_period=.005,cancel_at=.2)
 
     async def test_impedance_a_accepts_nominal_arrival_with_measured_rest(self):
-        node=await self.arrival(error=.02,primitive=True,tick_period=.005,execution_mode='impedance')
+        node=await self.arrival(error=.04,primitive=True,tick_period=.005,execution_mode='impedance')
         arrivals=[json.loads(c.args[1]) for c in node.event.call_args_list if c.args[0]=='PICO_ACTUATOR_ARRIVED']
         self.assertEqual(arrivals[0]['arrival_basis'],'sampled_nominal')
         self.assertFalse(arrivals[0]['measured_at_goal'])
@@ -938,6 +938,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         node=await self.arrival()
         arrived=[json.loads(c.args[1]) for c in node.event.call_args_list if c.args[0]=='PICO_ACTUATOR_ARRIVED']
         self.assertEqual(len(arrived),1);self.assertEqual(arrived[0]['position_tolerance_rad'],.035)
+        await self.arrival(error=.0284, primitive=True, tick_period=.005)
         for options in ({'error':.03501},{'operation':'load'},{'velocity':.00501},{'fresh':False}):
             with self.subTest(options=options),self.assertRaisesRegex(RuntimeError,'PICO_ACTUATOR_FEEDBACK_TIMEOUT'):
                 await self.arrival(**options)

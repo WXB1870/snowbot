@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import signal
-import socket
 import ssl
 import subprocess
 import sys
@@ -84,20 +83,10 @@ def check(args):
         raise ValueError('部署、工具、PICO 和夹爪配置范围不匹配')
     from snowbot_bringup.teleop.runtime_check import check_runtime
     report = check_runtime(args.deployment, robot)
-    from snowbot_bringup.teleop.runtime_check import ensure_stopped
-    ensure_stopped(args.deployment)
-    for host, port in ((args.host, args.vr_port), ('127.0.0.1', args.port)):
-        with socket.socket() as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind((host, port))
-            except OSError as exc:
-                raise RuntimeError(f'端口 {host}:{port} 不可用；请先关闭原实例。') from exc
-    print('VR_SOFTWARE_CHECK_OK：依赖、配置、消息字段、TLS 与端口检查通过；不表示机器人接口可用。')
+    print('VR_SOFTWARE_CHECK_OK：依赖、配置、消息字段与 TLS 检查通过；不表示机器人接口可用。')
     if args.deployment['runtime_mode'] == 'real':
         requested = getattr(args, 'check_robot', False)
-        writing = not args.check and args.deployment.get('command_enabled') == 'true'
-        if requested or writing:
+        if requested:
             from snowbot_bringup.teleop.runtime_check import check_robot_interface
             online = check_robot_interface(args.deployment, args.robot_check_timeout)
             report['online'] = online
@@ -159,17 +148,6 @@ def run(args):
             raw = build_path.read_bytes()
             manifest['installed_build'] = dict(path=str(build_path),
                 sha256=hashlib.sha256(raw).hexdigest(), record=json.loads(raw))
-        launcher = Path(__file__).resolve()
-        manifest['launcher_source'] = dict(path=str(launcher),
-            sha256=hashlib.sha256(launcher.read_bytes()).hexdigest())
-        try:
-            manifest['launcher_source'].update(
-                commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
-                                               text=True, stderr=subprocess.DEVNULL).strip(),
-                dirty=bool(subprocess.check_output(['git', 'status', '--porcelain', '--', 'tools'],
-                                                  cwd=ROOT, stderr=subprocess.DEVNULL)))
-        except (OSError, subprocess.CalledProcessError):
-            manifest['launcher_source'].update(commit=None, dirty=None)
         save()
         result = run_session(args, manifest)
     except (Exception, KeyboardInterrupt) as exc:
@@ -183,6 +161,19 @@ def run(args):
     return result
 
 
+def startup_lock(domain_id, namespace, *, inherit=False):
+    token = hashlib.sha256(f'{domain_id}/{namespace.strip("/")}'.encode()).hexdigest()[:20]
+    path = Path(tempfile.gettempdir())/f'bindu-vr-{os.getuid()}-{token}.lock'
+    lock = path.open('a')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        lock.close()
+        raise RuntimeError('该 ROS 域和命名空间已有启动器运行。') from exc
+    os.set_inheritable(lock.fileno(), inherit)
+    return lock
+
+
 def run_session(args, manifest):
     os.environ['ROS_DOMAIN_ID']=str(args.domain_id)
     if args.declare_load:
@@ -193,15 +184,9 @@ def run_session(args, manifest):
         declare_load(args)
         return 0
     # Held for the full session; ports alone do not protect a shared ROS namespace.
-    token = hashlib.sha256(f'{args.domain_id}/{args.namespace}'.encode()).hexdigest()[:20]
-    lock_path = Path(tempfile.gettempdir())/f'bindu-vr-{os.getuid()}-{token}.lock'
-    with lock_path.open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError('该 ROS 域和命名空间已有启动器运行。') from exc
-        report = check(args)
+    with startup_lock(args.domain_id, args.namespace):
         if args.check:
+            report = check(args)
             print(json.dumps(report, ensure_ascii=False))
             print('只读检查结束；未启动控制节点。')
             return 0
@@ -335,10 +320,10 @@ def parse_args(argv=None):
                         help='本次开启输入分段计时；沿用诊断日志，不改变控制时间戳或运动授权')
     parser.add_argument('--record-inputs',action='store_true',
                         help='完整保留观察端收到的VR输入与计时，供离线回放；其他诊断仍抽样')
-    parser.add_argument('--check', action='store_true', help='仅检查环境、证书和端口')
+    parser.add_argument('--check', action='store_true', help='显式检查环境、配置和证书')
     parser.add_argument('--check-robot', action='store_true', help='配合 --check，只读核对机器人端点、实测反馈和保护状态')
     parser.add_argument('--enable-commands', action='store_true',
-                        help='为本次真机位置或阻抗会话开放运动写入；保留在线预检，不修改现场配方')
+                        help='为本次真机位置或阻抗会话开放运动写入；由实际节点检查就绪，不修改现场配方')
     parser.add_argument('--robot-check-timeout', type=float, default=2., help='只读机器人检查时长，秒，最多30秒')
     parser.add_argument('--physics', action='store_true', help='启用Isaac物理反馈，保留浏览器显示；仅允许仿真配置')
     parser.add_argument('--domain-id', type=int, default=int(os.environ.get('ROS_DOMAIN_ID','0')))

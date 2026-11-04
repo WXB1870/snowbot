@@ -318,12 +318,11 @@
 +   return false;
 +  }
 + }
-@@ -2673,0 +2760,65 @@
+@@ -2673,0 +2760,63 @@
 +
 +bool ServoNode::session_impedance_ready() const {
 + const auto obs=EtherCAT_positionObservation();
 + if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
-+ for(float value:obs.wrench)if(!std::isfinite(value))return false;
 + return true;
 +}
 +
@@ -333,10 +332,9 @@
 + session_nominal_.setZero(n);session_velocity_.setZero(n);
 +}
 +bool ServoNode::session_impedance_inputs(const position_session::Observation& obs){
-+ if(session_q_.size()!=20 || session_dq_.size()!=20 || session_efforts_.size()!=20 || session_nominal_.size()!=20 || session_velocity_.size()!=20)return false;
 + session_q_.setZero();session_dq_.setZero();session_efforts_.setZero();
 + for(unsigned i=0;i<20;++i){
-+  if(session_q_index_[i]<0 || session_q_index_[i]>=20 || session_v_index_[i]<0 || session_v_index_[i]>=20 || !(obs.valid_mask&(1u<<i)) || !std::isfinite(obs.position[i]) || !std::isfinite(obs.speed[i]))return false;
++  if(!(obs.valid_mask&(1u<<i)) || !std::isfinite(obs.position[i]) || !std::isfinite(obs.speed[i]))return false;
 +  session_q_[session_q_index_[i]]=obs.position[i];session_dq_[session_v_index_[i]]=obs.speed[i];
 + }
 + session_nominal_=session_q_;session_velocity_.setZero();

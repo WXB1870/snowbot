@@ -110,6 +110,8 @@ class PositionSessionDevices:
         if node.runtime_mode != 'real':
             raise ValueError('SNOWBOT_VENDOR_REQUIRES_REAL_MODE')
         self.node, self.grippers = node, None
+        from .protocol import GraphSnapshot
+        self.graph = GraphSnapshot(node)
         self.runtime_parameters=load_parameters(node.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         node.device_backend = 'snowbot_vendor'
         node.declare_parameter('command_enabled', False, descriptor=ParameterDescriptor(read_only=True))
@@ -233,7 +235,7 @@ class PositionSessionDevices:
             self.node.get_logger().warn(str(exc), throttle_duration_sec=1.)
 
     def identity(self, topic, expected, kind, *, subscription=False):
-        method = self.node.get_subscriptions_info_by_topic if subscription else self.node.get_publishers_info_by_topic
+        method = self.graph.get_subscriptions_info_by_topic if subscription else self.graph.get_publishers_info_by_topic
         infos = method(topic)
         matched = [i for i in infos if i.node_namespace.rstrip('/')+'/'+i.node_name == expected and i.topic_type == kind]
         if len(matched) != 1 or not subscription and len(infos) != 1:
@@ -251,13 +253,13 @@ class PositionSessionDevices:
         try:
             self.identity(self.feedback_topic, self.receivers['head'], 'snowbot_ctl_msgs/msg/PositionObservation')
             q, v, stamp = self.health.observe(msg)
-            advanced = self.io.observe(q, v, stamp, self.node.now(), sample=msg.pdo_sample)
-            if advanced and self.grippers and self.grippers.core:
+            if self.grippers and self.grippers.core and stamp > self.grippers.core.feedback_stamp:
                 try:
                     self.grippers.core.observe(q, v, {'left': float(msg.current[7]),
                         'right': float(msg.current[15])}, stamp)
                 except ValueError as exc:
                     self.grippers.core.invalid = str(exc)
+            self.io.observe(q, v, stamp, self.node.now(), sample=msg.pdo_sample)
             if msg.session_selected and msg.session == self.envelopes.session:
                 self.takeover_previous_hold = None
             if self.health.reference_mode:
@@ -269,7 +271,7 @@ class PositionSessionDevices:
                         getattr(msg, 'reference_mode', 0) == 2 and getattr(msg, 'reference_valid', False) and
                         getattr(msg, 'output_valid', False) and getattr(msg, 'segment_id', 0) == msg.command_sequence and
                         0 <= self.node.now()-sample <= .02 and
-                        all(len(values)==len(CONTROL_NAMES) and all(math.isfinite(x) for x in values) for values in arrays)):
+                        all(all(math.isfinite(x) for x in values) for values in arrays)):
                     self.io.servo_reference = (sample, *[dict(zip(CONTROL_NAMES, values)) for values in arrays])
                     source = self.sent.get(msg.command_sequence)
                     if (source is not None and msg.command_sequence > self.applied_sequence and
@@ -411,9 +413,9 @@ class PositionSessionDevices:
             self.identity(name, self.receivers[reader], 'snowbot_ctl_msgs/msg/'+kind, subscription=True)
             if writer:
                 self.identity(name, self.receivers[writer], 'snowbot_ctl_msgs/msg/'+kind)
-            elif self.node.count_publishers(name) != 1:
+            elif self.graph.count_publishers(name) != 1:
                 raise RuntimeError('SNOWBOT_COMMAND_PUBLISHER_CONFLICT:'+name)
-        if any(self.node.count_publishers(t) for t in ('/joint_position_cmd', '/body/motor_cmd')):
+        if any(self.graph.count_publishers(t) for t in ('/joint_position_cmd', '/body/motor_cmd')):
             raise RuntimeError('SNOWBOT_LEGACY_SOURCE_CONFLICT')
 
     def advance_startup_hold(self, engine):
@@ -515,8 +517,6 @@ class PositionSessionDevices:
             raise
 
     def _send_packet(self, groups, target):
-        if set(groups) != CONTROL_GROUPS:
-            raise RuntimeError('SNOWBOT_POSITION_SESSION_RESOURCE_LAYOUT')
         # Validate before minting an envelope, so rejected requests cannot renew.
         if self.health.reference_mode:
             self._settle_takeover()
@@ -532,9 +532,7 @@ class PositionSessionDevices:
             # source identity in this session; stopping never invents ownership.
             identity = ((motion.command_id, motion.lease_id, motion.epoch, self.io.profile.digest)
                         if motion is not None else self.source_identity if self.io.sending_hold else None)
-            if (identity is None or any(not isinstance(value, str) or not value or
-                    len(value.encode('utf-8')) > 128 for value in (identity[0], identity[1], identity[3])) or
-                    type(identity[2]) is not int or not 0 <= identity[2] < 2**64):
+            if identity is None:
                 raise RuntimeError('SNOWBOT_SOURCE_IDENTITY_LAYOUT')
         if self.health.reference_mode and self.takeover_pending is not None and not self.io.sending_hold:
             return  # Retain the latest original Motion in IO; no identity/TTL renewal.

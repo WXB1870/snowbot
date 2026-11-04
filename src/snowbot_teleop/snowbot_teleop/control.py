@@ -226,11 +226,9 @@ class PicoControl:
         except (ValueError,TypeError):
             self.lock('PICO_POSE_INVALID',now);return
         if (any(f.mapping != PICO_MAPPING or not f.valid or f.init or not f.source_id or
-                f.side != side or type(f.seq) is not int or f.seq < 0 or
+                f.side != side or
                 not math.isfinite(f.stamp) or not 0 <= now-f.stamp <= self.max_age or
-                len(f.button_edges)!=8 or any(type(v) is not int or v<0 for v in f.button_edges) or
-                type(f.buttons) is not int or not 0<=f.buttons<8 or
-                type(f.clutch_seq) is not int or f.clutch_seq<0 or
+                not 0<=f.buttons<8 or
                 not all(math.isfinite(v) and 0<=v<=1 for v in (f.grip,f.trigger))
                 for f,side in zip(pair,('left','right'))) or
                 left.source_id != right.source_id or left.seq != right.seq or

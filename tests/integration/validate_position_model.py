@@ -28,7 +28,8 @@ std::string get_package_share_directory(const std::string&){
 '''
 test=r'''
 int main(int argc,char** argv){
- if(argc!=2)return 2;package_path=argv[1];
+ if(argc!=2)return 2;
+ package_path=argv[1];
  assert(get_packages_path("dual_arm","urdf")==package_path+"/urdf");
  for(mode=1;mode<=2;++mode){
   bool caught=false;
