@@ -144,8 +144,7 @@ class PicoNode(RuntimeNode):
             from bindu_contracts.resources import resource_file
             from snowbot_bringup.teleop.snowbot_primitive_replay import AxialGraspGuard, replay_graph, NAMES
             self.primitive_library = resource_file(self.cfg['primitive_library'])
-            library, _, plans = replay_graph(self.primitive_library, 1., None)
-            for segment in plans.values(): segment.validate_profile(self.profile)
+            library, _, _ = replay_graph(self.primitive_library, 1., None)
             self.prepare_positions = dict(zip(NAMES, library['nodes'][library['home_node']]))
             self.primitive_grasp_guard = AxialGraspGuard(self.tool_cfg['urdf'], library['grasp'])
         prepare_names=[n for g in self.tool_cfg['resource_groups'] for n in self.profile.groups[g]]

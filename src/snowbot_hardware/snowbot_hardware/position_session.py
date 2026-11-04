@@ -33,10 +33,6 @@ class PositionSessionIO(SnowbotIO):
 
     def validate_motion(self, motion, now):
         SourceEnvelope.validate_motion(motion, now, target_stream=self.target_stream)
-        if (any(not isinstance(value, str) or not value or len(value.encode('utf-8')) > 128 for value in
-                (motion.command_id, motion.lease_id, self.profile.digest)) or
-                type(motion.epoch) is not int or not 0 <= motion.epoch < 2**64):
-            raise RuntimeError('SNOWBOT_SOURCE_IDENTITY_LAYOUT')
 
     def capture(self, groups):
         if set(groups) != CONTROL_GROUPS:

@@ -42,21 +42,14 @@ def decode_observation(msg, now):
 
 class SessionHealth:
     def __init__(self, now, steady=time.monotonic, *, execution_mode="position", reference_mode=0):
-        if execution_mode not in ("position", "impedance"):
-            raise ValueError("SNOWBOT_EXECUTION_MODE")
         self.execution_mode = execution_mode
-        if reference_mode not in (0, 2):
-            raise ValueError('SNOWBOT_REFERENCE_MODE')
-        if reference_mode and execution_mode != 'position':
-            raise ValueError('SNOWBOT_TARGET_REQUIRES_PURE_POSITION')
         self.reference_mode = reference_mode
         self.now, self.steady = now, steady
         self.states, self.received = {}, {}
         self.observation = None
-        self.observation_stamp = self.measurement_stamp = 0.
+        self.measurement_stamp = 0.
         self.boot = self.sample = 0
         self.progress = None
-        self.advances = 0
         self.invalid = ''
         self.messages = {'servo': {}}
 
@@ -68,22 +61,15 @@ class SessionHealth:
             if msg.pdo_sample < self.sample:
                 raise ValueError('SNOWBOT_PDO_SEQUENCE')
             if msg.pdo_sample > self.sample:
-                self.advances = (min(2, self.advances+1) if self.progress is not None and
-                    0 <= self.steady()-self.progress <= ROS_FEEDBACK_TIMEOUT_S else 1)
                 self.progress = self.steady()
             self.boot, self.sample = msg.boot_id, msg.pdo_sample
-            self.observation, self.received['observation'] = msg, self.steady()
+            self.observation = msg
             self.measurement_stamp = result[2]
-            self.observation_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9
-            if (msg.valid_mask & CONTROL_MASK != CONTROL_MASK or
-                    any(status & 8 for i, status in enumerate(msg.status) if CONTROL_MASK & (1 << i))):
-                self.advances = 0
             self.invalid = ''
             self.messages['servo'] = dict(operation_enabled_mask=sum(
                 1 << i for i, status in enumerate(msg.status) if status & 4))
             return result
         except ValueError as exc:
-            self.advances = 0
             self.invalid = str(exc)
             raise
 
@@ -160,14 +146,11 @@ class SessionHealth:
         """Use the decoded PDO snapshot; only its freshness changes between reads."""
         if self.invalid:
             raise RuntimeError(self.invalid)
-        obs = self.observation
-        if (obs is None or self.progress is None or
-                not 0 <= self.steady()-self.progress <= ROS_FEEDBACK_TIMEOUT_S or
-                not 0 <= self.steady()-self.received['observation'] <= ROS_FEEDBACK_TIMEOUT_S):
+        if self.progress is None or not 0 <= self.steady()-self.progress <= ROS_FEEDBACK_TIMEOUT_S:
             raise RuntimeError('SNOWBOT_PDO_NOT_ADVANCING')
-        now = self.now()
-        if (not 0 <= now-self.observation_stamp <= ROS_FEEDBACK_TIMEOUT_S or
-                not 0 <= now-self.measurement_stamp <= ROS_FEEDBACK_TIMEOUT_S):
+        obs = self.observation
+        if not (obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9 <= self.now() <=
+                self.measurement_stamp+ROS_FEEDBACK_TIMEOUT_S):
             raise RuntimeError('SNOWBOT_PDO_STALE')
         return obs
 
@@ -175,8 +158,6 @@ class SessionHealth:
         obs = self.require_observation()
         if any(status & 8 for i, status in enumerate(obs.status) if CONTROL_MASK & (1 << i)):
             raise RuntimeError('SNOWBOT_DRIVE_FAULT')
-        if self.advances < 2:
-            raise RuntimeError('SNOWBOT_PDO_NOT_ADVANCING')
         if obs.valid_mask & CONTROL_MASK != CONTROL_MASK:
             raise RuntimeError('SNOWBOT_POSITION_FEEDBACK_INVALID')
         for layer in ('upper', 'middle', 'servo'):

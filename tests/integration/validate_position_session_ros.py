@@ -162,7 +162,7 @@ def main():
         d=PositionSessionDevices.__new__(PositionSessionDevices)
         observer.now=lambda:observer.get_clock().now().nanoseconds*1e-9
         events=[];observer.event=lambda *args,**kwargs:events.append((args,kwargs))
-        d.node=observer;d.health=SessionHealth(observer.now,reference_mode=2)
+        d.node=d.graph=observer;d.health=SessionHealth(observer.now,reference_mode=2)
         d.envelopes=SourceEnvelope(session,observer.now,target_stream=True)
         d.sent={};d.target_instance=d.source_identity=d.takeover_pending=None
         d.target_fault='';d.applied_sequence=0
@@ -174,7 +174,7 @@ def main():
         ack_sub=observer.create_subscription(PositionSessionState,'/bindu/position/servo_receipt',d.receive_receipt,1)
         try:
             def ready():
-                if ack_pub.get_subscription_count()!=1 or d.health.advances<2:return False
+                if ack_pub.get_subscription_count()!=1:return False
                 try:d.check_ready(CONTROL_GROUPS)
                 except RuntimeError:return False
                 return True

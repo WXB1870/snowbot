@@ -148,17 +148,6 @@ def run(args):
             raw = build_path.read_bytes()
             manifest['installed_build'] = dict(path=str(build_path),
                 sha256=hashlib.sha256(raw).hexdigest(), record=json.loads(raw))
-        launcher = Path(__file__).resolve()
-        manifest['launcher_source'] = dict(path=str(launcher),
-            sha256=hashlib.sha256(launcher.read_bytes()).hexdigest())
-        try:
-            manifest['launcher_source'].update(
-                commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
-                                               text=True, stderr=subprocess.DEVNULL).strip(),
-                dirty=bool(subprocess.check_output(['git', 'status', '--porcelain', '--', 'tools'],
-                                                  cwd=ROOT, stderr=subprocess.DEVNULL)))
-        except (OSError, subprocess.CalledProcessError):
-            manifest['launcher_source'].update(commit=None, dirty=None)
         save()
         result = run_session(args, manifest)
     except (Exception, KeyboardInterrupt) as exc:

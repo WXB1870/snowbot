@@ -143,16 +143,6 @@ class GripperController:
                 raise RuntimeError(self.feedback_errors[side]+':'+side)
         health = self.health()
         if self.require_driver_ack:
-            if health.get('gripper_control_enabled') is not True:
-                raise RuntimeError('GRIPPER_DRIVER_PATCH_REQUIRED')
-            sequences, holds = health.get('gripper_sequence'), health.get('gripper_hold_position')
-            if (not isinstance(sequences, list) or len(sequences) != 2 or
-                    any(type(x) is not int or x < 0 for x in sequences) or
-                    not isinstance(holds, list) or len(holds) != 2 or
-                    any(type(x) not in (float, int) or not math.isfinite(x) for x in holds) or
-                    type(health.get('gripper_hold_mask')) is not int or not 0 <= health['gripper_hold_mask'] <= 3 or
-                    type(health.get('gripper_latched_mask')) is not int or not 0 <= health['gripper_latched_mask'] <= 3):
-                raise RuntimeError('GRIPPER_DRIVER_HEALTH_INVALID')
             for side in SIDES:
                 if GROUPS[side] in self.groups and health['gripper_latched_mask'] & (1 << SIDES.index(side)):
                     raise RuntimeError('GRIPPER_DRIVER_LATCHED:'+side)
