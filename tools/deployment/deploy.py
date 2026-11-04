@@ -210,10 +210,49 @@ def keep_service_log(line, previous_wkc, now):
     match = re.search(r'\[ECAT-MON\].*WKC=(\d+)/(\d+).*bad_wkc=(\d+)', line)
     if match:
         key = match.groups()
-        if previous_wkc and previous_wkc[:3] == list(key) and now-previous_wkc[3] < 5.:
+        if previous_wkc and previous_wkc[:3] == list(key) and now-previous_wkc[3] < 10.:
             return False
         previous_wkc[:] = [*key, now]
     return True
+
+
+class ServiceConsole:
+    """Select brief console messages after the complete output has been saved."""
+    def __init__(self):
+        self.wkc, self.repeats = {}, {}
+
+    def __call__(self, stream, line):
+        from snowbot_bringup.teleop.snowbot_diagnostics import console_log
+        now = time.monotonic()
+        if not keep_service_log(line, self.wkc.setdefault(stream, []), now):
+            return None
+        if '[ECAT-MON]' in line:
+            fields = re.findall(r'\b(?:pdo|WKC|bad_wkc|good_age_ms)=[\d./]+', line)
+            return f'[{stream}] '+ ' '.join(fields)+'\n'
+        if line.startswith('[LOG_REPEAT] '):
+            value = json.loads(line[len('[LOG_REPEAT] '):])
+            return f'[{stream}] {value["message"].split(";", 1)[0]} (repeat +{value["suppressed_repeats"]})\n'
+        raw = line.removeprefix(f'[{stream}] ')
+        value = console_log(raw, stream)
+        if value is None:
+            if re.search(r'\[EtherCAT\] \d+ slaves found|\b(?:WARN(?:ING)?|ERROR|FATAL|FAULT|FAILED|TARGET_REJECTED|DEVICE_FEEDBACK_DETAIL|Traceback|\w*Error|\w*Exception)\b|警告|错误|失败|异常|回零|回位|安全退出', raw, re.IGNORECASE):
+                return line
+            if 'TARGET_PREDICTION ' in raw:
+                return line
+            return None
+        message = value['message']
+        key = (value['name'], value['level'], message.split(';', 1)[0])
+        previous = self.repeats.get(stream)
+        if previous is not None and previous[0] == key:
+            previous[2] += 1
+            if now-previous[1] < 10.:
+                return None
+            count = previous[2]
+            previous[1:] = [now, 0]
+            return f'[{stream}] {key[2]} (repeat +{count}; details in log)\n'
+        self.repeats[stream] = [key, now, 0]
+        level = {30:'WARN', 40:'ERROR', 50:'FATAL'}[value['level']]
+        return f'[{stream}] {level} {message}\n'
 
 
 def wait_service(children, ready, spin, stopped, timeout=120.):
@@ -256,18 +295,9 @@ def stop_services(children):
 
 
 def copy_service_output(name, child, writer):
-    from snowbot_bringup.teleop.snowbot_diagnostics import console_log
-    previous_wkc = []
     try:
         for line in child.stdout:
-            if not keep_service_log(line, previous_wkc, time.monotonic()):
-                continue
-            value = console_log(line, name)
-            if value is None:
-                writer.write_text(name, f'[{name}] '+line)
-            else:
-                value['text'] = f'[{name}] '+line
-                writer.record_log(name, value, text=True)
+            writer.write_text(name, f'[{name}] '+line)
     finally:
         child.stdout.close()
 
@@ -298,7 +328,7 @@ def services(bindu, workspace, execution_mode='impedance'):
 
     require_stopped(bindu)  # Do not start a second EtherCAT/controller chain.
     logdir = workspace/'startup-logs'/('services-'+time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}')
-    writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=True)
+    writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
     stopped, children, readers = threading.Event(), [], []
     handlers = {s: signal.signal(s, lambda *_: stopped.set())
                 for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
@@ -336,9 +366,9 @@ def services(bindu, workspace, execution_mode='impedance'):
                 if not wait_service(children, lambda: ready(name),
                                     lambda: rclpy.spin_once(node, timeout_sec=.05), stopped):
                     break
-                print(f'READY {name}', flush=True)
+                print(f'INITIALIZED {name}', flush=True)
             if not stopped.is_set():
-                print(f'SNOWBOT_BASE_READY execution_mode={execution_mode}', flush=True)
+                print(f'SNOWBOT_BASE_STARTED execution_mode={execution_mode}; initialization complete, see feedback warnings', flush=True)
         except (OSError, RuntimeError) as exc:
             result = 1
             print(f'START_FAILED {name}: {exc}; startup paused, Ctrl+C for ordered exit',
@@ -423,13 +453,15 @@ def operator(bindu, workspace, frontend):
                             lambda:rclpy.spin_once(node, timeout_sec=.05), stopped):
             return 0
         mode = base_mode(states)
-        print('BASE_READY execution_mode='+mode, flush=True)
+        print('BASE_CONNECTED execution_mode='+mode, flush=True)
         if frontend != 'vr':
             namespace = json.loads((workspace/'upper/site.json').read_text())['arguments']['namespace'].strip('/')
             lock = session_lock(int(os.environ.get('ROS_DOMAIN_ID', '0')), namespace)
             stamp = time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}'
             runs = workspace/'primitive-runs'; runs.mkdir(parents=True, exist_ok=True)
-            writer = DiagnosticWriter(workspace/'startup-logs'/('replay-'+stamp)/'process-output.jsonl', echo=True)
+            logdir = workspace/'startup-logs'/('replay-'+stamp)
+            print(f'LOGS {logdir}', flush=True)
+            writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
             def event(msg):
                 if msg.state in ('STARTUP_HOLD_READY', 'STARTUP_HOLD_FAILED'):
                     hold.update(state=msg.state, code=msg.code)

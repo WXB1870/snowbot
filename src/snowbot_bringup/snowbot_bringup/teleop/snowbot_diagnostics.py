@@ -386,7 +386,10 @@ class DiagnosticWriter:
                     handles[stream].write(line);sizes[stream]+=len(line.encode());self.written+=1
                     self.written_by_stream[stream]=self.written_by_stream.get(stream,0)+1
                     if mode == 'text' and self.echo:
-                        try:sys.stdout.write(line)
+                        try:
+                            # A formatter may hide console noise; the file keeps the original line.
+                            visible = self.echo(stream, line) if callable(self.echo) else line
+                            if visible:sys.stdout.write(visible)
                         except (OSError,ValueError) as exc:self.console_error=str(exc);self.echo=False
                 if time.monotonic()-last_flush>=1.:
                     flush();last_flush=time.monotonic()

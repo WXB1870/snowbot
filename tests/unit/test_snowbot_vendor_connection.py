@@ -360,14 +360,69 @@ class DeploymentEntryTests(unittest.TestCase):
         healthy = '[ECAT-MON] pdo=100 WKC=67/67 bad_wkc=0 good_age_ms=0.2\n'
         self.assertTrue(keep_service_log(healthy, previous, 0.))
         self.assertFalse(keep_service_log(healthy.replace('100', '101'), previous, 1.))
-        self.assertTrue(keep_service_log(healthy, previous, 5.))
-        self.assertTrue(keep_service_log(healthy.replace('67/67', '45/67'), previous, 5.1))
-        self.assertTrue(keep_service_log(healthy, previous, 5.2))
-        self.assertTrue(keep_service_log(healthy.replace('bad_wkc=0', 'bad_wkc=1'), previous, 5.3))
-        self.assertFalse(keep_service_log('TARGET_PREDICTION accepted=1 error=\n', previous, 6.))
-        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=0 error=joint_limit\n', previous, 6.))
-        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=1 error=admission_failed\n', previous, 6.))
-        self.assertTrue(keep_service_log('[ERROR] drive fault\n', previous, 6.))
+        self.assertFalse(keep_service_log(healthy, previous, 5.))
+        self.assertTrue(keep_service_log(healthy, previous, 10.))
+        self.assertTrue(keep_service_log(healthy.replace('67/67', '45/67'), previous, 10.1))
+        self.assertTrue(keep_service_log(healthy, previous, 10.2))
+        self.assertTrue(keep_service_log(healthy.replace('bad_wkc=0', 'bad_wkc=1'), previous, 10.3))
+        self.assertFalse(keep_service_log('TARGET_PREDICTION accepted=1 error=\n', previous, 11.))
+        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=0 error=joint_limit\n', previous, 11.))
+        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=1 error=admission_failed\n', previous, 11.))
+        self.assertTrue(keep_service_log('[ERROR] drive fault\n', previous, 11.))
+
+    def test_service_console_coalesces_fault_snapshots_and_shows_changed_faults(self):
+        from unittest.mock import patch
+        from tools.deployment.deploy import ServiceConsole
+        console = ServiceConsole()
+        warning = '[servo] [WARN] [1.0] [servo_node]: Position session: impedance_joint_feedback_invalid; pdo_sample=1 ft_valid=0x0\n'
+        with patch('tools.deployment.deploy.time.monotonic', side_effect=[0., 1., 10., 10.1]):
+            self.assertIn('ft_valid=0x0', console('servo', warning))
+            self.assertIsNone(console('servo', warning.replace('pdo_sample=1', 'pdo_sample=2')))
+            summary = console('servo', warning.replace('pdo_sample=1', 'pdo_sample=3'))
+            self.assertIn('impedance_joint_feedback_invalid', summary)
+            self.assertIn('repeat +2', summary)
+            self.assertNotIn('pdo_sample', summary)
+            self.assertIn('drive_fault', console('servo', warning.replace('impedance_joint_feedback_invalid', 'drive_fault')))
+
+    def test_service_output_saves_all_lines_and_only_echoes_key_events(self):
+        from io import StringIO
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from tools.deployment.deploy import ServiceConsole, copy_service_output
+        from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+        lines = ['  joint_name Kp Kd\n', '  shoulder_joint 1200 600\n',
+                 '[INFO] [1.0] [servo_node]: pinocchio joint idx_q=1 idx_v=1\n',
+                 '[EtherCAT] 7 slaves found\n',
+                 '[ECAT-MON] pdo=1 WKC=13/13 bad_wkc=0 good_age_ms=0.2 L4{cw=0x0000}\n',
+                 '[ECAT-MON] pdo=2 WKC=13/13 bad_wkc=0 good_age_ms=0.3 L4{cw=0x0000}\n',
+                 'TARGET_PREDICTION accepted=1 error=\n',
+                 '[WARN] [1.0] [servo_node]: impedance_joint_feedback_invalid\n',
+                 '[WARN] [2.0] [servo_node]: impedance_joint_feedback_invalid\n',
+                 '[ERROR] [2.0] [servo_node]: drive fault\n',
+                 '警告：所有电机反馈为0，跳过回零控制。\n',
+                 '收到中断信号，进入关机回零模式...\n',
+                 'Traceback (most recent call last):\n', '  File "a.py", line 2\n',
+                 'ValueError: invalid target\n']
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch('sys.stdout', output):
+            writer = DiagnosticWriter(Path(tmp)/'process-output.jsonl', echo=ServiceConsole())
+            child = SimpleNamespace(stdout=StringIO(''.join(lines)))
+            copy_service_output('servo', child, writer)
+            writer.close()
+            saved = (Path(tmp)/'servo.log').read_text()
+            self.assertEqual(saved, ''.join('[servo] '+line for line in lines))
+            self.assertTrue(child.stdout.closed)
+            self.assertEqual(writer.dropped, 0)
+        visible = output.getvalue()
+        self.assertNotIn('Kp Kd', visible)
+        self.assertNotIn('idx_q', visible)
+        self.assertNotIn('TARGET_PREDICTION', visible)
+        self.assertNotIn('L4{', visible)
+        self.assertNotIn('LOG_REPEAT', visible)
+        self.assertEqual(visible.count('WKC='), 1)
+        self.assertEqual(visible.count('impedance_joint_feedback_invalid'), 1)
+        for text in ('7 slaves found', 'drive fault', '警告', '关机回零', 'Traceback', 'ValueError'):
+            self.assertIn(text, visible)
 
     def test_service_wait_uses_readiness_and_never_advances_after_exit(self):
         import threading
