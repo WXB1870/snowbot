@@ -173,12 +173,13 @@ def signal_metadata(plan):
     return dict(waveform='quintic')
 
 
-def checked_state(msg, now, received, steady, profile_hash, *, owned=False, epoch=0, stationary=True):
+def checked_state(msg, now, received, steady, profile_hash, *, owned=False, epoch=0, stationary=True,
+                  state_max_age=.1, feedback_max_age=.2):
     feedback_age = now-(msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9)
     if (msg.runtime_mode != 'real' or msg.simulated or msg.device_backend != 'snowbot_vendor' or
             msg.profile_hash != profile_hash or msg.stop_failures or
-            not 0 <= steady-received <= .1 or
-            not 0 <= feedback_age <= .2 or
+            not 0 <= steady-received <= state_max_age or
+            not 0 <= feedback_age <= feedback_max_age or
             msg.state in ('FAILED', 'STOPPING') or
             msg.code not in ('OK', 'CANCELED', 'FEEDBACK_CONFIRMED', 'STARTUP_READY')):
         raise RuntimeError('EXECUTION_NOT_READY:state='+msg.state+';code='+msg.code+

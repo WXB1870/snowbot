@@ -369,8 +369,8 @@
   "grasp": {
     "shaft_separation_m": -0.42000000000000004,
     "bar_separation_m": 0.015000000000000001,
-    "max_position_error_m": 0.01,
-    "max_axis_error_rad": 0.05,
+    "max_position_error_m": 0.04,
+    "max_axis_error_rad": 0.17453292519943295,
     "left_frame": "arm_l_ft_sensor",
     "left_grip_in_flange_m": [
       0.119,

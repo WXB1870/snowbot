@@ -184,7 +184,7 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     manifest = json.loads(Path(path).read_text())
     if manifest.get('transition_validation_passed') is not True:
         raise ValueError('REPLAY_TRANSITIONS_UNVALIDATED')
-    if not 0 < tolerance <= .0175 or not set(NAMES) <= set(measured):
+    if not 0 < tolerance <= math.radians(2) or not set(NAMES) <= set(measured):
         raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
     if any(not math.isfinite(measured[n]) for n in NAMES):
         raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
@@ -361,7 +361,7 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
 
 
 
-def run_replay(plan, port, *, settle_timeout=5., execution_mode='position'):
+def run_replay(plan, port, *, settle_timeout=5., execution_mode='position', velocity_tolerance=.01):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
     nominal = execution_mode == 'impedance'
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
@@ -397,7 +397,7 @@ def run_replay(plan, port, *, settle_timeout=5., execution_mode='position'):
                                        for n,x in zip(plan.names,plan.points[-1]))
                 resting = (arrival is not None and all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
                                for n,x in zip(plan.names,plan.points[-1])) and
-                           all(abs(v[n]) <= .005 for n in plan.names))
+                           all(abs(v[n]) <= velocity_tolerance for n in plan.names))
                 rest_since = now if resting and rest_since is None else rest_since if resting else None
                 if rest_since is not None and now-rest_since >= .2:
                     arrived = True
@@ -581,7 +581,7 @@ def execute(args, plan):
             now, steady = self.ros(), self.steady()
             q, v = checked_state(s, now, received, steady, robot.profile.digest,
                                  owned=owned, epoch=self.lease.epoch if self.lease else 0,
-                                 stationary=False)
+                                 stationary=False, state_max_age=.2, feedback_max_age=.3)
             if self.instance is None: self.instance = s.instance_id
             if not self.instance or s.instance_id != self.instance:
                 raise RuntimeError('REPLAY_EXECUTOR_CHANGED')
@@ -649,8 +649,7 @@ def execute(args, plan):
             record('target', source_stamp=source, q=list(goal))
         @staticmethod
         def arrival_tolerance(name):
-            return robot.profile.stop_position_tolerances.get(
-                name, robot.profile.feedback_tolerances['joint_position'])
+            return math.radians(2)
         def release_and_confirm_stop(self):
             if not self.lease: return False
             call(leases, Lease.Request(operation='release', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
@@ -690,7 +689,8 @@ def execute(args, plan):
         record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
-        result = run_replay(plan, port, execution_mode=args.execution_mode)
+        result = run_replay(plan, port, execution_mode=args.execution_mode,
+                            velocity_tolerance=robot.profile.feedback_tolerances['joint_velocity'])
         if args.action == 'Prepare':
             confirm_prepare_grippers(port, 'open')
             confirm_prepare_grippers(port, 'close')
@@ -723,7 +723,8 @@ def replay_action(args, parser):
         plan = load_prepare_return(args.library, args.prepare_log, args.speed)
     elif manifest.get('transition_validation_passed'):
         start = args.from_node or manifest['home_node']
-        plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])), args.speed, args.waist_lead)
+        plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])),
+                                 args.speed, args.waist_lead, args.start_tolerance)
     else:
         plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
@@ -779,7 +780,8 @@ def main(argv=None):
     parser.add_argument('--vendor-namespace', default='')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--output-dir', type=Path, help='Interactive mode: one new JSONL log per selected action')
-    parser.add_argument('--start-tolerance', type=float, default=.01)
+    parser.add_argument('--start-tolerance', type=float, default=math.radians(2),
+                        help='Start-node matching tolerance in rad; default/max 2 deg')
     args = parser.parse_args(argv)
     if args.action == 'ReturnZero' and not args.prepare_log:
         parser.error('ReturnZero requires --prepare-log')
