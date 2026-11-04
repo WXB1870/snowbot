@@ -384,6 +384,17 @@ class DeploymentEntryTests(unittest.TestCase):
             self.assertNotIn('pdo_sample', summary)
             self.assertIn('drive_fault', console('servo', warning.replace('impedance_joint_feedback_invalid', 'drive_fault')))
 
+    def test_session_only_notice_prints_once_without_hiding_real_faults(self):
+        from tools.deployment.deploy import ServiceConsole
+        console = ServiceConsole()
+        notice = '[servo] [WARN] [1.0] [servo_node]: Position session: legacy_source_disabled_for_target_stream\n'
+        self.assertIn('INFO target_stream: legacy input ignored', console('servo', notice))
+        for _ in range(5):
+            self.assertIsNone(console('servo', notice))
+        self.assertIn('ERROR drive fault', console('servo', '[servo] [ERROR] [1.1] [servo_node]: drive fault\n'))
+        self.assertIsNone(console('servo', notice))
+        self.assertIn('ERROR', console('servo', notice.replace('[WARN]', '[ERROR]')))
+
     def test_service_output_saves_all_lines_and_only_echoes_key_events(self):
         from io import StringIO
         from types import SimpleNamespace

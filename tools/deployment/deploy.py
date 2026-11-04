@@ -220,6 +220,7 @@ class ServiceConsole:
     """Select brief console messages after the complete output has been saved."""
     def __init__(self):
         self.wkc, self.repeats = {}, {}
+        self.notices = set()
 
     def __call__(self, stream, line):
         from snowbot_bringup.teleop.snowbot_diagnostics import console_log
@@ -242,6 +243,11 @@ class ServiceConsole:
             return None
         message = value['message']
         key = (value['name'], value['level'], message.split(';', 1)[0])
+        if key[1:] == (30, 'Position session: legacy_source_disabled_for_target_stream'):
+            if stream in self.notices:
+                return None
+            self.notices.add(stream)
+            return f'[{stream}] INFO target_stream: legacy input ignored\n'
         previous = self.repeats.get(stream)
         if previous is not None and previous[0] == key:
             previous[2] += 1
