@@ -326,10 +326,14 @@ def targets(plan, elapsed, initial, limits, axis='body_joint_1'):
     q = {n: initial[n] for n in NAMES}
     q[axis] += offset
     for n in NAMES:
-        # Extra excursion clearance applies only to the axis being moved.
-        margin = .01 if n == axis else 0.
-        if not math.isfinite(q[n]) or not limits[n][0]+margin <= q[n] <= limits[n][1]-margin:
+        # Held joints may have a small measured offset beyond a model boundary.
+        # Keep their commanded targets inside the model; retain moving-axis clearance.
+        margin = .01 if n == axis else -.001
+        lo, hi = limits[n]
+        if not math.isfinite(q[n]) or not lo+margin <= q[n] <= hi-margin:
             raise ValueError('TEST_POSITION_LIMIT:'+n)
+        if n != axis:
+            q[n] = min(hi, max(lo, q[n]))
     return q
 
 
