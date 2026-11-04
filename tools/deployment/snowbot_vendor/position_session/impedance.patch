@@ -198,7 +198,11 @@
 +    session_calibration_confirmed_=declare_parameter<bool>("impedance_calibration_confirmed",false,session_descriptor);
 +    impedance_following_error_rad_=declare_parameter<double>("impedance_following_error_rad",.25,session_descriptor);
 +    if(!std::isfinite(impedance_following_error_rad_) || impedance_following_error_rad_<=0 || impedance_following_error_rad_>.5)throw std::invalid_argument("impedance_following_error_rad");
-@@ -189 +197 @@
+@@ -161 +169,2 @@
+-      position_trajectory_.configure(tuning);
++      tuning.separate_waist=session_execution_mode_=="impedance";
++      position_trajectory_.configure(tuning);
+@@ -189 +198 @@
 -        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?5:3;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
 +        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=position_reference_mode_==2?5:3;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"legacy_impedance":session_execution_mode_;
 @@ -198 +206,16 @@

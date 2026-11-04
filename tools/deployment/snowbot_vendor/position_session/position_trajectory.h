@@ -96,6 +96,7 @@ struct PredictionTrace {
  const char* reason="ordinary_trend";
 };
 struct TargetTuning {
+ bool separate_waist=false;
  double trend_min_interval_s=.005,trend_max_interval_s=.1,trend_filter_s=.04,trend_velocity_fraction=.8;
  double takeover_velocity_tolerance_rad_s=.01,takeover_position_tolerance_rad=.002,held_takeover_position_tolerance_rad=.25;
  bool valid()const noexcept {
@@ -118,6 +119,36 @@ class TrajectoryQueue {
   const Entry* e=&entries_[0];for(unsigned i=1;i<count_;++i)if(entries_[i].start<=now)e=&entries_[i];return e;
  }
  static void require(bool value,const char* text){if(!value)throw std::invalid_argument(text);}
+ static Segment separate_waist_target(const bindu::execution::JointLimits& limits,
+   const bindu::execution::JointState& seed,const std::array<double,joint_count>& goal,
+   const std::vector<double>& hint){
+  using namespace bindu::execution;
+  std::array<Segment,2> groups;std::vector<double> knots{0.};
+  for(unsigned group=0;group<2;++group){
+   const unsigned first=group?14:0,last=group?joint_count:14;
+   const auto slice=[first,last](const std::vector<double>& values){return std::vector<double>(values.begin()+first,values.begin()+last);};
+   JointState initial{slice(seed.q),slice(seed.v),slice(seed.a),slice(seed.j)};
+   groups[group]=Segment::tracking_target(JointLimits(limits.begin()+first,limits.begin()+last),initial,
+     std::vector<double>(goal.begin()+first,goal.begin()+last),slice(hint),0.,30.,5.);
+   for(const auto& piece:groups[group].describe())knots.push_back(piece.start+piece.duration);
+  }
+  std::sort(knots.begin(),knots.end());knots.erase(std::unique(knots.begin(),knots.end()),knots.end());
+  const auto sample=[&groups](double at){
+   JointState joined;
+   for(const auto& group:groups){const auto state=group.sample(at);
+    joined.q.insert(joined.q.end(),state.q.begin(),state.q.end());joined.v.insert(joined.v.end(),state.v.begin(),state.v.end());
+    joined.a.insert(joined.a.end(),state.a.begin(),state.a.end());joined.j.insert(joined.j.end(),state.j.begin(),state.j.end());
+   }
+   return joined;
+  };
+  Curves curves;
+  for(size_t i=1;i<knots.size();++i){
+   // Split only at existing polynomial boundaries. Endpoint q/v/a uniquely
+   // reconstruct each degree <= 5 polynomial on this same time interval.
+   curves.push_back(std::make_shared<Curve>(knots[i-1],knots[i]-knots[i-1],sample(knots[i-1]),sample(knots[i])));
+  }
+  return Segment::from_curves(curves,limits);
+ }
 public:
  void configure(const TargetTuning& value){require(!count_&&value.valid(),"target_tuning_invalid_or_active");tuning_=value;}
  TargetTuning tuning()const noexcept{return tuning_;}
@@ -240,7 +271,8 @@ public:
 #else
    throw std::invalid_argument("rigid_prediction_model_not_built");
 #endif
-  }else segment=Segment::tracking_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),hint,0.,30.,5.);
+  }else if(tuning.separate_waist)segment=separate_waist_target(limits,seed,goal,hint);
+  else segment=Segment::tracking_target(limits,seed,std::vector<double>(goal.begin(),goal.end()),hint,0.,30.,5.);
   result->segment=std::make_unique<const Segment>(segment);result->source=source;result->id=source.sequence;
   result->effective=snapshot.effective_ros;result->q=snapshot.q;result->v=snapshot.v;result->a=snapshot.a;
   result->target_stream=true;result->version=snapshot.version;result->held_takeover=snapshot.held_takeover;return result;

@@ -329,4 +329,64 @@ int replay_targets(bool rigid){
  if(rigid)assert(accepted>0&&accepted+fallback==count);
  std::cout<<"REPLAY_OK goals="<<count<<" rigid="<<rigid<<" geometric="<<accepted<<" fallback="<<fallback<<" samples="<<samples<<" maximum_dynamic_ratio="<<ratio<<" periodic_allocations="<<allocated<<" periodic_deletions="<<deleted<<" original_pause=1\n";return 0;
 }
-int main(int argc,char**){if(argc>1)return replay_targets(argc==2);tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+void independent_waist_timing(){
+ using namespace bindu::execution;
+ auto measured=seed(),goal=measured;measured[5]=-.14;goal[5]=-1.28;goal[14]+=.15;goal[15]+=.1;
+ Wire wire;wire.segment_id=1;wire.max_velocity.fill(1.25);wire.max_acceleration.fill(4.5);wire.max_jerk.fill(162.);
+ for(unsigned i=14;i<16;++i){wire.max_velocity[i]=.6;wire.max_acceleration[i]=3.6;wire.max_jerk[i]=259.2;}
+ const int64_t base=1000000000;Meta source{929,1,base,base+maximum_target_ttl,1};
+ TrajectoryQueue queue;TargetSnapshot snapshot;assert(queue.snapshot(base,base,1,10000000,measured,snapshot));
+ TargetTuning tuning;tuning.separate_waist=true;
+ auto prepared=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,1.25,4.5,259.2,tuning);
+ std::array<PreparedSegment,2> groups;
+ for(unsigned group=0;group<2;++group){
+  const unsigned first=group?14:0,last=group?16:14;JointLimits limits;JointState initial;
+  for(unsigned i=first;i<last;++i){limits.push_back({lower[i],upper[i],wire.max_velocity[i],wire.max_acceleration[i],wire.max_jerk[i]});initial.q.push_back(measured[i]);}
+  initial.v.assign(last-first,0.);initial.a=initial.j=initial.v;
+  groups[group]=PreparedSegment::tracking_target(limits,initial,std::vector<double>(goal.begin()+first,goal.begin()+last),std::vector<double>(last-first,0.),0.,30.,5.);
+ }
+ assert(groups[1].end()<groups[0].end());
+ const auto waist_end=prepared->segment->sample(groups[1].end());
+ assert(std::abs(waist_end.q[14]-goal[14])<1e-9&&std::abs(waist_end.v[14])<1e-9);
+ for(double t=0.;t<=prepared->segment->end()+.1;t+=.001){
+  const auto actual=prepared->segment->sample(t);
+  for(unsigned group=0;group<2;++group){
+   const auto expected=groups[group].sample(t);const unsigned first=group?14:0;
+   for(unsigned i=0;i<expected.q.size();++i){const unsigned axis=first+i;
+    assert(std::abs(actual.q[axis]-expected.q[i])<1e-8&&std::abs(actual.v[axis]-expected.v[i])<1e-8&&std::abs(actual.a[axis]-expected.a[i])<1e-7);
+    assert(actual.q[axis]>=lower[axis]-1e-9&&actual.q[axis]<=upper[axis]+1e-9);
+    assert(std::abs(actual.v[axis])<=wire.max_velocity[axis]+1e-8&&std::abs(actual.a[axis])<=wire.max_acceleration[axis]+1e-8&&std::abs(actual.j[axis])<=wire.max_jerk[axis]+1e-6);
+   }
+  }
+ }
+ auto common=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,1.25,4.5,259.2);
+ assert(std::abs(common->segment->sample(groups[1].end()).q[14]-goal[14])>1e-3);
+ std::array<double,16> speed{};
+ periodic=true;assert(!queue.commit(*prepared,base+1000000,base+1000000,measured,speed));assert(queue.sample(base+100000000));periodic=false;
+ assert(queue.deadline()==source.expires);queue.reclaim();
+ source={929,2,base+100000000,base+100000000+maximum_target_ttl,0};wire.segment_id=2;
+ assert(queue.snapshot(source.stamp,source.stamp,0,10000000,measured,snapshot));
+ goal[14]+=.002;goal[15]-=.001;
+ auto continuation=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,1.25,4.5,259.2,tuning);
+ assert(continuation->trend.velocity[14]>0.&&continuation->trend.velocity[15]<0.);
+ JointLimits waist_limits;JointState waist_seed;
+ for(unsigned i=14;i<16;++i){waist_limits.push_back({lower[i],upper[i],wire.max_velocity[i],wire.max_acceleration[i],wire.max_jerk[i]});waist_seed.q.push_back(snapshot.q[i]);waist_seed.v.push_back(snapshot.v[i]);waist_seed.a.push_back(snapshot.a[i]);waist_seed.j.push_back(0.);}
+ const auto waist=PreparedSegment::tracking_target(waist_limits,waist_seed,std::vector<double>(goal.begin()+14,goal.end()),
+   std::vector<double>(continuation->trend.velocity.begin()+14,continuation->trend.velocity.end()),0.,30.,5.);
+ for(double t=0.;t<=waist.end()+.1;t+=.001){const auto actual=continuation->segment->sample(t),expected=waist.sample(t);
+  for(unsigned i=0;i<2;++i){assert(std::abs(actual.q[14+i]-expected.q[i])<1e-8&&std::abs(actual.v[14+i]-expected.v[i])<1e-8&&std::abs(actual.a[14+i]-expected.a[i])<1e-7);}
+ }
+ const auto start=continuation->segment->sample(0.);
+ for(unsigned i=0;i<16;++i){assert(std::abs(start.q[i]-snapshot.q[i])<1e-9&&std::abs(start.v[i]-snapshot.v[i])<1e-8&&std::abs(start.a[i]-snapshot.a[i])<1e-7);}
+ periodic=true;assert(!queue.commit(*continuation,source.stamp+1000000,source.stamp+1000000,measured,speed));assert(queue.sample(source.stamp+20000000));periodic=false;queue.reclaim();
+ source={929,3,base+140000000,base+2140000000,2};wire.segment_id=3;
+ assert(queue.snapshot(source.stamp,source.stamp,2,10000000,measured,snapshot));
+ auto stop=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,1.25,4.5,259.2,tuning);
+ auto original_stop=TrajectoryQueue::prepare_target(wire,source,snapshot,goal,1.25,4.5,259.2);
+ assert(stop->segment->end()==original_stop->segment->end());
+ for(double t=0.;t<=stop->segment->end()+.1;t+=.001){const auto a=stop->segment->sample(t),b=original_stop->segment->sample(t);assert(a.q==b.q&&a.v==b.v&&a.a==b.a);}
+ periodic=true;assert(!queue.commit(*stop,source.stamp+1000000,source.stamp+1000000,measured,speed));assert(queue.sample(source.stamp+1900000000));periodic=false;queue.reclaim();
+ assert(queue.phase(source.stamp+1900000000)==4&&!allocated&&!deleted);
+ std::cout<<"PASS independent waist timing: standalone group curves, early waist hold, C2 adoption, limits, original deadline/PAUSE and zero periodic allocation\n";
+}
+int main(int argc,char**){if(argc>1)return replay_targets(argc==2);independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
