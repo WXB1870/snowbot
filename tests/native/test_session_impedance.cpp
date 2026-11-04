@@ -296,10 +296,12 @@ void check_target_impedance(ServoNode& previous){
  assert(applied.torque!=old_torque); // Feedback changes torque, not nominal position.
  auto invalid=guard;auto feedback=snapshot;feedback.sensor_valid_mask=1;invalid.evaluate(applied,feedback,steady_ns());
  assert(invalid.disabled&&invalid.reason==IMPEDANCE_INVALID);
- // Waist yaw CSP identification permits lag beyond the arm following threshold.
- snapshot.position[18]=float(fixed[14]-.6);tick();
- assert(applied.failure_reason==0);guard.evaluate(applied,snapshot,steady_ns());assert(!guard.disabled);
- snapshot.position[18]=float(fixed[14]);tick();
+ // Both waist CSP axes permit lag beyond the arm following threshold.
+ for(unsigned axis:{14u,15u}){
+  snapshot.position[position_slot(axis)]=float(fixed[axis]-.6);tick();
+  assert(applied.failure_reason==0);guard.evaluate(applied,snapshot,steady_ns());assert(!guard.disabled);
+  snapshot.position[position_slot(axis)]=float(fixed[axis]);tick();
+ }
  snapshot.position[0]=float(fixed[0]+node.impedance_following_error_rad_+.01);tick();
  assert(applied.failure_reason==CYCLE_OR_TRACKING_ERROR);guard.evaluate(applied,snapshot,steady_ns());assert(guard.disabled);
  node.feedback();tick();assert(applied.failure_reason==CYCLE_OR_TRACKING_ERROR);
