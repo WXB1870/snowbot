@@ -1,7 +1,7 @@
 """Operator-run replay of certified Snowbot atomic joint targets.
 
 Preview is offline. --execute uses an already running session_v3 executor;
-Prepare is an empty-hand entry to the side-scoop ready pose. No driver
+Prepare is an empty-hand entry to the configured preset ready pose. No driver
 startup, motor enabling, encoder homing, or base commands are performed.
 Prepare opens/closes the grippers only after separate operator Enter confirmations.
 """
@@ -170,7 +170,7 @@ class ReplaySequence:
 
 
 @lru_cache(maxsize=16)
-def replay_graph(path, speed, waist_lead_s):
+def replay_graph(path, speed, waist_lead_s, hold_s):
     manifest = load_library(Path(path).resolve())
     if manifest.get('transition_validation_passed') is not True:
         raise ValueError('REPLAY_TRANSITIONS_UNVALIDATED')
@@ -179,14 +179,16 @@ def replay_graph(path, speed, waist_lead_s):
         key, a, b = edge['segment'], edge['from'], edge['to']
         segment = load_replay(path, key, speed, waist_lead_s)
         plans[key] = segment
-        edges.setdefault(a, []).append((b, key, segment.duration+3.))
+        edges.setdefault(a, []).append((b, key, segment.duration+hold_s))
     return manifest, edges, plans
 
 
-def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01):
+def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01, *, hold_s=None):
     """Select a route from current measurements over the cached certified graph."""
     import heapq
-    manifest, edges, plans = replay_graph(path, speed, waist_lead_s)
+    manifest = load_library(Path(path).resolve())
+    hold = float(manifest.get('transition_hold_s', 3.) if hold_s is None else hold_s)
+    manifest, edges, plans = replay_graph(path, speed, waist_lead_s, hold)
     if not set(NAMES) <= set(measured):
         raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
     if any(not math.isfinite(measured[n]) for n in NAMES):
@@ -197,7 +199,8 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     if not errors or min(errors.values()) > tolerance:
         raise RuntimeError('REPLAY_UNKNOWN_START: use a certified action start/end pose')
     source = min(errors, key=errors.get)
-    target = manifest['home_node'] if action == 'Home' else manifest['actions'][action]['start_node']
+    items = manifest.get('transfers', {}) | manifest['actions']
+    target = manifest['home_node'] if action == 'Home' else items[action]['start_node']
     queue, costs = [(0., source, ())], {source: 0.}
     selected = None
     while queue:
@@ -223,7 +226,7 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     else:
         selected_plans = tuple(plans[k] if k in plans else load_replay(path, k, speed, waist_lead_s)
                                for k in selected)
-    return ReplaySequence(selected_plans, selected)
+    return ReplaySequence(selected_plans, selected, hold_s=hold)
 
 
 
@@ -264,7 +267,7 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
             raise ValueError('PREPARE_MEASUREMENT_REQUIRED:'+name)
         if not profile.limits[name][0]-tolerance <= measured[name] <= profile.limits[name][1]+tolerance:
             raise ValueError('PREPARE_START_JOINT_LIMIT:'+name)
-    after = tuple(manifest['nodes'][manifest['home_node']])
+    after = tuple(manifest['nodes'][manifest['preparation']['goal_node']])
     config = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')
     recovering = any(not profile.limits[n][0] <= measured[n] <= profile.limits[n][1] for n in NAMES)
     start = measured
@@ -338,6 +341,28 @@ def run_replay(plan, port, *, settle_timeout=5., execution_mode='position', velo
     nominal = execution_mode == 'impedance'
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
+        # Startup READY is historical: a later settling swing can still fail
+        # the servo's takeover gate. Wait without owning or commanding joints.
+        print(f'WAIT_REST 连续停稳 {settle_time:g} 秒后接管；速度门限 {velocity_tolerance:g} rad/s，最多等待 {settle_timeout:g} 秒', flush=True)
+        deadline = port.steady()+settle_timeout
+        rest_since = previous_sample = None
+        while True:
+            _, velocity = port.check(False)
+            sample, now = port.feedback_stamp(), port.steady()
+            worst_speed, worst_joint = max((abs(velocity[n]), n) for n in plan.names)
+            if worst_speed > velocity_tolerance:
+                rest_since = None
+            if previous_sample is None or sample > previous_sample:
+                previous_sample = sample
+                if worst_speed <= velocity_tolerance:
+                    if rest_since is None:
+                        rest_since = now
+                    elif now-rest_since >= settle_time:
+                        break
+            if now >= deadline:
+                raise RuntimeError(f'REPLAY_NOT_SETTLED:axis={worst_joint};speed={worst_speed:g};limit={velocity_tolerance:g}')
+            port.wait_until(now+.02)
+        print('REST_CONFIRMED 开始接管', flush=True)
         attempted = True
         port.acquire()
         acquired = True
@@ -570,6 +595,10 @@ def execute(args, plan):
             if latest.get('error'):
                 raise RuntimeError(latest['error'])
             return q, v
+        @staticmethod
+        def feedback_stamp():
+            stamp = latest['state'][0].feedback_stamp
+            return stamp.sec+stamp.nanosec*1e-9
         def nominal_reference(self):
             state = latest['state'][0]
             if self.lease and getattr(self, 'commanded', False):
@@ -661,7 +690,8 @@ def execute(args, plan):
         elif args.action != 'ReturnZero':
             if manifest.get('transition_validation_passed'):
                 anchor = port.nominal_reference() if args.execution_mode=='impedance' else q
-                plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead, args.start_tolerance)
+                plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead,
+                                         args.start_tolerance, hold_s=getattr(args, 'transition_hold_s', None))
                 plan.validate_profile(robot.profile)
         record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
@@ -694,7 +724,7 @@ def replay_action(args, parser):
         if not args.execute:
             print(json.dumps(dict(action='Prepare', execution_mode=args.execution_mode, empty_handed=True,
                 start_source='fresh measured joints on execute; full path checked before lease',
-                goal_q_rad=dict(zip(plan.names,manifest['nodes'][manifest['home_node']])),
+                goal_q_rad=dict(zip(plan.names, manifest['nodes'][manifest['preparation']['goal_node']])),
                 posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
             return
     elif args.action == 'ReturnZero':
@@ -702,7 +732,8 @@ def replay_action(args, parser):
     elif manifest.get('transition_validation_passed'):
         start = args.from_node or manifest['home_node']
         plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])),
-                                 args.speed, args.waist_lead, args.start_tolerance)
+                                 args.speed, args.waist_lead, args.start_tolerance,
+                                 hold_s=getattr(args, 'transition_hold_s', None))
     else:
         plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
@@ -720,23 +751,40 @@ def replay_action(args, parser):
 
 
 def interactive_replay(args, parser):
-    actions = {'1': 'Push', '2': 'SideScoop', '3': 'Flip'}
+    manifest = json.loads(args.library.read_text())
+    items = manifest.get('transfers', {}) | manifest['actions']
+    state, node = 'ready', args.from_node or manifest['preparation']['goal_node']
+    commands = {
+        'ready': {'1': ('Push', 'pushed'), '2': ('SideScoop', 'scooped')},
+        'pushed': {'': ('PushReverse', 'ready')},
+        'scooped': {'3': ('Flip', 'dumped'), '': ('Home', 'ready')},
+        'dumped': {'': ('Home', 'ready')},
+    }
+    prompts = {
+        'ready': '输入 1 前推或 2 侧前铲，按 Enter 执行；q 退出',
+        'pushed': '前推完成，直接按 Enter 拉回；q 退出',
+        'scooped': '侧前铲完成，输入 3 后按 Enter 翻倒，或直接按 Enter 回到侧前铲初始位；q 退出',
+        'dumped': '翻倒完成，直接按 Enter 连续退回侧前铲初始位；q 退出',
+    }
     while True:
-        print('\n1 前推    2 侧前铲    3 翻倒    q 退出')
         try:
-            choice = input('输入编号并按 Enter 执行：').strip()
+            choice = input('\n等待输入（'+prompts[state]+'）：').strip()
         except (EOFError, KeyboardInterrupt):
             return
         if choice.lower() == 'q':
             return
-        if choice not in actions:
-            print('请输入 1、2、3 或 q。')
+        if choice not in commands[state]:
+            print('当前状态不能执行该输入。')
             continue
+        action, following = commands[state][choice]
         selected = argparse.Namespace(**vars(args))
-        selected.action = actions[choice]
+        selected.action, selected.from_node = action, node
+        selected.transition_hold_s = 0.
         selected.output = args.output_dir/(time.strftime('%Y%m%d-%H%M%S')+'-'+
                                           selected.action+'-'+uuid.uuid4().hex[:8]+'.jsonl')
         replay_action(selected, parser)
+        state = following
+        node = manifest['home_node'] if action == 'Home' else items[action]['end_node']
 
 
 def main(argv=None):
@@ -745,7 +793,7 @@ def main(argv=None):
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare', 'ReturnZero'))
     parser.add_argument('--prepare-log', type=Path, help='ReturnZero: old empty-hand Prepare JSONL')
-    selection.add_argument('--interactive', action='store_true', help='Select 1=Push, 2=SideScoop, 3=Flip; Enter executes')
+    selection.add_argument('--interactive', action='store_true', help='Staged 1/2/3 actions; empty Enter returns after each action')
     parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')

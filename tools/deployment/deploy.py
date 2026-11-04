@@ -67,10 +67,14 @@ def source_environment(bindu):
     return env
 
 
-def x86(bindu, workspace, command, *args):
-    subprocess.run([sys.executable, '-m', 'tools.deployment.x86_real', command,
-                    '--workspace', str(workspace/'upper'), *map(str, args)],
-                   cwd=bindu, env=source_environment(bindu), check=True)
+def x86(bindu, workspace, command, *args, replace=False):
+    argv = [sys.executable, '-m', 'tools.deployment.x86_real', command,
+            '--workspace', str(workspace/'upper'), *map(str, args)]
+    env = source_environment(bindu)
+    if replace:
+        os.chdir(bindu)
+        os.execvpe(sys.executable, argv, env)
+    subprocess.run(argv, cwd=bindu, env=env, check=True)
 
 
 def assemble(bindu, workspace, *, with_impedance=None):
@@ -206,10 +210,55 @@ def keep_service_log(line, previous_wkc, now):
     match = re.search(r'\[ECAT-MON\].*WKC=(\d+)/(\d+).*bad_wkc=(\d+)', line)
     if match:
         key = match.groups()
-        if previous_wkc and previous_wkc[:3] == list(key) and now-previous_wkc[3] < 5.:
+        if previous_wkc and previous_wkc[:3] == list(key) and now-previous_wkc[3] < 10.:
             return False
         previous_wkc[:] = [*key, now]
     return True
+
+
+class ServiceConsole:
+    """Select brief console messages after the complete output has been saved."""
+    def __init__(self):
+        self.wkc, self.repeats = {}, {}
+        self.notices = set()
+
+    def __call__(self, stream, line):
+        from snowbot_bringup.teleop.snowbot_diagnostics import console_log
+        now = time.monotonic()
+        if not keep_service_log(line, self.wkc.setdefault(stream, []), now):
+            return None
+        if '[ECAT-MON]' in line:
+            fields = re.findall(r'\b(?:pdo|WKC|bad_wkc|good_age_ms)=[\d./]+', line)
+            return f'[{stream}] '+ ' '.join(fields)+'\n'
+        if line.startswith('[LOG_REPEAT] '):
+            value = json.loads(line[len('[LOG_REPEAT] '):])
+            return f'[{stream}] {value["message"].split(";", 1)[0]} (repeat +{value["suppressed_repeats"]})\n'
+        raw = line.removeprefix(f'[{stream}] ')
+        value = console_log(raw, stream)
+        if value is None:
+            if re.search(r'\[EtherCAT\] \d+ slaves found|\b(?:WARN(?:ING)?|ERROR|FATAL|FAULT|FAILED|TARGET_REJECTED|DEVICE_FEEDBACK_DETAIL|Traceback|\w*Error|\w*Exception)\b|警告|错误|失败|异常|回零|回位|安全退出', raw, re.IGNORECASE):
+                return line
+            if 'TARGET_PREDICTION ' in raw:
+                return line
+            return None
+        message = value['message']
+        key = (value['name'], value['level'], message.split(';', 1)[0])
+        if key[1:] == (30, 'Position session: legacy_source_disabled_for_target_stream'):
+            if stream in self.notices:
+                return None
+            self.notices.add(stream)
+            return f'[{stream}] INFO target_stream: legacy input ignored\n'
+        previous = self.repeats.get(stream)
+        if previous is not None and previous[0] == key:
+            previous[2] += 1
+            if now-previous[1] < 10.:
+                return None
+            count = previous[2]
+            previous[1:] = [now, 0]
+            return f'[{stream}] {key[2]} (repeat +{count}; details in log)\n'
+        self.repeats[stream] = [key, now, 0]
+        level = {30:'WARN', 40:'ERROR', 50:'FATAL'}[value['level']]
+        return f'[{stream}] {level} {message}\n'
 
 
 def wait_service(children, ready, spin, stopped, timeout=120.):
@@ -251,38 +300,15 @@ def stop_services(children):
     return success
 
 
-def services(bindu, workspace):
-    """Operator-run native chain, then executor; no motion tests or auto restart."""
-    import rclpy
-    from rclpy.signals import SignalHandlerOptions
-    from snowbot_ctl_msgs.msg import PositionSessionState
-    from bindu_interfaces.msg import RuntimeEvent
-    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter, console_log
+def copy_service_output(name, child, writer):
+    try:
+        for line in child.stdout:
+            writer.write_text(name, f'[{name}] '+line)
+    finally:
+        child.stdout.close()
 
-    require_stopped(bindu)  # Do not start a second EtherCAT/controller chain.
-    logdir = workspace/'startup-logs'/('services-'+time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}')
-    writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=True)
-    stopped, children, readers = threading.Event(), [], []
-    handlers = {s: signal.signal(s, lambda *_: stopped.set())
-                for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-    rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
-    node = rclpy.create_node('snowbot_primitive_services')
-    states, hold = {}, {}
-    for layer in ('servo', 'middle', 'upper'):
-        node.create_subscription(PositionSessionState, '/bindu/position/'+layer+'_state',
-            lambda msg, layer=layer: states.update({layer:msg}), 1)
 
-    def event(msg):
-        if msg.state in ('STARTUP_HOLD_READY', 'STARTUP_HOLD_FAILED'):
-            hold.update(state=msg.state, code=msg.code)
-        if msg.state in ('FAILED', 'TARGET_REJECTED', 'STARTUP_HOLD_FAILED', 'DEVICE_FEEDBACK_DETAIL'):
-            text = f'[executor] {msg.state}: {msg.code}\n'
-            writer.record_log('executor-events', dict(name=msg.component, level=40,
-                              message=msg.state+':'+msg.code, text=text), text=True)
-        elif msg.state == 'DEVICE_FEEDBACK_RECOVERED':
-            writer.write_text('executor-events', f'[executor] {msg.state}: {msg.code}\n')
-    node.create_subscription(RuntimeEvent, '/bindu_snowbot/events', event, 100)
-
+def base_commands(workspace, execution_mode='impedance'):
     vendor_env = {k:v for k,v in os.environ.items() if k in
         ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS')}
     vendor_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -291,33 +317,37 @@ def services(bindu, workspace):
              'snowbot-vendor', str(ROOT), str(workspace)]
     sudo = ['sudo', '-n', 'env', *[k+'='+vendor_env[k] for k in
             ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS') if k in vendor_env]]
-    plan = (
+    return (
         ('servo', [*sudo, *shell, 'ros2', 'run', 'snowbot_servo_control', 'servo_node',
-                   '--ros-args', '--params-file', str(workspace/'vendor-position.yaml')], vendor_env),
+                   '--ros-args', '--params-file', str(workspace/'vendor-position.yaml'),
+                   '-p', 'execution_mode:='+execution_mode], vendor_env),
         ('middle', [*shell, 'ros2', 'run', 'snowbot_dual_arm_control', 'dual_arm_control_node'], vendor_env),
-        ('upper', [*shell, 'ros2', 'launch', 'robot_control', 'robot_control.launch.py', 'control_source:=topic'], vendor_env),
-        ('executor', ['bash', str(ROOT/'tools/run_primitives.sh'), 'executor'], None))
+        ('upper', [*shell, 'ros2', 'launch', 'robot_control', 'robot_control.launch.py', 'control_source:=topic'], vendor_env))
 
-    def copy_output(name, child):
-        previous_wkc = []
-        try:
-            for line in child.stdout:
-                if not keep_service_log(line, previous_wkc, time.monotonic()):
-                    continue
-                value = console_log(line, name)
-                if value is None:
-                    writer.write_text(name, f'[{name}] '+line)
-                else:
-                    value['text'] = f'[{name}] '+line
-                    writer.record_log(name, value, text=True)
-        finally:
-            child.stdout.close()
+
+def services(bindu, workspace, execution_mode='impedance'):
+    """Operator-run native chain; the upper application has its own terminal."""
+    import rclpy
+    from rclpy.signals import SignalHandlerOptions
+    from snowbot_ctl_msgs.msg import PositionSessionState
+    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+
+    require_stopped(bindu)  # Do not start a second EtherCAT/controller chain.
+    logdir = workspace/'startup-logs'/('services-'+time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}')
+    writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
+    stopped, children, readers = threading.Event(), [], []
+    handlers = {s: signal.signal(s, lambda *_: stopped.set())
+                for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
+    node = rclpy.create_node('snowbot_primitive_services')
+    states = {}
+    for layer in ('servo', 'middle', 'upper'):
+        node.create_subscription(PositionSessionState, '/bindu/position/'+layer+'_state',
+            lambda msg, layer=layer: states.update({layer:msg}), 1)
+
+    plan = base_commands(workspace, execution_mode)
 
     def ready(name):
-        if name == 'executor':
-            if hold.get('state') == 'STARTUP_HOLD_FAILED':
-                raise RuntimeError('STARTUP_HOLD_FAILED:'+hold['code'])
-            return hold.get('state') == 'STARTUP_HOLD_READY'
         state = states.get(name)
         if state is not None and state.state == 'initialization_failed':
             raise RuntimeError(name+':'+state.reason)
@@ -336,15 +366,15 @@ def services(bindu, workspace):
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, errors='replace')
                 children.append((name, child))
-                reader = threading.Thread(target=copy_output, args=(name, child), daemon=True)
+                reader = threading.Thread(target=copy_service_output, args=(name, child, writer), daemon=True)
                 reader.start(); readers.append(reader)
                 print(f'START {name} pid={child.pid}', flush=True)
                 if not wait_service(children, lambda: ready(name),
                                     lambda: rclpy.spin_once(node, timeout_sec=.05), stopped):
                     break
-                print(f'READY {name}', flush=True)
+                print(f'INITIALIZED {name}', flush=True)
             if not stopped.is_set():
-                print('SNOWBOT_SERVICES_READY: open the action terminal', flush=True)
+                print(f'SNOWBOT_BASE_STARTED execution_mode={execution_mode}; initialization complete, see feedback warnings', flush=True)
         except (OSError, RuntimeError) as exc:
             result = 1
             print(f'START_FAILED {name}: {exc}; startup paused, Ctrl+C for ordered exit',
@@ -369,19 +399,156 @@ def services(bindu, workspace):
     return result
 
 
+def base_mode(states):
+    if not all(name in states and states[name].startup_complete for name in ('servo', 'middle', 'upper')):
+        return None
+    mode = states['servo'].control_source
+    if mode not in ('position', 'impedance'):
+        raise RuntimeError('UNSUPPORTED_BASE_MODE:'+mode)
+    return mode
+
+
+def executor_command(cfg, runs, execution_mode, namespace):
+    return ['ros2', 'launch', 'snowbot_bringup', 'snowbot_adapter.launch.py',
+            'runtime_mode:=real', 'device_backend:=snowbot_vendor', 'namespace:='+namespace,
+            'vendor_namespace:=/', 'profile:='+str(cfg/'snowbot_real_position.json'),
+            'parameters_config:='+str(cfg/'runtime_parameters.json'),
+            'gripper_config:='+str(cfg/'grippers.json'), 'position_protocol:=session_v3',
+            'execution_mode:='+execution_mode, 'command_enabled:=true',
+            'trajectory_max_velocity:=1.25', 'trajectory_max_acceleration:=4.5',
+            'trajectory_max_jerk:=259.2',
+            'recording_mode:=compact', 'output:='+str(runs)]
+
+
+def replay_commands(frontend, cfg, runs, execution_mode, stamp):
+    common = [sys.executable, '-u', '-m', 'snowbot_bringup.teleop.snowbot_primitive_replay',
+              '--library', str(cfg/'primitive-library/manifest.json'),
+              '--execution-mode', execution_mode, '--speed', str(1/3), '--execute']
+    result = []
+    if frontend in ('replay', 'prepare'):
+        result.append([*common, '--action', 'Prepare', '--output', str(runs/f'Prepare-{stamp}.jsonl')])
+    if frontend in ('replay', 'menu'):
+        result.append([*common, '--interactive', '--tool-id', 'g099-curved', '--output-dir', str(runs)])
+    return result
+
+
+def operator(bindu, workspace, frontend):
+    """Wait for the base, then own either VR or the replay executor/client."""
+    import rclpy
+    from rclpy.signals import SignalHandlerOptions
+    from snowbot_ctl_msgs.msg import PositionSessionState
+    from bindu_interfaces.msg import RuntimeEvent
+    from ament_index_python.packages import get_package_share_directory
+    from snowbot_bringup.teleop.run_vr import startup_lock
+    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+
+    stopped, stop_signal = threading.Event(), []
+    def interrupt(sig, _):
+        stop_signal[:] = [sig]
+        stopped.set()
+    handlers = {s:signal.signal(s, interrupt) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
+    node = rclpy.create_node('snowbot_upper_launcher')
+    states, hold = {}, {}
+    for layer in ('servo', 'middle', 'upper'):
+        node.create_subscription(PositionSessionState, '/bindu/position/'+layer+'_state',
+                                 lambda msg, layer=layer: states.update({layer:msg}), 1)
+    children, readers, client, writer, lock = [], [], None, None, None
+    mode, result = None, 0
+    try:
+        print('WAIT_BASE', flush=True)
+        if not wait_service([], lambda:base_mode(states) is not None,
+                            lambda:rclpy.spin_once(node, timeout_sec=.05), stopped):
+            return 0
+        mode = base_mode(states)
+        print('BASE_CONNECTED execution_mode='+mode, flush=True)
+        if frontend != 'vr':
+            namespace = json.loads((workspace/'upper/site.json').read_text())['arguments']['namespace'].strip('/')
+            lock = startup_lock(int(os.environ.get('ROS_DOMAIN_ID', '0')), namespace)
+            stamp = time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}'
+            runs = workspace/'primitive-runs'; runs.mkdir(parents=True, exist_ok=True)
+            logdir = workspace/'startup-logs'/('replay-'+stamp)
+            print(f'LOGS {logdir}', flush=True)
+            writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
+            def event(msg):
+                if msg.state in ('STARTUP_HOLD_READY', 'STARTUP_HOLD_FAILED'):
+                    hold.update(state=msg.state, code=msg.code)
+                if msg.state in ('FAILED', 'TARGET_REJECTED', 'STARTUP_HOLD_FAILED', 'DEVICE_FEEDBACK_DETAIL'):
+                    writer.record_log('executor-events', dict(name=msg.component, level=40,
+                        message=msg.state+':'+msg.code, text=f'[executor] {msg.state}: {msg.code}\n'), text=True)
+            node.create_subscription(RuntimeEvent, '/'+namespace+'/events', event, 100)
+            cfg = Path(get_package_share_directory('snowbot_bringup'))/'config/robots/snowbot'
+            child = subprocess.Popen(executor_command(cfg, runs, mode, namespace),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', process_group=0)
+            children.append(('executor', child))
+            reader = threading.Thread(target=copy_service_output, args=('executor', child, writer), daemon=True)
+            reader.start(); readers.append(reader)
+            def executor_ready():
+                if hold.get('state') == 'STARTUP_HOLD_FAILED':
+                    raise RuntimeError('STARTUP_HOLD_FAILED:'+hold['code'])
+                return hold.get('state') == 'STARTUP_HOLD_READY'
+            if not wait_service(children, executor_ready,
+                                lambda:rclpy.spin_once(node, timeout_sec=.05), stopped):
+                return 0
+            print('EXECUTOR_READY', flush=True)
+            for command in replay_commands(frontend, cfg, runs, mode, stamp):
+                # The interactive client shares this terminal's foreground group.
+                client = subprocess.Popen(command)
+                while client.poll() is None and not stopped.is_set():
+                    rclpy.spin_once(node, timeout_sec=.05)
+                    if child.poll() is not None:
+                        raise RuntimeError(f'EXECUTOR_EXITED:code={child.returncode}')
+                if client.poll() is None and stop_signal != [signal.SIGINT]:
+                    client.send_signal(signal.SIGINT)
+                result = client.wait()
+                if result or stopped.is_set():
+                    break
+            if frontend == 'executor':
+                while not stopped.is_set():
+                    rclpy.spin_once(node, timeout_sec=.1)
+                    if child.poll() is not None:
+                        raise RuntimeError(f'EXECUTOR_EXITED:code={child.returncode}')
+    except (OSError, RuntimeError) as exc:
+        result = 1
+        print(f'UPPER_FAILED: {exc}', file=sys.stderr, flush=True)
+    finally:
+        if client is not None and client.poll() is None:
+            if stop_signal != [signal.SIGINT]:
+                client.send_signal(signal.SIGINT)
+            client.wait()  # Its existing lease-release/stop confirmation finishes first.
+        if not stop_services(children):
+            result = 1
+        for reader in readers:
+            reader.join()
+        node.destroy_node(); rclpy.shutdown()
+        if writer is not None:
+            writer.close()
+        if lock is not None:
+            lock.close()
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+    if frontend == 'vr' and mode is not None and not result and not stopped.is_set():
+        x86(bindu, workspace, 'start', '--enable-commands', '--execution-mode', mode, replace=True)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services'))
+    parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--with-impedance', action='store_const', const=True, default=None,
                         help='Include the impedance backend during prepare/build; subsequent builds retain it')
+    parser.add_argument('--no-impedance', action='store_true', help='Base startup only: select position control')
+    parser.add_argument('--frontend', choices=('vr', 'replay', 'menu', 'prepare', 'executor'), default='replay')
     options, extra = parser.parse_known_args(argv)
     workspace = options.workspace.expanduser().resolve()
     existing = options.bindu_source.expanduser().resolve() if options.bindu_source else None
     try:
         if extra and options.command != 'start':
             raise ValueError('Extra arguments are only accepted by start')
+        if options.no_impedance and options.command != 'services':
+            raise ValueError('--no-impedance belongs to the base startup only')
         if options.command == 'plan':
             bindu = locked_bindu(existing)
             print(json.dumps(dict(snowbot=git(ROOT, 'rev-parse', 'HEAD'), bindu=git(bindu, 'rev-parse', 'HEAD'),
@@ -392,7 +559,9 @@ def main(argv=None):
             require_platform()
         bindu = locked_bindu(existing, acquire=options.command in ('prepare', 'build'))
         if options.command == 'services':
-            return services(bindu, workspace)
+            return services(bindu, workspace, 'position' if options.no_impedance else 'impedance')
+        if options.command == 'operator':
+            return operator(bindu, workspace, options.frontend)
         if options.command == 'start':
             # x86_real start already performs the runtime precheck exactly once.
             x86(bindu, workspace, 'start', *extra)

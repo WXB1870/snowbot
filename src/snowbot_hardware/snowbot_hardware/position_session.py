@@ -234,16 +234,28 @@ class PositionSessionDevices:
         except (ValueError, RuntimeError) as exc:
             self.node.get_logger().warn(str(exc), throttle_duration_sec=1.)
 
-    def identity(self, topic, expected, kind, *, subscription=False):
+    def identity(self, topic, expected, kind, *, subscription=False, discovering=False):
         method = self.graph.get_subscriptions_info_by_topic if subscription else self.graph.get_publishers_info_by_topic
         infos = method(topic)
+        # Fast DDS may deliver samples before its graph resolves the node name.
+        # Before the first measured frame, discard these samples and keep waiting.
+        if discovering and self.health.observation is None and (not infos or
+                len(infos) == 1 and infos[0].topic_type == kind and
+                (infos[0].node_name == '_NODE_NAME_UNKNOWN_' or
+                 infos[0].node_namespace == '_NODE_NAMESPACE_UNKNOWN_')):
+            return False
         matched = [i for i in infos if i.node_namespace.rstrip('/')+'/'+i.node_name == expected and i.topic_type == kind]
         if len(matched) != 1 or not subscription and len(infos) != 1:
-            raise RuntimeError('SNOWBOT_SESSION_ENDPOINT:'+topic)
+            found = [dict(node=i.node_namespace.rstrip('/')+'/'+i.node_name, type=i.topic_type) for i in infos]
+            raise RuntimeError('SNOWBOT_SESSION_ENDPOINT:'+topic+';expected='+expected+
+                               ';type='+kind+';found='+json.dumps(found, separators=(',', ':')))
+        return True
 
     def receive_state(self, layer, topic, receiver, msg):
         try:
-            self.identity(topic, self.receivers[receiver], 'snowbot_ctl_msgs/msg/PositionSessionState')
+            if not self.identity(topic, self.receivers[receiver],
+                                 'snowbot_ctl_msgs/msg/PositionSessionState', discovering=True):
+                return
             self.health.state(layer, msg)
         except (ValueError, RuntimeError) as exc:
             self.health.states.pop(layer, None)
@@ -251,7 +263,9 @@ class PositionSessionDevices:
 
     def receive(self, msg):
         try:
-            self.identity(self.feedback_topic, self.receivers['head'], 'snowbot_ctl_msgs/msg/PositionObservation')
+            if not self.identity(self.feedback_topic, self.receivers['head'],
+                                 'snowbot_ctl_msgs/msg/PositionObservation', discovering=True):
+                return
             q, v, stamp = self.health.observe(msg)
             if self.grippers and self.grippers.core and stamp > self.grippers.core.feedback_stamp:
                 try:
