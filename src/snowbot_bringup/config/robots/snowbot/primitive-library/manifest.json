@@ -39,25 +39,18 @@
       }
     },
     "SideScoop": {
-      "targets": "SideScoop.json.gz",
-      "sha256": "8c6415eaa18f3a6c8c8a21628b4bf8b464f42f42cf27750d6f5ec88e303ccafe",
-      "nominal_duration_s": 12.53,
-      "duration_s": 12.53,
+      "targets": "ScoopPrefix.json.gz",
+      "sha256": "c7dbf6762d60749848f045b5d826dd2320390e08144ffa41e87d0645071f92cd",
+      "nominal_duration_s": 4.445,
+      "duration_s": 4.445,
       "start_node": "SideScoop:start",
-      "end_node": "Dump:end",
+      "end_node": "Flip:start",
       "source": "20261104 verified upright fast reference",
       "validation": {
-        "tracking_rms_mm": 8.988762780346727,
-        "tracking_peak_mm": 18.416243657496118,
-        "coupling_rms_mm": 0.4077698723836572,
-        "coupling_peak_mm": 0.9576547585536814,
-        "physics_dt_s": 0.002,
-        "non_ground_collision_violations": 0,
-        "reference_source_sha256": "3508c4bf1347c5c74c976d67ec723b0c6f486580856f8c69973c3b100da7439c",
-        "validation_scope": "full PhysX reference replay; 20ms export checked separately",
+        "validation_scope": "prefix or time reversal of the same verified reference path; no independent PhysX replay claimed",
         "packaged_reference": {
-          "samples_2ms": 6266,
-          "maximum_grasp_position_m": 0.0007700321325305363,
+          "samples_2ms": 2224,
+          "maximum_grasp_position_m": 0.00030450667632407163,
           "maximum_grasp_axis_rad": 0.0007642670298894632,
           "minimum_extra_margin_rad": 0.000999995387742137,
           "passed": true
@@ -92,7 +85,7 @@
     }
   },
   "required_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
-  "replay_code_sha256": "bc91021bd761a46d0c76d7b55faa468daa044104f8871f7d0d11d38ae050e32d",
+  "replay_code_sha256": "9a6d671a2753a27e65249d1f945f44b7b22c313211147c3d974a18d575b76a0b",
   "source_commits": {
     "snowbot_base": "5fc6cd911dd520c4f807fdc0ae2ac5f0339a117d",
     "bindu": "e933ce93d0738ab1c8fc585be88222e235c56a1c",
@@ -402,7 +395,7 @@
     "action": "Prepare",
     "tool_present": false,
     "start": "fresh measured joints",
-    "goal_node": "SideScoop:start",
+    "goal_node": "Push:start",
     "path_checked_before_lease": true
   },
   "reference_validation_execution_mode": "position",

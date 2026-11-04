@@ -304,6 +304,66 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def primitive_menu(self, choices, replay):
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from types import SimpleNamespace as S
+        import snowbot_bringup.teleop.snowbot_primitive_replay as module
+        library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
+        args = S(library=library, from_node=None, output_dir=Path('/unused'), execution_mode='impedance')
+        with patch('builtins.input', side_effect=choices) as choose, \
+                patch.object(module, 'replay_action', side_effect=replay) as run, \
+                redirect_stdout(StringIO()):
+            module.interactive_replay(args, None)
+        return choose, run
+
+    def test_primitive_menu_requires_explicit_returns_and_blocks_wrong_stage_keys(self):
+        calls = []
+        self.primitive_menu(['3','1','2','3','','3','2','1','3','1','2','','q'],
+                            lambda args, _:calls.append((args.action, args.from_node, args.execution_mode, args.transition_hold_s)))
+        self.assertEqual([(action, node) for action,node,_,_ in calls], [
+            ('Push','Push:start'), ('PushReverse','Push:end'), ('SideScoop','Push:start'),
+            ('Flip','Flip:start'), ('Home','Dump:end')])
+        self.assertTrue(all(mode=='impedance' and hold==0. for _,_,mode,hold in calls))
+
+    def test_primitive_menu_scoop_can_return_without_flip_and_failure_never_advances(self):
+        calls = []
+        self.primitive_menu(['2','','1','','q'], lambda args, _:calls.append(args.action))
+        self.assertEqual(calls, ['SideScoop','Home','Push','PushReverse'])
+        def fail(args, parser):
+            raise RuntimeError('STOP_UNCONFIRMED')
+        with self.assertRaisesRegex(RuntimeError, 'STOP_UNCONFIRMED'):
+            self.primitive_menu(['1','2'], fail)
+
+    def test_primitive_menu_routes_reuse_exact_segments_with_no_artificial_pause(self):
+        from snowbot_bringup.teleop.snowbot_primitive_replay import NAMES, plan_from_current
+        library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
+        m = json.loads(library.read_text())
+        self.assertEqual(m['preparation']['goal_node'], 'Push:start')
+        self.assertEqual(m['actions']['SideScoop']['end_node'], 'Flip:start')
+        cases = [
+            ('Push:start','Push',('Push',),5.745),
+            ('Push:end','PushReverse',('PushReverse',),5.745),
+            ('Push:start','SideScoop',('BridgeForward','SideScoop'),24.752666),
+            ('Flip:start','Flip',('Flip',),8.085),
+            ('Flip:start','Home',('ScoopPrefixReverse',),4.445),
+            ('Dump:end','Home',('FlipReverse','ScoopPrefixReverse'),12.53),
+        ]
+        for start, action, route, duration in cases:
+            with self.subTest(start=start, action=action):
+                plan = plan_from_current(library, action, dict(zip(NAMES, m['nodes'][start])), hold_s=0.)
+                self.assertEqual(plan.route, route)
+                self.assertEqual(plan.hold_s, 0.)
+                self.assertAlmostEqual(plan.duration, duration)
+                for a,b in zip(plan.segments,plan.segments[1:]):
+                    self.assertEqual(a.points[-1], b.points[0])
+                if len(plan.segments)>1:
+                    boundary=plan.segments[0].duration
+                    actual=plan.sample(boundary+.02);following=plan.segments[1].sample(.02)
+                    self.assertLess(max(abs(a-b) for a,b in zip(actual,following)), 1e-12)
+                    self.assertNotEqual(actual, plan.segments[0].points[-1])
+
     def test_base_has_three_native_layers_and_mode_override(self):
         from unittest.mock import patch
         from tools.deployment.deploy import base_commands
