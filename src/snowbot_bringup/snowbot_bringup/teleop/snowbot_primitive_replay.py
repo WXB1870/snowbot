@@ -7,7 +7,7 @@ Prepare opens/closes the grippers only after separate operator Enter confirmatio
 """
 import argparse
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import gzip
 import json
@@ -46,6 +46,7 @@ class Replay:
     empty_prepare: bool = False
     measured_start: tuple = ()
     start_reference_source: str = 'measured'
+    reverse_prepare: bool = False
 
     @property
     def duration(self):
@@ -63,6 +64,12 @@ class Replay:
         return waist[:2]+arms[2:]
 
     def validate_profile(self, profile):
+        if self.reverse_prepare:
+            # Apply the same hard limits and margin rule in the original direction.
+            replace(self, times=tuple(self.times[-1]-t for t in reversed(self.times)),
+                    points=tuple(reversed(self.points)), empty_prepare=True,
+                    reverse_prepare=False).validate_profile(profile)
+            return
         if tuple(n for g in GROUPS for n in profile.groups.get(g, ())) != self.names:
             raise ValueError('REPLAY_GROUP_LAYOUT')
         for row in self.points:
@@ -260,6 +267,20 @@ class AxialGraspGuard:
 
 
 
+def load_prepare_return(path, prepare_log, speed=1.):
+    """One-time empty-hand reversal of the old zero-to-Prepare target stream."""
+    home = load_replay(path, 'SideScoop', speed, waist_lead_s=0.)
+    rows = [json.loads(line) for line in Path(prepare_log).read_text().splitlines()]
+    metadata = next(r for r in rows if r['kind'] == 'plan')
+    targets = [r for r in rows if r['kind'] == 'target']
+    if (metadata['action'] != 'Prepare' or metadata['tool_present'] or not targets or
+            targets[-1]['source_stamp']-targets[0]['source_stamp'] < metadata['duration_s']-1e-6):
+        raise ValueError('RETURN_ZERO_REQUIRES_COMPLETE_PREPARE')
+    end = targets[-1]['source_stamp']
+    return replace(home, times=tuple(end-r['source_stamp'] for r in reversed(targets)),
+                   points=tuple(tuple(r['q']) for r in reversed(targets)), reverse_prepare=True)
+
+
 def plan_prepare(path, robot, measured, speed=1., *, reference=None):
     """Empty-hand entry from measured joints; validate before acquiring a lease."""
     import numpy as np
@@ -436,7 +457,8 @@ def execute(args, plan):
         raise ValueError('REPLAY_REFERENCE_MARGIN_CONFIG_MISMATCH')
     if kinematic_digest(robot.urdf) != plan.kinematics:
         raise ValueError('REPLAY_KINEMATICS_MISMATCH')
-    if args.action != 'Prepare' and args.tool_id != plan.tool_id:
+    empty_handed = args.action in ('Prepare', 'ReturnZero')
+    if not empty_handed and args.tool_id != plan.tool_id:
         raise ValueError('REPLAY_TOOL_ID_MISMATCH')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     log = args.output.open('x')
@@ -641,7 +663,7 @@ def execute(args, plan):
             return True
 
     manifest = json.loads(args.library.read_text())
-    guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest and args.action != 'Prepare' else None
+    guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest and not empty_handed else None
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
@@ -660,12 +682,12 @@ def execute(args, plan):
             wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= checked_at and
                  latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= checked_at, 1.)
             port.check(False)
-        else:
+        elif args.action != 'ReturnZero':
             if manifest.get('transition_validation_passed'):
                 anchor = port.nominal_reference() if args.execution_mode=='impedance' else q
                 plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead, args.start_tolerance)
                 plan.validate_profile(robot.profile)
-        record('plan', execution_mode=args.execution_mode, tool_present=args.action!='Prepare', route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
+        record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
         result = run_replay(plan, port, execution_mode=args.execution_mode)
@@ -697,14 +719,16 @@ def replay_action(args, parser):
                 goal_q_rad=dict(zip(plan.names,plan.points[0])),
                 posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
             return
+    elif args.action == 'ReturnZero':
+        plan = load_prepare_return(args.library, args.prepare_log, args.speed)
     elif manifest.get('transition_validation_passed'):
         start = args.from_node or manifest['home_node']
         plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])), args.speed, args.waist_lead)
     else:
         plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
-        if not args.output or (args.action != 'Prepare' and not args.tool_id):
-            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare')
+        if not args.output or (args.action not in ('Prepare', 'ReturnZero') and not args.tool_id):
+            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare/ReturnZero')
         if not plan.backend_ready:
             parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
         execute(args, plan)
@@ -740,7 +764,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library', type=Path, required=True)
     selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare'))
+    selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare', 'ReturnZero'))
+    parser.add_argument('--prepare-log', type=Path, help='ReturnZero: old empty-hand Prepare JSONL')
     selection.add_argument('--interactive', action='store_true', help='Select 1=Push, 2=SideScoop, 3=Flip; Enter executes')
     parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
@@ -756,6 +781,8 @@ def main(argv=None):
     parser.add_argument('--output-dir', type=Path, help='Interactive mode: one new JSONL log per selected action')
     parser.add_argument('--start-tolerance', type=float, default=.01)
     args = parser.parse_args(argv)
+    if args.action == 'ReturnZero' and not args.prepare_log:
+        parser.error('ReturnZero requires --prepare-log')
     if args.interactive:
         if not args.execute or not args.tool_id or not args.output_dir or args.output:
             parser.error('--interactive requires --execute --tool-id --output-dir; omit --output')
