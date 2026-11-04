@@ -447,7 +447,8 @@ def execute(args, plan):
     robot = RobotSetup.load(args.robot_config)
     from snowbot_hardware.parameters import load_parameters, load_mode_config
     settings = load_parameters()
-    velocity_tolerance = settings['execution']['motion_arrival_velocity_tolerance_rad_s']
+    velocity_tolerance = max(settings['execution']['motion_arrival_velocity_tolerance_rad_s'],
+                             robot.profile.feedback_tolerances['joint_velocity'])
     settle_time = settings['execution']['stop_confirmation_window_s']
     settle_timeout = settings['pico']['motion_completion_grace_s']
     prepare_tolerance = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')['prepare_position_tolerance_rad']
@@ -654,9 +655,9 @@ def execute(args, plan):
             record('target', source_stamp=source, q=list(goal))
         @staticmethod
         def arrival_tolerance(name):
-            if args.action == 'Prepare': return prepare_tolerance
-            return robot.profile.stop_position_tolerances.get(
+            tolerance = prepare_tolerance if args.action == 'Prepare' else robot.profile.stop_position_tolerances.get(
                 name, robot.profile.feedback_tolerances['joint_position'])
+            return max(math.radians(2), tolerance)
         def release_and_confirm_stop(self):
             if not self.lease: return False
             call(leases, Lease.Request(operation='release', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
