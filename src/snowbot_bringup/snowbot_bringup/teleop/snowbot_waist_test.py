@@ -8,6 +8,7 @@ waist positions to /body/motor_cmd; it never writes arm/head commands.
 Use without a tool: moving the waist moves both arms in the world frame.
 """
 import argparse
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
@@ -78,6 +79,12 @@ class Plan:
     def duration(self):
         return self.dwell + 4 * (self.move_seconds + self.dwell)
 
+    @property
+    def dynamic_bounds(self):
+        return (1.875*self.amplitude/self.move_seconds,
+                10/math.sqrt(3)*self.amplitude/self.move_seconds**2,
+                60*self.amplitude/self.move_seconds**3)
+
     def sample(self, elapsed):
         """Offset, speed, acceleration; quintic moves with stationary dwells."""
         if not math.isfinite(elapsed) or elapsed < 0:
@@ -99,13 +106,76 @@ class Plan:
 
 
 def make_plan(degrees=1., speed=.1, acceleration=.5, jerk=10.):
-    for value, maximum in ((degrees, 20.), (speed, .375), (acceleration, 2.25), (jerk, 162.)):
+    for value, maximum in ((degrees, 45.), (speed, .375), (acceleration, 2.25), (jerk, 162.)):
         if type(value) not in (float, int) or not math.isfinite(value) or not 0 < value <= maximum:
             raise ValueError('TEST_ENVELOPE_EXCEEDED')
     distance = math.radians(degrees)
     duration = max(1.875*distance/speed, math.sqrt(10/math.sqrt(3)*distance/acceleration),
                    (60*distance/jerk)**(1/3), .2)
     return Plan(distance, math.ceil(duration/.02)*.02)
+
+
+@dataclass(frozen=True)
+class SCurvePlan:
+    amplitude: float
+    jerk: float
+    ramp: float
+    acceleration_hold: float
+    cruise: float
+    dwell: float = 1.
+
+    @property
+    def move_seconds(self):
+        return 4*self.ramp+2*self.acceleration_hold+self.cruise
+
+    @property
+    def duration(self):
+        return self.dwell+4*(self.move_seconds+self.dwell)
+
+    @property
+    def dynamic_bounds(self):
+        return (self.jerk*self.ramp*(self.ramp+self.acceleration_hold),
+                self.jerk*self.ramp, self.jerk)
+
+    def sample(self, elapsed):
+        if not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError('INVALID_ELAPSED_TIME')
+        elapsed -= self.dwell
+        previous = 0.
+        for target in (self.amplitude, 0., -self.amplitude, 0.):
+            if elapsed < 0:
+                return previous, 0., 0.
+            if elapsed < self.move_seconds:
+                q = v = a = 0.
+                for duration, jerk in ((self.ramp, self.jerk), (self.acceleration_hold, 0.),
+                                       (self.ramp, -self.jerk), (self.cruise, 0.),
+                                       (self.ramp, -self.jerk), (self.acceleration_hold, 0.),
+                                       (self.ramp, self.jerk)):
+                    dt = min(elapsed, duration)
+                    q += v*dt+a*dt*dt/2+jerk*dt**3/6
+                    v += a*dt+jerk*dt*dt/2
+                    a += jerk*dt
+                    elapsed -= dt
+                    if elapsed <= 0:
+                        break
+                direction = 1. if target > previous else -1.
+                return previous+direction*q, direction*v, direction*a
+            elapsed -= self.move_seconds+self.dwell
+            previous = target
+        return 0., 0., 0.
+
+
+def make_scurve_plan(degrees=1., speed=.1, acceleration=.5, jerk=10.):
+    make_plan(degrees, speed, acceleration, jerk)
+    distance = math.radians(degrees)
+    ramp = min(acceleration/jerk, math.sqrt(speed/jerk))
+    hold = max(0., speed/(jerk*ramp)-ramp)
+    cruise = (distance-speed*(2*ramp+hold))/speed
+    if cruise < 0:
+        ramp = min(acceleration/jerk, (distance/(2*jerk))**(1/3))
+        hold = max(0., (math.sqrt(ramp*ramp+4*distance/(jerk*ramp))-3*ramp)/2)
+        cruise = 0.
+    return SCurvePlan(distance, jerk, ramp, hold, cruise)
 
 
 
@@ -166,6 +236,17 @@ def make_sine_plan(degrees=1., frequency=.2, cycles=5, speed=.1, acceleration=.5
 
 
 def signal_metadata(plan):
+    if isinstance(plan, SCurvePlan):
+        acceleration_time = 2*plan.ramp+plan.acceleration_hold
+        return dict(waveform='scurve', ramp_s=plan.ramp, acceleration_hold_s=plan.acceleration_hold,
+                    constant_speed_s=plan.cruise, dynamic_peaks=dict(zip(
+                        ('speed', 'acceleration', 'jerk'), plan.dynamic_bounds)),
+                    motion_windows_s=[[plan.dwell+i*(plan.move_seconds+plan.dwell),
+                                       plan.dwell+i*(plan.move_seconds+plan.dwell)+plan.move_seconds,
+                                       sign] for i, sign in enumerate((1, -1, -1, 1))],
+                    constant_speed_windows_s=[[plan.dwell+i*(plan.move_seconds+plan.dwell)+acceleration_time,
+                                               plan.dwell+i*(plan.move_seconds+plan.dwell)+acceleration_time+plan.cruise]
+                                              for i in range(4)])
     if isinstance(plan, SinePlan):
         return dict(waveform='sine', frequency_hz=plan.frequency, cycles=plan.cycles,
                     envelope_cycles=1, dwell_s=plan.dwell,
@@ -555,6 +636,8 @@ def execute(args, plan):
         for t in (0., plan.dwell+plan.move_seconds, plan.dwell+3*plan.move_seconds+2*plan.dwell):
             targets(plan, t, initial, robot.profile.limits, axis)
         record('plan', dict(task=task, robot_config=str(robot.path), profile_hash=robot.profile.digest,
+                           backend='session', execution_mode=getattr(latest['pdo'][0], 'execution_mode', None),
+                           tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                            joint_names=NAMES, axis=axis, initial=initial, amplitude_rad=plan.amplitude,
                            move_seconds=plan.move_seconds, duration=plan.duration,
                            csp_encoder=encoder, **signal_metadata(plan), **vars_limits(args)))
@@ -585,7 +668,10 @@ def execute(args, plan):
                 valid_for=.2, joint_names=list(NAMES), positions=[goal[n] for n in NAMES])
             submitted.add(msg.command_id)
             call(submit, SubmitMotion.Request(command=msg))
+            _, target_speed, target_acceleration = plan.sample(elapsed)
             record('target', dict(elapsed=elapsed, joint=axis, position=goal[axis],
+                                  source_stamp=msg.stamp.sec+msg.stamp.nanosec*1e-9,
+                                  speed=target_speed, acceleration=target_acceleration,
                                   **({'yaw': goal[axis]} if axis == 'body_joint_1' else {})))
             next_tick += .02
             if time.monotonic()-next_tick > .08:
@@ -699,16 +785,112 @@ def summarize_csp(rows, slot, encoder=None):
         command_is_drive_acknowledgement=False, physical_units_verified=False, cause_identified=False)
 
 
-def analyze(path, session=None, *, encoder_profile=None, position_release=None):
+def measurement_time(data):
+    if data.get('sample_time_ns', 0) > 0:
+        sec, nanosec = divmod(data['sample_time_ns'], 1_000_000_000)
+        return sec+nanosec*1e-9
+    return data['stamp']-data['pdo_age']
+
+
+def analyze_tracking(targets, rows, slot, encoder, plan, acceleration_window):
+    """Separate source shaping from device following; never assign a cause automatically."""
+    if not targets:
+        return dict(available=False, reason='SOURCE_TIMESTAMPS_UNAVAILABLE')
+    times = [r['source_stamp'] for r in targets]
+    if any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError('CAPTURE_TARGET_TIME_ORDER_CHANGED')
+    frames = []; raw_count = 0; ref_slot = slot-4
+    for data in rows:
+        t = measurement_time(data)
+        k = bisect_right(times, t)-1
+        if k < 0 or t > times[-1]:
+            continue
+        following = min(k+1, len(targets)-1)
+        u = (t-times[k])/(times[following]-times[k]) if following != k else 0.
+        def source(field):
+            a, b = targets[k].get(field), targets[following].get(field)
+            return a+(b-a)*u if a is not None and b is not None else None
+        output = data['output_position'][ref_slot]
+        raw = data.get('csp_target_position_raw', ())
+        if (encoder is not None and len(raw) == 4 and
+                data.get('csp_command_mask', 0) & (1 << slot) and
+                0 <= data.get('attempt_age', math.inf) <= .02):
+            output = raw[slot-16]*(2*math.pi)/encoder['position_counts_per_rev']
+            raw_count += 1
+        accelerations = data.get('reference_acceleration', ())
+        frames.append(dict(t=t, source=source('position'), reference=data['reference_position'][ref_slot],
+                           output=output, measurement=data['position'][slot],
+                           source_speed=source('speed'), reference_speed=data['reference_speed'][ref_slot],
+                           measurement_speed=data['speed'][slot], source_acceleration=source('acceleration'),
+                           reference_acceleration=accelerations[ref_slot] if len(accelerations) == 16 else None))
+    if not frames:
+        return dict(available=False, reason='NO_SOURCE_PDO_TIME_OVERLAP')
+
+    def peak(field):
+        return max((abs(r[field]) for r in frames if r[field] is not None), default=None)
+    def error(left, right):
+        values = [r[left]-r[right] for r in frames]
+        return dict(peak=max(map(abs, values)), rms=math.sqrt(sum(x*x for x in values)/len(values)))
+    acceleration = []; windows = []; previous = 0
+    for i, frame in enumerate(frames):
+        while previous+1 < i and frame['t']-frames[previous+1]['t'] >= acceleration_window:
+            previous += 1
+        dt = frame['t']-frames[previous]['t']
+        if dt >= acceleration_window:
+            acceleration.append((frame['measurement_speed']-frames[previous]['measurement_speed'])/dt)
+            windows.append(dt)
+    intervals = [b['t']-a['t'] for a, b in zip(frames, frames[1:])]
+    cruise_results = []; response = []
+    origin = times[0]-targets[0]['elapsed']
+    for index, ((begin, end, sign), (cruise_begin, cruise_end)) in enumerate(zip(
+            plan.get('motion_windows_s', ()), plan.get('constant_speed_windows_s', ()))):
+        cruise = [r for r in frames if origin+cruise_begin <= r['t'] < origin+cruise_end]
+        cruise_results.append(dict(leg=index+1, duration_s=cruise_end-cruise_begin, samples=len(cruise),
+            speed_rad_s={field: dict(min=min(sign*r[field] for r in cruise),
+                                    max=max(sign*r[field] for r in cruise),
+                                    mean=statistics.mean(sign*r[field] for r in cruise))
+                         for field in ('source_speed', 'reference_speed', 'measurement_speed')} if cruise else {}))
+        accelerating = [r for r in frames if origin+begin <= r['t'] <= origin+cruise_end]
+        crossings = {}
+        for field in ('source_speed', 'reference_speed', 'measurement_speed'):
+            t10, t90 = [next((r['t']-origin-begin for r in accelerating
+                             if sign*r[field] >= fraction*plan['dynamic_peaks']['speed']), None)
+                        for fraction in (.1, .9)]
+            crossings[field] = dict(first_10pct_s=t10, first_90pct_s=t90,
+                                    rise_10_to_90_s=t90-t10 if t10 is not None and t90 is not None else None)
+        response.append(dict(leg=index+1, sampled_threshold_crossings=crossings))
+    return dict(available=True, samples=len(frames), raw_csp_output_samples=raw_count,
+        capture={key: plan.get(key) for key in ('waveform', 'profile_hash', 'tool_sha256', 'backend', 'execution_mode',
+                                               'requested_speed', 'requested_acceleration', 'requested_jerk')},
+        output_basis='raw CSP with declared encoder scale when valid; otherwise reported output_position',
+        source_alignment='linear interpolation of timestamped source targets at the PDO sample time',
+        sample_interval_s=dict(median=statistics.median(intervals), maximum=max(intervals)) if intervals else None,
+        errors_rad=dict(source_to_reference=error('source', 'reference'),
+                        reference_to_output=error('reference', 'output'),
+                        output_to_measurement=error('output', 'measurement')),
+        peak_speed_rad_s={name: peak(name+'_speed') for name in ('source', 'reference', 'measurement')},
+        peak_acceleration_rad_s2=dict(source=peak('source_acceleration'), reference=peak('reference_acceleration'),
+                                     measurement_window_estimate=max(map(abs, acceleration), default=None)),
+        acceleration_estimation=dict(method='reported velocity difference over actual elapsed time',
+            requested_window_s=acceleration_window, actual_window_range_s=[min(windows), max(windows)] if windows else None),
+        constant_speed_windows=cruise_results, response=response,
+        physical_units_verified=False, hardware_acceptance=False, cause_identified=False)
+
+
+def analyze(path, session=None, *, encoder_profile=None, position_release=None, acceleration_window=.1):
     """Compare same-PDO reference/output/measurement; estimate speed from position."""
     samples = []; result = None; repeats = 0; axis = 'body_joint_1'
     pdo_rows = []; sessions = set(); observed_sessions = set(); invalid = Counter(); other_sessions = 0
     selection = 'explicit' if session is not None else 'unavailable'
-    declarations = []
+    declarations = []; target_rows = []; analysis_rows = []; plan_metadata = {}
+    if not math.isfinite(acceleration_window) or acceleration_window <= 0:
+        raise ValueError('INVALID_ACCELERATION_WINDOW')
     with Path(path).open() as source:
         # PDO callbacks can write before plan metadata; select the axis first.
         for line in source:
             row = json.loads(line)
+            if row['kind'] == 'target' and 'source_stamp' in row['data']:
+                target_rows.append(row['data'])
             if row['kind'] in ('plan', 'metadata') and row['data'].get('csp_encoder') is not None:
                 declared_session = row['data'].get('session')
                 if declared_session is not None and (type(declared_session) is not int or declared_session <= 0):
@@ -718,6 +900,7 @@ def analyze(path, session=None, *, encoder_profile=None, position_release=None):
                                           provenance=row['data']['csp_encoder'].get('sources', [])
                                           if isinstance(row['data']['csp_encoder'], dict) else [])))
             if row['kind'] == 'plan':
+                plan_metadata = row['data']
                 axis = row['data'].get('axis', 'body_joint_1')
                 if axis not in NAMES[:2]:
                     raise ValueError('TEST_AXIS_INVALID')
@@ -765,7 +948,7 @@ def analyze(path, session=None, *, encoder_profile=None, position_release=None):
                     not any(data['status'][slot] & 8 for slot in SLOTS)):
                 continue
             slot, ref_slot = (18, 14) if axis == 'body_joint_1' else (19, 15)
-            values = (data['stamp']-data['pdo_age'], data['position'][slot], data['speed'][slot],
+            values = (measurement_time(data), data['position'][slot], data['speed'][slot],
                       data['reference_position'][ref_slot], data['reference_speed'][ref_slot], data['output_position'][ref_slot])
             if not all(type(v) in (int, float) and math.isfinite(v) for v in values):
                 invalid['nonfinite_reference_or_measurement'] += 1
@@ -777,6 +960,7 @@ def analyze(path, session=None, *, encoder_profile=None, position_release=None):
                             values[0] <= samples[-1][2]):
                 raise ValueError('CAPTURE_BOOT_OR_SAMPLE_ORDER_CHANGED')
             samples.append((data['boot_id'], data['pdo_sample'], *values))
+            analysis_rows.append(data)
     csp = summarize_csp(pdo_rows, 18 if axis == 'body_joint_1' else 19, encoder)
     diagnostics = dict(session=session, session_selection=selection, pdo_frames=len(pdo_rows), other_session_frames_ignored=other_sessions,
                        invalid_frame_reasons=dict(invalid), csp_diagnostics=csp)
@@ -803,7 +987,9 @@ def analyze(path, session=None, *, encoder_profile=None, position_release=None):
         reported_to_position_difference_ratio_median=statistics.median(ratios) if ratios else None,
         reference_measurement_rms_rad=math.sqrt(sum((s[5]-s[3])**2 for s in samples)/len(samples)),
         output_measurement_rms_rad=math.sqrt(sum((s[7]-s[3])**2 for s in samples)/len(samples)),
-        speed_time_basis='header.stamp - pdo_age; 50-100 ms position difference; diagnostic only',
+        speed_time_basis='sample_time_ns when available, else header.stamp - pdo_age; 50-100 ms position difference; diagnostic only',
+        tracking=analyze_tracking(target_rows, analysis_rows, 18 if axis == 'body_joint_1' else 19,
+                                  encoder, plan_metadata, acceleration_window),
         hardware_acceptance=False)
 
 
@@ -811,12 +997,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--axis', choices=(*NAMES[:2], 'both'), default='body_joint_1',
                         help='both is available only with --backend waist_topic')
-    parser.add_argument('--degrees', type=float, default=1., help='code-scale excursion each way; default 1 deg, <=20')
+    parser.add_argument('--degrees', type=float, default=1., help='code-scale excursion each way; default 1 deg, <=45; selected joint limits still apply')
     parser.add_argument('--speed', type=float, default=.1, help='code-scale rad/s; default .1, <=0.375 and selected profile')
     parser.add_argument('--acceleration', type=float, default=.5, help='code-scale rad/s^2; default .5, <=2.25 and selected profile')
     parser.add_argument('--jerk', type=float, default=10., help='code-scale rad/s^3; default 10, <=162')
     parser.add_argument('--backend', choices=('session', 'waist_topic'), default='session')
-    parser.add_argument('--waveform', choices=('quintic', 'sine'), default='quintic')
+    parser.add_argument('--waveform', choices=('quintic', 'sine', 'scurve'), default='quintic')
     parser.add_argument('--frequency', type=float, default=.2, help='sine frequency in Hz')
     parser.add_argument('--cycles', type=int, default=5, help='sine cycles including first/last envelope cycles')
     mode = parser.add_mutually_exclusive_group()
@@ -827,6 +1013,8 @@ def main():
                         help='explicit log/code encoder scale; old logs without metadata remain unspecified')
     parser.add_argument('--position-release', type=Path,
                         help='selected position_release.json with csp_encoder metadata; never selects it from current HEAD')
+    parser.add_argument('--acceleration-window', type=float, default=.1,
+                        help='offline measured-acceleration difference window in seconds; use the same value for comparisons')
     parser.add_argument('--robot-config', type=Path)
     parser.add_argument('--namespace', default='bindu_snowbot')
     parser.add_argument('--vendor-namespace', default='/')
@@ -834,20 +1022,23 @@ def main():
     args = parser.parse_args()
     if args.analyze:
         print(json.dumps(analyze(args.analyze, args.session, encoder_profile=args.encoder_profile,
-                                 position_release=args.position_release), indent=2, allow_nan=False))
+                                 position_release=args.position_release, acceleration_window=args.acceleration_window), indent=2, allow_nan=False))
         return
     if args.session is not None:
         parser.error('--session requires --analyze')
     if args.axis == 'both' and args.backend != 'waist_topic':
         parser.error('--axis both requires --backend waist_topic')
-    plan = (make_sine_plan(args.degrees, args.frequency, args.cycles, args.speed, args.acceleration, args.jerk)
-            if args.waveform == 'sine' else make_plan(args.degrees, args.speed, args.acceleration, args.jerk))
+    if args.waveform == 'sine':
+        plan = make_sine_plan(args.degrees, args.frequency, args.cycles, args.speed, args.acceleration, args.jerk)
+    else:
+        plan = (make_scurve_plan if args.waveform == 'scurve' else make_plan)(
+            args.degrees, args.speed, args.acceleration, args.jerk)
     encoder = select_encoder(args.encoder_profile, args.position_release)
     print(json.dumps(dict(preview=not args.execute, axis=args.axis, physical_units_verified=False, degrees=args.degrees,
         duration_s=plan.duration, move_seconds=plan.move_seconds,
-        target_peak_speed=None if isinstance(plan, SinePlan) else 1.875*plan.amplitude/plan.move_seconds,
-        target_peak_acceleration=None if isinstance(plan, SinePlan) else 10/math.sqrt(3)*plan.amplitude/plan.move_seconds**2,
-        target_peak_jerk=None if isinstance(plan, SinePlan) else 60*plan.amplitude/plan.move_seconds**3,
+        target_peak_speed=None if isinstance(plan, SinePlan) else plan.dynamic_bounds[0],
+        target_peak_acceleration=None if isinstance(plan, SinePlan) else plan.dynamic_bounds[1],
+        target_peak_jerk=None if isinstance(plan, SinePlan) else plan.dynamic_bounds[2],
         backend=args.backend, controlled_groups=('waist',) if args.backend == 'waist_topic' else GROUPS,
         holds_other_joint_targets=args.backend == 'session',
         starts_driver=False, csp_encoder=encoder, **signal_metadata(plan), **vars_limits(args)), indent=2))
