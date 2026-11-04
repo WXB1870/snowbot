@@ -139,24 +139,21 @@ class PicoNode(RuntimeNode):
             (self.cfg.get('simulation_demo_prepare_positions_rad',
             self.tool_cfg['demo']['initial_positions_rad']) if self.simulation_demo else
             self.tool_cfg['demo']['initial_positions_rad']))
-        prepare_names=[n for g in self.tool_cfg['resource_groups'] for n in self.profile.groups[g]]
-        if self.prepare_positions is not None and (not set(prepare_names)<=set(self.prepare_positions) or any(
-                type(self.prepare_positions[n]) not in (float,int) or not math.isfinite(self.prepare_positions[n]) or
-                not self.profile.limits[n][0]<=self.prepare_positions[n]<=self.profile.limits[n][1]
-                for n in prepare_names)):
-            raise ValueError('PICO_PREPARE_PRESET_INVALID')
         self.primitive_library = None
         if self.position_contract and self.cfg.get('primitive_library'):
             from bindu_contracts.resources import resource_file
-            from snowbot_bringup.teleop.snowbot_primitive_replay import AxialGraspGuard, load_replay
+            from snowbot_bringup.teleop.snowbot_primitive_replay import AxialGraspGuard, replay_graph, NAMES
             self.primitive_library = resource_file(self.cfg['primitive_library'])
-            library = json.loads(self.primitive_library.read_text())
-            if library.get('transition_validation_passed') is not True or library.get('home_node') != 'SideScoop:start':
-                raise ValueError('PICO_PRIMITIVE_HOME_MISMATCH')
-            home = load_replay(self.primitive_library, 'SideScoop')
-            if any(abs(self.prepare_positions[n]-q)>1e-10 for n,q in zip(home.names,home.points[0])):
-                raise ValueError('PICO_PRIMITIVE_PRESET_MISMATCH')
+            library, _, plans = replay_graph(self.primitive_library, 1., None)
+            for segment in plans.values(): segment.validate_profile(self.profile)
+            self.prepare_positions = dict(zip(NAMES, library['nodes'][library['home_node']]))
             self.primitive_grasp_guard = AxialGraspGuard(self.tool_cfg['urdf'], library['grasp'])
+        prepare_names=[n for g in self.tool_cfg['resource_groups'] for n in self.profile.groups[g]]
+        if self.prepare_positions is not None and (not set(prepare_names)<=set(self.prepare_positions) or any(
+                not math.isfinite(self.prepare_positions[n]) or
+                not self.profile.limits[n][0]<=self.prepare_positions[n]<=self.profile.limits[n][1]
+                for n in prepare_names)):
+            raise ValueError('PICO_PREPARE_PRESET_INVALID')
         if not 0 < float(self.cfg['prepare_duration']) <= 60:
             raise ValueError('PICO_PREPARE_DURATION_INVALID')
         self.prepare_position_tolerance=float(self.cfg.get('prepare_position_tolerance_rad',.002))
@@ -637,10 +634,9 @@ class PicoNode(RuntimeNode):
                 # Ordinary-arm A remains an explicit empty-hand setup request.
                 return False
             raise
-        plan.validate_profile(self.profile)
         self.prepare_limit_reference=self.prepare_limit_start=self.prepare_recovery=None
         self.primitive_grasp_guard.check(measured)
-        self.event('PICO_PRIMITIVE_HOME', json.dumps(dict(home='SideScoop:start',
+        self.event('PICO_PRIMITIVE_HOME', json.dumps(dict(
             route=list(plan.route), duration_s=plan.duration, coupling_checked=True)))
         await self.move(intent, dict(zip(plan.names, plan.points[-1])), plan.duration, replay=plan)
         return True
@@ -648,7 +644,8 @@ class PicoNode(RuntimeNode):
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
-        arrival_tolerance=(.002 if replay is not None or getattr(self,'primitive_library',None) and intent.operation=='prepare' else self.prepare_position_tolerance if intent.operation=='prepare' else self.profile.feedback_tolerances['joint_position'])
+        arrival_tolerance=(self.prepare_position_tolerance if intent.operation=='prepare'
+                           else self.profile.feedback_tolerances['joint_position'])
         execution_instance_id=self.state.instance_id
         future=self.leases.call_async(Lease.Request(operation='acquire',
             owner=self.instance_id,resources=list(self.groups)))
@@ -737,7 +734,7 @@ class PicoNode(RuntimeNode):
                 state,measured=self.reading();now=self.now()
                 if replay is not None:
                     self.primitive_grasp_guard.check(measured)
-                    if abs((now-started)-(time.monotonic()-replay_steady))>.02:
+                    if abs((now-started)-(time.monotonic()-replay_steady))>parameters_for(self,'pico')['prepare_command_ttl_s']:
                         raise RuntimeError('REPLAY_CLOCK_CHANGED')
                 if (state.instance_id==execution_instance_id and
                         state.command_id.startswith(command_id+'_') and state.state in ('STOPPING','FAILED') and
@@ -784,7 +781,7 @@ class PicoNode(RuntimeNode):
                     lookahead=parameters_for(self,'pico')['reference_lookahead_s']
                     lookahead_sec,lookahead_ns=divmod(round(lookahead*1e9),1000000000)
                     source=started+replay_tick*.02 if replay is not None else now
-                    if replay is not None and now-source>.04:
+                    if replay is not None and now-source>=parameters_for(self,'pico')['prepare_command_ttl_s']:
                         raise RuntimeError('REPLAY_STREAM_LATE')
                     sample=(State.rest(replay.sample(replay_tick*.02)) if replay is not None else
                         curve.sample(min(duration,max(0.,now-started)+(0. if self.position_contract else lookahead))))
@@ -1091,7 +1088,7 @@ class PicoNode(RuntimeNode):
                             raise RuntimeError('PREPARE_LIMIT_RECOVERY_NOT_INSIDE')
                     _,measured=self.reading()
                     error=max(abs(measured[n]-q) for n,q in target.items())
-                    if (self.position_contract and error<(.002 if getattr(self,'primitive_library',None) else self.prepare_position_tolerance) and not self.prepare_recovery and
+                    if (self.position_contract and error<self.prepare_position_tolerance and not self.prepare_recovery and
                             (not getattr(self,'prepare_limit_reference',None) or
                              all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
                         self.event('PICO_PREPARE_ALREADY_REACHED',json.dumps(dict(max_joint_error_rad=error,

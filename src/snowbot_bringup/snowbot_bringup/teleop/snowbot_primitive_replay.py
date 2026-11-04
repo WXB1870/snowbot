@@ -7,6 +7,7 @@ startup, motor enabling, encoder homing, or gripper/base commands are performed.
 import argparse
 import bisect
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import gzip
 import json
@@ -91,11 +92,18 @@ class Replay:
                     raise ValueError('REPLAY_VELOCITY_LIMIT:'+n)
 
 
+@lru_cache(maxsize=8)
+def load_library(path):
+    """One immutable asset manifest per process; restart to select a new release."""
+    return json.loads(Path(path).read_text())
+
+
+@lru_cache(maxsize=128)
 def load_replay(path, action, speed=1., waist_lead_s=None):
     if not math.isfinite(speed) or not 0 < speed <= 1:
         raise ValueError('REPLAY_SPEED_REQUIRES_0_TO_1')
     path = Path(path).resolve()
-    manifest = json.loads(path.read_text())
+    manifest = load_library(path)
     if manifest.get('schema_version') != 1 or manifest.get('validation_passed') is not True:
         raise ValueError('REPLAY_UNVALIDATED_LIBRARY')
     lead = manifest.get('waist_lead_s', 0.) if waist_lead_s is None else waist_lead_s
@@ -168,23 +176,12 @@ class ReplaySequence:
         for segment in self.segments: segment.validate_profile(profile)
 
 
-def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01):
-    """Join only certified grasp-preserving edges; unknown starts never interpolate."""
-    import heapq
-    manifest = json.loads(Path(path).read_text())
+@lru_cache(maxsize=16)
+def replay_graph(path, speed, waist_lead_s):
+    manifest = load_library(Path(path).resolve())
     if manifest.get('transition_validation_passed') is not True:
         raise ValueError('REPLAY_TRANSITIONS_UNVALIDATED')
-    if not 0 < tolerance <= .0175 or not set(NAMES) <= set(measured):
-        raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
-    if any(not math.isfinite(measured[n]) for n in NAMES):
-        raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
     nodes = manifest['nodes']
-    errors = {key: max(abs(measured[n]-q) for n, q in zip(NAMES, values))
-              for key, values in nodes.items() if len(values) == len(NAMES)}
-    if not errors or min(errors.values()) > tolerance:
-        raise RuntimeError('REPLAY_UNKNOWN_START: use a certified action start/end pose')
-    source = min(errors, key=errors.get)
-    target = manifest['home_node'] if action == 'Home' else manifest['actions'][action]['start_node']
     edges, plans = {}, {}
     for edge in manifest['edges']:
         key, a, b = edge['segment'], edge['from'], edge['to']
@@ -194,6 +191,24 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
             raise ValueError('REPLAY_TRANSITION_ENDPOINT:'+key)
         plans[key] = segment
         edges.setdefault(a, []).append((b, key, segment.duration+3.))
+    return manifest, edges, plans
+
+
+def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01):
+    """Select a route from current measurements over the cached certified graph."""
+    import heapq
+    manifest, edges, plans = replay_graph(path, speed, waist_lead_s)
+    if not 0 < tolerance <= .0175 or not set(NAMES) <= set(measured):
+        raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
+    if any(not math.isfinite(measured[n]) for n in NAMES):
+        raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
+    nodes = manifest['nodes']
+    errors = {key: max(abs(measured[n]-q) for n, q in zip(NAMES, values))
+              for key, values in nodes.items()}
+    if not errors or min(errors.values()) > tolerance:
+        raise RuntimeError('REPLAY_UNKNOWN_START: use a certified action start/end pose')
+    source = min(errors, key=errors.get)
+    target = manifest['home_node'] if action == 'Home' else manifest['actions'][action]['start_node']
     queue, costs = [(0., source, ())], {source: 0.}
     selected = None
     while queue:
@@ -264,7 +279,8 @@ def plan_prepare(path, robot, measured, speed=1.):
     from bindu_kinematics.tool_geometry import make_collision_checker
     from snowbot_hardware.parameters import load_mode_config
 
-    home = load_replay(path, 'SideScoop', speed, waist_lead_s=0.)
+    manifest = load_library(Path(path).resolve())
+    home = load_replay(path, manifest['home_node'].split(':')[0], speed, waist_lead_s=0.)
     profile = robot.profile
     context = tuple(n for group in profile.groups.values() for n in group)
     for name in context:
@@ -273,7 +289,7 @@ def plan_prepare(path, robot, measured, speed=1.):
         if not profile.limits[name][0] <= measured[name] <= profile.limits[name][1]:
             raise ValueError('PREPARE_START_JOINT_LIMIT:'+name)
     before = tuple(measured[n] for n in NAMES)
-    after = home.points[0]
+    after = tuple(manifest['nodes'][manifest['home_node']])
     config = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')
     duration = float(config['prepare_duration'])
     for name, a, b in zip(NAMES, before, after):
@@ -312,13 +328,14 @@ def plan_prepare(path, robot, measured, speed=1.):
     return plan
 
 
-def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5.):
+def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_timeout=5.,
+               velocity_tolerance=.005, settle_time=.2, command_ttl=.25):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
     if not 0 < start_tolerance <= .0175 or not 0 < follow_tolerance <= .15:
         raise ValueError('REPLAY_TOLERANCE')
     measured, velocity = port.check(False)
     if (max(abs(measured[n]-q) for n, q in zip(plan.names, plan.points[0])) > start_tolerance or
-            max(abs(velocity[n]) for n in plan.names) > .005):
+            max(abs(velocity[n]) for n in plan.names) > velocity_tolerance):
         raise RuntimeError('REPLAY_START_POSE_MISMATCH: prepare the exported start pose')
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
@@ -334,9 +351,9 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
         while True:
             port.wait_until(due)
             now = port.steady()
-            if now-due > .04:
+            if now-due >= command_ttl:
                 raise RuntimeError('REPLAY_STREAM_LATE')
-            if abs(port.ros()-(ros_start+now-start)) > .02:
+            if abs(port.ros()-(ros_start+now-start)) > command_ttl:
                 raise RuntimeError('REPLAY_CLOCK_CHANGED')
             q, v = port.check(True)
             elapsed = due-start
@@ -346,7 +363,7 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             if now-renewed >= .5:
                 port.renew()
                 renewed = port.steady()
-            if port.steady()-due > .04:
+            if port.steady()-due >= command_ttl:
                 raise RuntimeError('REPLAY_STREAM_LATE')
             # The source date is the scheduled tick, never the later service time.
             port.send(goal, ros_start+elapsed)
@@ -354,9 +371,9 @@ def run_replay(plan, port, *, start_tolerance=.01, follow_tolerance=.10, settle_
             if elapsed >= plan.duration:
                 resting = (all(abs(q[n]-x) <= port.arrival_tolerance(n)
                                for n, x in zip(plan.names, plan.points[-1])) and
-                           all(abs(v[n]) <= .005 for n in plan.names))
+                           all(abs(v[n]) <= velocity_tolerance for n in plan.names))
                 rest_since = now if resting and rest_since is None else rest_since if resting else None
-                if rest_since is not None and now-rest_since >= .2:
+                if rest_since is not None and now-rest_since >= settle_time:
                     arrived = True
                     break
                 if elapsed-plan.duration >= settle_timeout:
@@ -393,6 +410,12 @@ def execute(args, plan):
         from bindu_contracts.resources import package_share
         args.robot_config = package_share('snowbot_bringup')/'config/robots/snowbot/robot_snowbot_real.json'
     robot = RobotSetup.load(args.robot_config)
+    from snowbot_hardware.parameters import load_parameters, load_mode_config
+    settings = load_parameters()
+    velocity_tolerance = settings['execution']['motion_arrival_velocity_tolerance_rad_s']
+    settle_time = settings['execution']['stop_confirmation_window_s']
+    settle_timeout = settings['pico']['motion_completion_grace_s']
+    prepare_tolerance = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')['prepare_position_tolerance_rad']
     plan.validate_profile(robot.profile)
     configured_margin = json.loads(robot.tool_config.read_text()).get('posture_reference_margin_rad', 0.)
     if abs(configured_margin-plan.reference_margin_rad) > 1e-10:
@@ -509,6 +532,7 @@ def execute(args, plan):
             record('target', source_stamp=source, q=list(goal))
         @staticmethod
         def arrival_tolerance(name):
+            if args.action == 'Prepare': return prepare_tolerance
             return robot.profile.stop_position_tolerances.get(
                 name, robot.profile.feedback_tolerances['joint_position'])
         def release_and_confirm_stop(self):
@@ -523,7 +547,7 @@ def execute(args, plan):
             while self.steady() < end:
                 q, v = self.check(False)
                 now = self.steady()
-                resting = all(abs(v[n]) <= .005 for n in NAMES)
+                resting = all(abs(v[n]) <= velocity_tolerance for n in NAMES)
                 rest_since = now if resting and rest_since is None else rest_since if resting else None
                 if rest_since is not None and now-rest_since >= .1:
                     self.lease = None
@@ -531,19 +555,19 @@ def execute(args, plan):
                 rclpy.spin_once(node, timeout_sec=.005)
             raise RuntimeError('REPLAY_MEASURED_STOP_NOT_CONFIRMED')
 
-    manifest = json.loads(args.library.read_text())
+    manifest = load_library(args.library.resolve())
     guard = AxialGraspGuard(robot.urdf, manifest['grasp']) if 'grasp' in manifest and args.action != 'Prepare' else None
     port = Port()
     try:
         wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
         rest_since = None
-        end = time.monotonic()+5.
+        end = time.monotonic()+settle_timeout
         while True:
             q, v = port.check(False)
             now = time.monotonic()
-            resting = all(abs(v[n]) <= .005 for n in NAMES)
+            resting = all(abs(v[n]) <= velocity_tolerance for n in NAMES)
             rest_since = now if resting and rest_since is None else rest_since if resting else None
-            if rest_since is not None and now-rest_since >= .2: break
+            if rest_since is not None and now-rest_since >= settle_time: break
             if now >= end: raise RuntimeError('REPLAY_START_NOT_SETTLED')
             rclpy.spin_once(node, timeout_sec=.005)
         if args.action == 'Prepare':
@@ -562,7 +586,8 @@ def execute(args, plan):
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
         result = run_replay(plan, port, start_tolerance=min(args.start_tolerance,.001) if args.action=='Prepare' else args.start_tolerance,
-                            follow_tolerance=args.follow_tolerance)
+                            follow_tolerance=args.follow_tolerance, velocity_tolerance=velocity_tolerance,
+                            settle_time=settle_time, settle_timeout=settle_timeout)
         record('result', **result)
         print(json.dumps(result))
     except (Exception, KeyboardInterrupt) as exc:
@@ -594,13 +619,13 @@ def main(argv=None):
     parser.add_argument('--start-tolerance', type=float, default=.01)
     parser.add_argument('--follow-tolerance', type=float, default=.10)
     args = parser.parse_args(argv)
-    manifest = json.loads(args.library.read_text())
+    manifest = load_library(args.library.resolve())
     if args.action == 'Prepare':
-        plan = load_replay(args.library, 'SideScoop', args.speed, waist_lead_s=0.)
+        plan = load_replay(args.library, manifest['home_node'].split(':')[0], args.speed, waist_lead_s=0.)
         if not args.execute:
             print(json.dumps(dict(action='Prepare', empty_handed=True,
                 start_source='fresh measured joints on execute; full path checked before lease',
-                goal_q_rad=dict(zip(plan.names,plan.points[0])),
+                goal_q_rad=dict(zip(plan.names,manifest['nodes'][manifest['home_node']])),
                 posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
             return
     elif manifest.get('transition_validation_passed'):

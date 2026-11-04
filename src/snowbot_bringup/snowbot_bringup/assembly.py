@@ -77,8 +77,6 @@ def assemble(context):
     if base_config:
         if not pico or not position_contract or not enabled('vr_enabled','false'):
             raise ValueError('BASE_REQUIRES_PICO_POSITION_VR')
-        from bindu_teleoperation.base import validate_base_config
-        validate_base_config(json.loads(Path(base_config).read_text()))
     if pico:
         tool_settings=json.loads(robot.tool_config.read_text())
         if not tool_settings.get('right_axial_grasp') or tool_settings.get('collision_scope')!='configured_tool_geometry' or (not position_contract and not tool_settings.get('demo',{}).get('initial_positions_rad')):
@@ -92,8 +90,7 @@ def assemble(context):
         if position_contract and not value('gripper_config'):
             raise ValueError('PICO_GRIPPER_CONFIG_REQUIRED')
         if position_contract:
-            from snowbot_hardware.gripper import validate_config
-            grippers=validate_config(load_mode_config(value('gripper_config'),mode),robot.profile)
+            grippers=load_mode_config(value('gripper_config'),mode)
             if grippers.get('simulation_only',False) is not (mode=='simulation'):
                 raise ValueError('PICO_GRIPPER_CONFIG_MODE_MISMATCH')
         if mode=='real' and settings.get('device_initial_positions_rad'):

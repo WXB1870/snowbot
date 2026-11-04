@@ -456,22 +456,3 @@ def namespace(value):
     if value != '/' and not re.fullmatch(r'/?[A-Za-z_][A-Za-z_0-9]*(/[A-Za-z_][A-Za-z_0-9]*)*', value):
         raise ValueError('命名空间格式无效：'+str(value))
     return '/'+value.strip('/') if value != '/' else '/'
-
-
-def ensure_stopped(args):
-    """Observe the graph before launch; never terminate an existing instance."""
-    import rclpy
-    rclpy.init(args=[])
-    node = rclpy.create_node('bindu_launch_check_'+uuid.uuid4().hex[:8])
-    ns = namespace(args['namespace'])
-    try:
-        deadline = time.monotonic()+1.
-        while time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=.05)
-        conflicts = [name for name, space in node.get_node_names_and_namespaces()
-                     if space == ns and name in ('execution', 'teleop_mode', 'teleop_tool', 'vr_input')]
-        if conflicts:
-            raise ValueError('该命名空间已有遥操作节点，请先核对并收尾：'+','.join(sorted(conflicts)))
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()

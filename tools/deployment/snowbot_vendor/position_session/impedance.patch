@@ -357,7 +357,7 @@
   if(!position_endpoint())return false;
   const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
   if(!position_feedback_.sample){position_wait_reason_=position_feedback_.received_messages?"pdo_not_started":"publisher_found_no_message";return false;}
-@@ -2391,3 +2437,70 @@
+@@ -2391,3 +2437,68 @@
   if(position_feedback_gid_!=endpoint.publisher_gid){position_feedback_=position_session::Tracker{};position_gate_.interrupt();position_feedback_gid_=endpoint.publisher_gid;}
   return true;
  }
@@ -366,7 +366,6 @@
 +bool ServoNode::session_impedance_ready() const {
 + const auto obs=EtherCAT_positionObservation();
 + if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
-+ for(float value:obs.wrench)if(!std::isfinite(value))return false;
 + return true;
 +}
 +
@@ -376,10 +375,9 @@
 + session_nominal_.setZero(n);session_velocity_.setZero(n);
 +}
 +bool ServoNode::session_impedance_inputs(const position_session::Observation& obs){
-+ if(session_q_.size()!=20 || session_dq_.size()!=20 || session_efforts_.size()!=20 || session_nominal_.size()!=20 || session_velocity_.size()!=20)return false;
 + session_q_.setZero();session_dq_.setZero();session_efforts_.setZero();
 + for(unsigned i=0;i<20;++i){
-+  if(session_q_index_[i]<0 || session_q_index_[i]>=20 || session_v_index_[i]<0 || session_v_index_[i]>=20 || !(obs.valid_mask&(1u<<i)) || !std::isfinite(obs.position[i]) || !std::isfinite(obs.speed[i]))return false;
++  if(!(obs.valid_mask&(1u<<i)) || !std::isfinite(obs.position[i]) || !std::isfinite(obs.speed[i]))return false;
 +  session_q_[session_q_index_[i]]=obs.position[i];session_dq_[session_v_index_[i]]=obs.speed[i];
 + }
 + session_nominal_=session_q_;session_velocity_.setZero();

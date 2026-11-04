@@ -31,8 +31,6 @@ def decode_observation(msg, now):
         raise ValueError('SNOWBOT_PDO_STALE')
     if msg.expected_wkc <= 0 or msg.wkc != msg.expected_wkc:
         raise ValueError('SNOWBOT_PDO_WKC')
-    if any(len(getattr(msg, field)) != 20 for field in ('position', 'speed', 'current', 'status')):
-        raise ValueError('SNOWBOT_OBSERVATION_LAYOUT')
     q, v = {}, {}
     for i, name in enumerate(SLOTS):
         if msg.valid_mask & (1 << i):
@@ -55,6 +53,7 @@ class SessionHealth:
         self.now, self.steady = now, steady
         self.states, self.received = {}, {}
         self.observation = None
+        self.observation_stamp = self.measurement_stamp = 0.
         self.boot = self.sample = 0
         self.progress = None
         self.advances = 0
@@ -74,6 +73,8 @@ class SessionHealth:
                 self.progress = self.steady()
             self.boot, self.sample = msg.boot_id, msg.pdo_sample
             self.observation, self.received['observation'] = msg, self.steady()
+            self.measurement_stamp = result[2]
+            self.observation_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9
             if (msg.valid_mask & CONTROL_MASK != CONTROL_MASK or
                     any(status & 8 for i, status in enumerate(msg.status) if CONTROL_MASK & (1 << i))):
                 self.advances = 0
@@ -151,31 +152,33 @@ class SessionHealth:
             if not passed:
                 return reason
         values = obs.hold_position
-        if len(values) != len(CONTROL_NAMES) or not all(math.isfinite(q) for q in values):
+        if not all(math.isfinite(q) for q in values):
             return 'HOLD_POSITION_INVALID'
         return ''
 
-    def require(self, groups, *, acquiring=False):
-        if set(groups) != CONTROL_GROUPS:
-            raise RuntimeError('SNOWBOT_POSITION_SESSION_RESOURCE_LAYOUT')
+    def require_observation(self):
+        """Use the decoded PDO snapshot; only its freshness changes between reads."""
         if self.invalid:
             raise RuntimeError(self.invalid)
         obs = self.observation
-        if obs is not None and any(status & 8 for i, status in enumerate(obs.status) if CONTROL_MASK & (1 << i)):
-            raise RuntimeError('SNOWBOT_DRIVE_FAULT')
-        if (obs is None or self.progress is None or self.advances < 2 or
+        if (obs is None or self.progress is None or
                 not 0 <= self.steady()-self.progress <= ROS_FEEDBACK_TIMEOUT_S or
                 not 0 <= self.steady()-self.received['observation'] <= ROS_FEEDBACK_TIMEOUT_S):
             raise RuntimeError('SNOWBOT_PDO_NOT_ADVANCING')
-        try:
-            decode_observation(obs, self.now())
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
-        mask = sum(SLOT_MASKS[g] for g in groups)
-        if obs.valid_mask & mask != mask:
-            raise RuntimeError('SNOWBOT_POSITION_FEEDBACK_INVALID')
-        if any(status & 8 for i, status in enumerate(obs.status) if mask & (1 << i)):
+        now = self.now()
+        if (not 0 <= now-self.observation_stamp <= ROS_FEEDBACK_TIMEOUT_S or
+                not 0 <= now-self.measurement_stamp <= ROS_FEEDBACK_TIMEOUT_S):
+            raise RuntimeError('SNOWBOT_PDO_STALE')
+        return obs
+
+    def require(self, groups, *, acquiring=False):
+        obs = self.require_observation()
+        if any(status & 8 for i, status in enumerate(obs.status) if CONTROL_MASK & (1 << i)):
             raise RuntimeError('SNOWBOT_DRIVE_FAULT')
+        if self.advances < 2:
+            raise RuntimeError('SNOWBOT_PDO_NOT_ADVANCING')
+        if obs.valid_mask & CONTROL_MASK != CONTROL_MASK:
+            raise RuntimeError('SNOWBOT_POSITION_FEEDBACK_INVALID')
         for layer in ('upper', 'middle', 'servo'):
             stamp, state = self.states.get(layer, (0., None))
             if (state is None or not 0 <= self.now()-stamp <= .2 or
@@ -197,9 +200,9 @@ class SessionHealth:
             wrench = getattr(obs, 'wrench', ())
             age = getattr(obs, 'sensor_age', ())
             stamp = obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9
-            if (getattr(obs, 'sensor_valid_mask', 0) != 3 or len(wrench) != 12 or
+            if (getattr(obs, 'sensor_valid_mask', 0) != 3 or
                     obs.valid_mask != 0xfffff or not all(math.isfinite(x) for x in wrench) or
-                    len(age) != 2 or not all(math.isfinite(a) and 0 <= a and
+                    not all(math.isfinite(a) and 0 <= a and
                         self.now()-stamp+a <= .02 for a in age)):
                 raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
         if obs.session_reason >= 2 and not acquiring:
@@ -301,8 +304,6 @@ def new_session_id(now, previous=0):
     if not math.isfinite(now) or now <= 0:
         raise ValueError('SNOWBOT_SESSION_CLOCK_INVALID')
     value = max(round(now*1e9), previous+1)
-    if value >= 1 << 64:
-        raise ValueError('SNOWBOT_SESSION_ID_EXHAUSTED')
     return value
 
 

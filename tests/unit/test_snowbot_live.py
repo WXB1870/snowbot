@@ -398,6 +398,15 @@ class ToolDisplayPoseTests(unittest.TestCase):
 
 
 class SimulationEntryTests(unittest.TestCase):
+    def test_startup_lock_is_shared_and_released(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(entry.tempfile,'gettempdir',return_value=directory):
+            with entry.startup_lock('42','/snowbot/',inherit=True) as lock:
+                self.assertTrue(entry.os.get_inheritable(lock.fileno()))
+                with self.assertRaisesRegex(RuntimeError,'已有启动器运行'):
+                    entry.startup_lock(42,'snowbot')
+            with entry.startup_lock(42,'snowbot') as lock:
+                self.assertFalse(entry.os.get_inheritable(lock.fileno()))
+
     def setUp(self):
         environment = patch.dict(entry.os.environ)
         environment.start()
@@ -520,7 +529,7 @@ from snowbot_bringup.simulation import scene,physics,kinematic_scene
         self.assertEqual(display[display.index('--runtime-mode')+1],'real')
         self.assertEqual(display[display.index('--device-backend')+1],'snowbot_vendor')
 
-    def test_explicit_real_write_enable_keeps_preflight_and_recipe(self):
+    def test_explicit_real_write_enable_initializes_components_without_preflight(self):
         recipe=package_share("snowbot_bringup")/'config/deployments/snowbot_vr_real.json'
         before=recipe.read_bytes()
         args=entry.parse_args(['--config',str(recipe),'--enable-commands'])
@@ -528,13 +537,14 @@ from snowbot_bringup.simulation import scene,physics,kinematic_scene
         self.assertIn('command_enabled:=true',entry.commands(args)[0])
         with tempfile.TemporaryDirectory() as directory:
             args.output=Path(directory)/'rejected'
-            with patch.object(entry,'check',side_effect=RuntimeError('online check rejected')), \
-                    patch.object(entry.subprocess,'Popen') as start:
-                with self.assertRaisesRegex(RuntimeError,'online check rejected'):entry.run(args)
-                start.assert_not_called()
+            with patch.object(entry,'check',side_effect=AssertionError('unexpected preflight')) as preflight, \
+                    patch.object(entry.subprocess,'Popen',side_effect=RuntimeError('component initialization')) as start:
+                with self.assertRaisesRegex(RuntimeError,'component initialization'):entry.run(args)
+                preflight.assert_not_called()
+                start.assert_called_once()
             record=json.loads((args.output/'session.json').read_text())
-            self.assertEqual(record['failed_phase'],'preflight')
-            self.assertEqual(record['error']['message'],'online check rejected')
+            self.assertEqual(record['failed_phase'],'starting_processes')
+            self.assertEqual(record['error']['message'],'component initialization')
             self.assertEqual(record['effective_arguments']['command_enabled'],'true')
         self.assertEqual(recipe.read_bytes(),before)
 

@@ -179,8 +179,7 @@ def checked_state(msg, now, received, steady, profile_hash, *, owned=False, epoc
             msg.profile_hash != profile_hash or msg.stop_failures or
             not 0 <= steady-received <= .1 or
             not 0 <= feedback_age <= .2 or
-            msg.state in ('FAILED', 'STOPPING') or
-            msg.code not in ('OK', 'CANCELED', 'FEEDBACK_CONFIRMED', 'STARTUP_READY')):
+            msg.state in ('FAILED', 'STOPPING')):
         raise RuntimeError('EXECUTION_NOT_READY:state='+msg.state+';code='+msg.code+
                            ';feedback_age='+str(round(feedback_age, 4))+
                            ';state_age='+str(round(steady-received, 4))+

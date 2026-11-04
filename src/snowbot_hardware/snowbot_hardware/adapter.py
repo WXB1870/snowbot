@@ -3,7 +3,7 @@ import json
 import secrets
 from rcl_interfaces.msg import ParameterDescriptor
 from bindu_execution.delegated_position import DelegatedPositionExecutor
-from snowbot_hardware.protocol import GROUPS, WRITABLE, VendorHealth, SnowbotIO, decode_feedback, feedback_sample
+from snowbot_hardware.protocol import GROUPS, WRITABLE, VendorHealth, SnowbotIO, GraphSnapshot, decode_feedback, feedback_sample
 from bindu_runtime.execution_node import ExecutionNode, run_execution
 
 
@@ -20,6 +20,7 @@ class SnowbotDevices:
         from std_msgs.msg import Float64MultiArray, String, UInt64MultiArray
         from rclpy.qos import qos_profile_sensor_data
         self.node = node
+        self.graph = GraphSnapshot(node)
         self.grippers = None
         self.session = secrets.randbits(64) or 1
         self.health = VendorHealth(node.now, expected_session=self.session)
@@ -73,7 +74,7 @@ class SnowbotDevices:
 
     def receive_health(self, channel, msg):
         try:
-            infos = self.node.get_publishers_info_by_topic(self.health_topics[channel])
+            infos = self.graph.get_publishers_info_by_topic(self.health_topics[channel])
             if (len(infos) != 1 or
                     infos[0].node_namespace.rstrip('/')+'/'+infos[0].node_name != self.health_receivers[channel]):
                 raise ValueError('SNOWBOT_HEALTH_PUBLISHER_IDENTITY')
@@ -84,7 +85,7 @@ class SnowbotDevices:
 
     def check_health(self, groups, *, armed=True):
         for channel, topic in self.health_topics.items():
-            if self.node.count_publishers(topic) != 1:
+            if self.graph.count_publishers(topic) != 1:
                 raise RuntimeError('SNOWBOT_HEALTH_UNAVAILABLE:'+channel)
         self.health.require(groups, armed=armed)
         if self.health.messages['servo'].get('native_position_guard_version') != 1:
@@ -97,8 +98,8 @@ class SnowbotDevices:
             # The guard mode is exclusive to this adapter, including idle time.
             # A wrong source, PDO fault or conflict stops heartbeat renewal.
             self.check_health(WRITABLE, armed=False)
-            if (self.node.count_publishers(self.heartbeat_topic) != 1 or
-                    any(self.node.count_publishers(t) != 1 for t in self.command_topics.values())):
+            if (self.graph.count_publishers(self.heartbeat_topic) != 1 or
+                    any(self.graph.count_publishers(t) != 1 for t in self.command_topics.values())):
                 return
         except RuntimeError:
             return
@@ -108,7 +109,7 @@ class SnowbotDevices:
 
     def receive(self, msg):
         try:
-            writers = self.node.get_publishers_info_by_topic(self.feedback_topic)
+            writers = self.graph.get_publishers_info_by_topic(self.feedback_topic)
             if (len(writers) != 1 or
                     writers[0].node_namespace.rstrip('/')+'/'+writers[0].node_name != self.health_receivers['servo']):
                 raise ValueError('SNOWBOT_FEEDBACK_PUBLISHER_IDENTITY')
@@ -154,26 +155,26 @@ class SnowbotDevices:
 
     def check_ready(self, groups):
         self.check_health(groups)
-        if (self.node.count_publishers(self.heartbeat_topic) != 1 or
+        if (self.graph.count_publishers(self.heartbeat_topic) != 1 or
                 not any(v.node_namespace.rstrip('/')+'/'+v.node_name == self.receivers['head']
-                        for v in self.node.get_subscriptions_info_by_topic(self.heartbeat_topic))):
+                        for v in self.graph.get_subscriptions_info_by_topic(self.heartbeat_topic))):
             raise RuntimeError('SNOWBOT_HEARTBEAT_UNAVAILABLE')
         channels = ({'arms'} if {'left_arm', 'right_arm'} & set(groups) else set()) | (set(groups) & {'waist', 'head'})
         if 'arms' in channels:
             for topic, sender, receiver in self.bridge_routes:
-                writers = self.node.get_publishers_info_by_topic(topic)
-                readers = self.node.get_subscriptions_info_by_topic(topic)
+                writers = self.graph.get_publishers_info_by_topic(topic)
+                readers = self.graph.get_subscriptions_info_by_topic(topic)
                 if (len(writers) != 1 or
                         writers[0].node_namespace.rstrip('/')+'/'+writers[0].node_name != sender or
                         not any(v.node_namespace.rstrip('/')+'/'+v.node_name == receiver for v in readers)):
                     raise RuntimeError('SNOWBOT_VENDOR_RECEIVER_UNAVAILABLE:'+topic)
         for group in sorted(channels):
             topic = self.command_topics[group]
-            if self.node.count_publishers(topic) != 1:
+            if self.graph.count_publishers(topic) != 1:
                 self.node.get_logger().error('SNOWBOT_COMMAND_PUBLISHER_CONFLICT:'+topic,
                                              throttle_duration_sec=1.)
                 raise RuntimeError('SNOWBOT_COMMAND_PUBLISHER_CONFLICT:'+group)
-            receivers = self.node.get_subscriptions_info_by_topic(topic)
+            receivers = self.graph.get_subscriptions_info_by_topic(topic)
             if not any(info.node_namespace.rstrip('/')+'/'+info.node_name == self.receivers[group]
                        for info in receivers):
                 self.node.get_logger().error('SNOWBOT_VENDOR_RECEIVER_UNAVAILABLE:'+topic+

@@ -883,6 +883,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         node=await self.arrival()
         arrived=[json.loads(c.args[1]) for c in node.event.call_args_list if c.args[0]=='PICO_ACTUATOR_ARRIVED']
         self.assertEqual(len(arrived),1);self.assertEqual(arrived[0]['position_tolerance_rad'],.035)
+        await self.arrival(error=.0284, primitive=True, tick_period=.005)
         for options in ({'error':.03501},{'operation':'load'},{'velocity':.00501},{'fresh':False}):
             with self.subTest(options=options),self.assertRaisesRegex(RuntimeError,'PICO_ACTUATOR_FEEDBACK_TIMEOUT'):
                 await self.arrival(**options)

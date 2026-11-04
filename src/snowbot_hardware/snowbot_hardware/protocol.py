@@ -18,6 +18,31 @@ class CommandNotSent(RuntimeError):
     """
 
 
+class GraphSnapshot:
+    """Refresh endpoint discovery at 10 Hz, independently of packet frequency."""
+    def __init__(self, node, steady=time.monotonic):
+        self.node, self.steady = node, steady
+        self.entries = {}
+
+    def _get(self, topic, subscription):
+        key, now = (topic, subscription), self.steady()
+        previous = self.entries.get(key)
+        if previous is None or now-previous[0] >= .1:
+            method = (self.node.get_subscriptions_info_by_topic if subscription else
+                      self.node.get_publishers_info_by_topic)
+            self.entries[key] = now, method(topic)
+        return self.entries[key][1]
+
+    def get_publishers_info_by_topic(self, topic):
+        return self._get(topic, False)
+
+    def get_subscriptions_info_by_topic(self, topic):
+        return self._get(topic, True)
+
+    def count_publishers(self, topic):
+        return len(self.get_publishers_info_by_topic(topic))
+
+
 GROUPS = {
     'waist': ['body_joint_1', 'body_joint_2'],
     'head': ['head_joint_1', 'head_joint_2'],
@@ -150,14 +175,12 @@ def feedback_sample(msg):
     if not all(hasattr(msg, name) for name in PDO_FIELDS):
         raise ValueError('SNOWBOT_PDO_METADATA_INCOMPLETE')
     sample, age = msg.pdo_sample, msg.pdo_age
-    if (type(sample) is not int or not 0 < sample < 2**64 or
-            type(age) not in (int, float) or not math.isfinite(age) or not 0 <= age <= .02):
+    if not sample or not math.isfinite(age) or not 0 <= age <= .02:
         raise ValueError('SNOWBOT_PDO_SAMPLE_STALE_OR_INVALID')
-    if (type(msg.pdo_wkc) is not int or type(msg.pdo_expected_wkc) is not int or
-            msg.pdo_expected_wkc <= 0 or msg.pdo_wkc != msg.pdo_expected_wkc):
+    if msg.pdo_expected_wkc <= 0 or msg.pdo_wkc != msg.pdo_expected_wkc:
         raise ValueError('SNOWBOT_PDO_WKC')
     mask = msg.feedback_valid_mask
-    if type(mask) is not int or not 0 <= mask <= 0xfffff or len(msg.feedback_status) != 20:
+    if mask > 0xfffff:
         raise ValueError('SNOWBOT_PDO_VALIDITY')
     if mask & 0xffff != 0xffff:
         raise ValueError('SNOWBOT_PDO_ARM_FEEDBACK_INVALID')
@@ -229,7 +252,7 @@ class SnowbotIO:
 
     def observe(self, positions, velocities, stamp, now, *, sample=None):
         names = set(self.profile.limits)
-        required = {n for prefix, groups in FEEDBACK_LAYOUT[:2] for g in groups for n in GROUPS[g]}
+        required = set(GROUPS['left_arm']) | set(GROUPS['right_arm'])
         if (not required <= set(positions) <= names or set(velocities) != set(positions) or
                 any(set(group) & positions.keys() and not set(group) <= positions.keys()
                     for group in self.profile.groups.values()) or

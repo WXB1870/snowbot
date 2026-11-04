@@ -3,10 +3,6 @@
   "mapping": "pico_snowbot_v1",
   "pose_jump_rotation_rad": 1.2,
   "pose_jump_translation_m": 0.35,
-  "prepare_positions_rad": {
-    "body_joint_1": 0.11573753524633504,
-    "body_joint_2": -0.04304069702748756
-  },
   "schema_version": 2,
   "modes": {
     "real": {
@@ -15,22 +11,6 @@
       "prepare_duration": 30.0,
       "prepare_limit_recovery_max_rad": 0.03490658503988659,
       "prepare_position_tolerance_rad": 0.035,
-      "prepare_positions_rad": {
-        "arm_l_joint_1": -0.1602517147283605,
-        "arm_l_joint_2": 0.1767418909161982,
-        "arm_l_joint_3": 0.4792635135459127,
-        "arm_l_joint_4": -0.8391253493799659,
-        "arm_l_joint_5": -1.940559169828511,
-        "arm_l_joint_6": 0.029715555578290552,
-        "arm_l_joint_7": 0.3833934343031332,
-        "arm_r_joint_1": 0.030045946109736654,
-        "arm_r_joint_2": -0.5454126802042145,
-        "arm_r_joint_3": -0.6042602828440713,
-        "arm_r_joint_4": 0.20992494382694685,
-        "arm_r_joint_5": 0.25670234478589454,
-        "arm_r_joint_6": -0.10066724183752589,
-        "arm_r_joint_7": 0.10940743497845025
-      },
       "prepare_start_tolerance_rad": 0.001,
       "simulation_only": false,
       "tool_grasp_confirmation": "operator"
@@ -66,26 +46,6 @@
         "max_joint_speed_rad_s": 0.05
       },
       "prepare_duration": 30.0,
-      "prepare_positions_rad": {
-        "arm_l_joint_1": -0.1602517147283605,
-        "arm_l_joint_2": 0.1767418909161982,
-        "arm_l_joint_3": 0.4792635135459127,
-        "arm_l_joint_4": -0.8391253493799659,
-        "arm_l_joint_5": -1.940559169828511,
-        "arm_l_joint_6": 0.029715555578290552,
-        "arm_l_joint_7": 0.3833934343031332,
-        "arm_l_joint_8": 0.0,
-        "arm_r_joint_1": 0.030045946109736654,
-        "arm_r_joint_2": -0.5454126802042145,
-        "arm_r_joint_3": -0.6042602828440713,
-        "arm_r_joint_4": 0.20992494382694685,
-        "arm_r_joint_5": 0.25670234478589454,
-        "arm_r_joint_6": -0.10066724183752589,
-        "arm_r_joint_7": 0.10940743497845025,
-        "arm_r_joint_8": 0.0,
-        "head_joint_1": 0.0,
-        "head_joint_2": 0.0
-      },
       "simulation_only": true,
       "tool_grasp_confirmation": "calibrated"
     }
