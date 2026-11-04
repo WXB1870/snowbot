@@ -342,6 +342,28 @@ def run_replay(plan, port, *, settle_timeout=5., execution_mode='position', velo
     nominal = execution_mode == 'impedance'
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
+        # Startup READY is historical: a later settling swing can still fail
+        # the servo's takeover gate. Wait without owning or commanding joints.
+        print(f'WAIT_REST 连续停稳 0.2 秒后接管；速度门限 {velocity_tolerance:g} rad/s，最多等待 {settle_timeout:g} 秒', flush=True)
+        deadline = port.steady()+settle_timeout
+        rest_since = previous_sample = None
+        while True:
+            _, velocity = port.check(False)
+            sample, now = port.feedback_stamp(), port.steady()
+            worst_speed, worst_joint = max((abs(velocity[n]), n) for n in plan.names)
+            if worst_speed > velocity_tolerance:
+                rest_since = None
+            if previous_sample is None or sample > previous_sample:
+                previous_sample = sample
+                if worst_speed <= velocity_tolerance:
+                    if rest_since is None:
+                        rest_since = now
+                    elif now-rest_since >= .2:
+                        break
+            if now >= deadline:
+                raise RuntimeError(f'REPLAY_NOT_SETTLED:axis={worst_joint};speed={worst_speed:g};limit={velocity_tolerance:g}')
+            port.wait_until(now+.02)
+        print('REST_CONFIRMED 开始接管', flush=True)
         attempted = True
         port.acquire()
         acquired = True
@@ -569,6 +591,10 @@ def execute(args, plan):
             if latest.get('error'):
                 raise RuntimeError(latest['error'])
             return q, v
+        @staticmethod
+        def feedback_stamp():
+            stamp = latest['state'][0].feedback_stamp
+            return stamp.sec+stamp.nanosec*1e-9
         def nominal_reference(self):
             state = latest['state'][0]
             if self.lease and getattr(self, 'commanded', False):
