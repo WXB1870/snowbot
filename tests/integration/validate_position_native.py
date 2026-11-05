@@ -234,7 +234,11 @@ def write_middle_check(source, work, root):
     while depth:
         depth+=(text[end]=='{')-(text[end]=='}');end+=1
     fixture=(root/'test_position_middle.cpp').read_text()
-    path=work/'test_position_middle.cpp';path.write_text(fixture.replace('// PRODUCTION_FUNCTION',text[start:end]))
+    callback=(source/'dual_arm_control/src/dual_arm_control/msgPublish.cpp').read_text()
+    begin=callback.index('void ArmCtlNode::position_callback(')
+    finish=callback.index('\n}',begin)+2
+    path=work/'test_position_middle.cpp';path.write_text(fixture.replace('// PRODUCTION_FUNCTION',text[start:end])
+        .replace('// PRODUCTION_MIDDLE_CALLBACK',callback[begin:finish]))
     return path
 
 
@@ -283,7 +287,8 @@ def main():
                     names.append('test_production_position_cycle');sources.append(root/'test_position_cycle.inc')
         middle=args.source/'dual_arm_control/src/controller/ArmInterface.cpp'
         if 'reference_only' in middle.read_text():
-            names.append('test_position_middle');sources.append(middle)
+            names.append('test_position_middle');sources.extend((middle,
+                args.source/'dual_arm_control/src/dual_arm_control/msgPublish.cpp'))
     if (args.source/'servo_control/include/servo_control/drive_maintenance.h').is_file():
         names.extend(('test_drive_reset','test_drive_cycle'))
         sources.extend((args.source/'servo_control/include/servo_control/drive_maintenance.h',args.source/'servo_control/include/servo_control/ethercat_driver.h',root/'test_drive_cycle.inc'))

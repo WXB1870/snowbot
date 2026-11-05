@@ -354,8 +354,8 @@
 +        const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +        if(!position_feedback_.fresh(this->now().nanoseconds(),now))position_gate_.interrupt();
 +        if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
-+            snowbot_ctl_msgs::msg::PositionSessionServo packet;packet.meta=position_meta_;packet.trajectory=position_trajectory_;packet.command=tempCtlData_pub;if(position_meta_.reference_mode==2){packet.command.if_use_debugmod=false;packet.command.if_topic_point_position=true;}packet.frame_sequence=++position_frame_;packet.waist_position=position_waist_target_;
-+            for(unsigned i=0;i<7;++i){packet.command.l_position[i]=position_meta_.reference_mode==2?position_target_packet_->command.l_arm_des_pos_jntspace[i]:lArm_desPos_JntSpace[i];packet.command.r_position[i]=position_meta_.reference_mode==2?position_target_packet_->command.r_arm_des_pos_jntspace[i]:rArm_desPos_JntSpace[i];packet.command.l_speed[i]=0;packet.command.r_speed[i]=0;}
++            snowbot_ctl_msgs::msg::PositionSessionServo packet;packet.meta=position_meta_;packet.trajectory=position_trajectory_;packet.command=tempCtlData_pub;packet.command.if_use_debugmod=false;packet.command.if_topic_point_position=true;packet.frame_sequence=++position_frame_;packet.waist_position=position_waist_target_;
++            for(unsigned i=0;i<7;++i){packet.command.l_position[i]=position_target_packet_->command.l_arm_des_pos_jntspace[i];packet.command.r_position[i]=position_target_packet_->command.r_arm_des_pos_jntspace[i];packet.command.l_speed[i]=0;packet.command.r_speed[i]=0;}
 +            position_pub_->publish(packet);
 +        }
 +    }else mCtlData_pub->publish(tempCtlData_pub);
@@ -377,7 +377,7 @@
 -    std::vector<outpWrap> mRes;
 -    mRes = solverInterface.Traj_temp_outp(
 +    std::vector<outpWrap> mRes,reference_only;
-+    const bool target_stream=position_gate_.selected()&&position_meta_.reference_mode==2;if(target_stream&&!position_gate_.live(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))return;
++    const bool target_stream=position_gate_.selected();if(target_stream&&!position_gate_.live(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))return;
 +    if(target_stream){
 +        reference_only.resize(2);const auto now=this->now().nanoseconds();
 +        const bool nominal=(position_nominal_session_==position_meta_.session||now<position_nominal_bootstrap_expires_)&&position_nominal_stamp_>0&&now>=position_nominal_stamp_&&now-position_nominal_stamp_<=20000000;
@@ -406,7 +406,7 @@
 +        if(ifInitTemp && native_feedback_seen_){
 @@ -1052 +1108 @@
 -            if(recalculate){
-+            if(recalculate&&!(position_gate_.selected()&&position_meta_.reference_mode==2)){
++            if(recalculate&&!position_gate_.selected()){
 @@ -1065,0 +1122 @@
 +            if(position_gate_.selected())ifReInit_get=false;
 @@ -1114 +1171,10 @@
@@ -442,9 +442,10 @@
 @@ -1200 +1276 @@
 -    std::cout << "upper monitor data get success" << std::endl;
 +    if(!position_dispatch_)std::cout << "upper monitor data get success" << std::endl;
-@@ -1434,0 +1511,47 @@
+@@ -1434,0 +1511,48 @@
 +
 +void ArmCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr packet){
++ if(packet->meta.reference_mode!=2){position_rejection_="reference_mode_conflict";return;}
 + const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();const auto m=position_session::meta(packet->meta);
 + if(!position_ready()){position_gate_.interrupt();position_rejection_=position_wait_reason_;return;}
 + if(packet->meta.feedback_boot_id!=position_feedback_.boot || packet->meta.feedback_sample<position_feedback_.ready_sample || packet->meta.feedback_sample>position_feedback_.sample || m.stamp<position_feedback_.ready_ros){position_rejection_="feedback_baseline_mismatch";return;}
@@ -453,16 +454,16 @@
 + if(ifInitTemp||checkTemp||!position_feedback_.fresh(now,steady)){position_rejection_="startup_feedback_or_drive_invalid";return;}
 + if(!packet->command.if_streaming_joint_position || packet->command.ctl_trans_mod!=3){position_rejection_="position_mode_required";return;}
 + for(double q:packet->waist_position)if(!std::isfinite(q)){position_rejection_="nonfinite_waist_target";return;}
-+ if(!position_gate_.accepts(m,now,steady,packet->meta.reference_mode==2?position_session::maximum_target_pause_ttl:position_session::maximum_ttl,packet->meta.reference_mode==2?position_session::maximum_target_ttl:position_session::maximum_ttl)){position_rejection_=position_gate_.rejection;return;}
++ if(!position_gate_.accepts(m,now,steady,position_session::maximum_target_pause_ttl,position_session::maximum_target_ttl)){position_rejection_=position_gate_.rejection;return;}
 + auto native=std::make_shared<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(packet->command);
 + position_dispatch_=true;upperMonitor_msg_callback(native);position_dispatch_=false;
-+ if(packet->meta.reference_mode==2&&m.operation!=1)ifReInit_get=false;
-+ if((packet->meta.reference_mode!=2&&m.operation!=0)||(packet->meta.reference_mode==2&&m.operation==1)){
++ if(m.operation!=1)ifReInit_get=false;
++ if(m.operation==1){
 +  lArm_stPos_get.assign(position_feedback_.q.begin(),position_feedback_.q.begin()+7);
 +  rArm_stPos_get.assign(position_feedback_.q.begin()+7,position_feedback_.q.begin()+14);ifReInit_get=true;
 + }
-+ for(unsigned i=0;i<2;++i)position_waist_target_[i]=packet->meta.reference_mode!=2&&m.operation==2?position_feedback_.q[14+i]:packet->waist_position[i];
-+ if(packet->meta.reference_mode==2&&m.operation==1&&m.session!=position_meta_.session)position_nominal_bootstrap_expires_=m.expires;
++ for(unsigned i=0;i<2;++i)position_waist_target_[i]=packet->waist_position[i];
++ if(m.operation==1&&m.session!=position_meta_.session)position_nominal_bootstrap_expires_=m.expires;
 + position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_target_packet_=packet;position_rejection_.clear();
 +}
 +
