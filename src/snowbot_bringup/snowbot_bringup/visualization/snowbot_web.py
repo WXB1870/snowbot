@@ -40,7 +40,7 @@ def meshcat_urdf(source, output):
 
 def project_state(data, now, identity):
     """Do not let a recently read file make stale robot/input data look live."""
-    from snowbot_bringup.teleop.snowbot_live import validate_state
+    from snowbot_bringup.visualization.snowbot_live import validate_state
     result = {k:data.get(k) for k in ('run_id','written_at','feedback_stamp','execution','code','task_id','stop_failures')}
     result.update(valid=False, pico_fresh=False, pico={}, server_time=now)
     result['diagnostics']=data.get('diagnostics',{})
@@ -112,7 +112,7 @@ def tool_display_pose(data, left_pose, mount, now):
                 not 0 <= now-physics.get('stamp', 0.) <= .2):
             return None, 'unavailable'
         if physics.get('tool_present'):
-            from snowbot_bringup.teleop.snowbot_errors import transform
+            from snowbot_bringup.visualization.snowbot_errors import transform
             return transform(physics['tool_pose']), 'measured'
     return left_pose @ mount, 'preview'
 
@@ -123,7 +123,7 @@ class EventLog:
         from snowbot_hardware.parameters import load_parameters
         self.parameters=parameters or load_parameters()
         self.path, self.events, self.previous, self.sequence = Path(path) if path else None, [], None, 0
-        from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+        from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
         self.writer=DiagnosticWriter(self.path,health_filename='web-log-health.json',settings=self.parameters['diagnostics'],input_settings=self.parameters['pico']) if self.path else None
 
     def close(self):
@@ -324,7 +324,7 @@ def serve(args, read_state=None, stop=None):
     import meshcat
     import meshcat.geometry as geom
     from pinocchio.visualize import MeshcatVisualizer
-    from snowbot_bringup.teleop.snowbot_live import validate_state, display_tool_config, LatestState
+    from snowbot_bringup.visualization.snowbot_live import validate_state, display_tool_config, LatestState
     stop = stop or threading.Event()
     if read_state is None:
         read_state = lambda: json.loads(args.state_file.read_text())

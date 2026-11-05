@@ -21,6 +21,27 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertEqual(cfg['diagnostics']['pdo_capacity'],1200)
         self.assertEqual(cfg['display']['poll_ms'],150)
 
+    def test_comments_do_not_change_defaults_or_local_and_remote_overrides(self):
+        self.assertNotIn('_comment', load_parameters()['pico'])
+        for connection in ('local', 'remote'):
+            with self.subTest(connection=connection):
+                plain = {'vr_connection': connection,
+                         'pico': {'prepare_button_hold_s': 2.},
+                         'remote_vr': {'pico': {'remote_input_timeout_s': 1.5}}}
+                commented = {'_comment': 'Site parameters', 'vr_connection': connection,
+                             'pico': {'_comment': {'prepare_button_hold_s': 'Seconds'},
+                                      'prepare_button_hold_s': 2.},
+                             'remote_vr': {'_comment': 'Remote overrides',
+                                           'pico': {'_comment': {'remote_input_timeout_s': 'Seconds'},
+                                                    'remote_input_timeout_s': 1.5}}}
+                selected = self.load(commented)
+                self.assertEqual(selected, self.load(plain))
+                self.assertEqual(selected['pico']['prepare_button_hold_s'], 2.)
+                if connection == 'remote':
+                    self.assertEqual(selected['pico']['remote_input_timeout_s'], 1.5)
+                else:
+                    self.assertNotIn('remote_input_timeout_s', selected['pico'])
+
     def test_shared_timing_preserves_standalone_defaults_and_selected_overrides(self):
         from bindu_contracts.teleoperation import load_tool_config
         from bindu_contracts.resources import package_share
@@ -217,6 +238,8 @@ class RuntimeParameterTests(unittest.TestCase):
 
     def test_unknown_fields_types_and_nonfinite_values_are_rejected(self):
         for bad in ({'other':{}},{'schema_version':True},{'pico':{'other':1}},
+                    {'_comment':'metadata','pico':{'_comment':'metadata','other':1}},
+                    {'vr_connection':'remote','remote_vr':{'pico':{'_comment':'metadata','other':1}}},
                     *({'pico':{'rpc_timeout_s':v}} for v in (0,-1,True,'2',float('nan'),float('inf'),10**400)),
                     {'display':{'poll_ms':150.5}}):
             with self.subTest(value=bad),self.assertRaises(ValueError):self.load(bad)
@@ -253,7 +276,7 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertTrue(any(x.operation=='prepare' for x in effects))
 
     def test_diagnostic_transition_sampler_uses_selected_trigger_thresholds(self):
-        from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticSampler
+        from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticSampler
         cfg=self.load({'pico':{'trigger_press_threshold':.6,'trigger_release_threshold':.2}})
         sampler=DiagnosticSampler(cfg['diagnostics'],cfg['pico'])
         self.assertTrue(sampler.keep('vr-raw',{'side':'left','trigger':.55},1.))

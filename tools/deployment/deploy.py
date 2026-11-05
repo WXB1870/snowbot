@@ -218,7 +218,7 @@ class ServiceConsole:
         self.notices = set()
 
     def __call__(self, stream, line):
-        from snowbot_bringup.teleop.snowbot_diagnostics import console_log
+        from snowbot_bringup.visualization.snowbot_diagnostics import console_log
         now = time.monotonic()
         if not keep_service_log(line, self.wkc.setdefault(stream, []), now):
             return None
@@ -325,7 +325,7 @@ def services(bindu, workspace, execution_mode='position'):
     import rclpy
     from rclpy.signals import SignalHandlerOptions
     from snowbot_ctl_msgs.msg import PositionSessionState
-    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+    from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
 
     require_stopped(bindu)  # Do not start a second EtherCAT/controller chain.
     logdir = workspace/'startup-logs'/('services-'+time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}')
@@ -416,7 +416,7 @@ def executor_command(cfg, runs, execution_mode, namespace):
 
 
 def replay_commands(frontend, cfg, runs, execution_mode, stamp):
-    common = [sys.executable, '-u', '-m', 'snowbot_bringup.teleop.snowbot_primitive_replay',
+    common = [sys.executable, '-u', '-m', 'snowbot_bringup.runtime.snowbot_primitive_replay',
               '--library', str(cfg/'primitive-library/manifest.json'),
               '--execution-mode', execution_mode, '--speed', '1.0', '--execute']
     result = []
@@ -434,8 +434,8 @@ def operator(bindu, workspace, frontend):
     from snowbot_ctl_msgs.msg import PositionSessionState
     from bindu_interfaces.msg import RuntimeEvent
     from ament_index_python.packages import get_package_share_directory
-    from snowbot_bringup.teleop.run_vr import startup_lock
-    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+    from snowbot_bringup.runtime.run_vr import startup_lock
+    from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
 
     stopped, stop_signal = threading.Event(), []
     def interrupt(sig, _):

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import unittest
 
-from snowbot_bringup.teleop.snowbot_primitive_replay import NAMES, Replay, run_replay
+from snowbot_teleop.replay import NAMES, Replay, run_replay
 from tools.deployment.deploy import executor_command
 
 
@@ -44,7 +44,7 @@ class ReplayTakeoverTests(unittest.TestCase):
         import ast
         import math
         from types import SimpleNamespace as S
-        import snowbot_bringup.teleop.snowbot_primitive_replay as module
+        import snowbot_bringup.runtime.snowbot_primitive_replay as module
         tree = ast.parse(Path(module.__file__).read_text())
         execute = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'execute')
         cls = next(n for n in execute.body if isinstance(n, ast.ClassDef) and n.name == 'Port')

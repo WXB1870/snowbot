@@ -179,7 +179,7 @@ def main():
         gc.collect();gc.freeze();gc.disable()
         def stamp(t):
             ns=round(t*1e9);return Time(sec=ns//1000000000,nanosec=ns%1000000000)
-        from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+        from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
         trace=DiagnosticWriter(args.output/'diagnostics.jsonl')
         native_start=SimulationManager.get_num_physics_steps()
         start=time.monotonic()

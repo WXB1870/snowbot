@@ -316,7 +316,7 @@ class DeploymentEntryTests(unittest.TestCase):
         from contextlib import redirect_stdout
         from io import StringIO
         from types import SimpleNamespace as S
-        import snowbot_bringup.teleop.snowbot_primitive_replay as module
+        import snowbot_bringup.runtime.snowbot_primitive_replay as module
         library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
         args = S(library=library, from_node=None, output_dir=Path('/unused'), execution_mode='position')
         with patch('builtins.input', side_effect=choices) as choose, \
@@ -344,7 +344,7 @@ class DeploymentEntryTests(unittest.TestCase):
             self.primitive_menu(['1','2'], fail)
 
     def test_primitive_menu_routes_reuse_exact_segments_with_no_artificial_pause(self):
-        from snowbot_bringup.teleop.snowbot_primitive_replay import NAMES, plan_from_current
+        from snowbot_teleop.replay import NAMES, plan_from_current
         library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
         m = json.loads(library.read_text())
         self.assertEqual(m['preparation']['goal_node'], 'Push:start')
@@ -417,7 +417,7 @@ class DeploymentEntryTests(unittest.TestCase):
 
     def test_vr_replay_share_upper_lock_and_release_it(self):
         from unittest.mock import patch
-        from snowbot_bringup.teleop.run_vr import startup_lock
+        from snowbot_bringup.runtime.run_vr import startup_lock
         with tempfile.TemporaryDirectory() as tmp,patch('tempfile.gettempdir',return_value=tmp):
             with startup_lock(7,'test_upper'):
                 with self.assertRaisesRegex(RuntimeError,'ROS'):
@@ -475,7 +475,7 @@ class DeploymentEntryTests(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import patch
         from tools.deployment.deploy import ServiceConsole, copy_service_output
-        from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+        from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
         lines = ['  joint_name Kp Kd\n', '  shoulder_joint 1200 600\n',
                  '[INFO] [1.0] [servo_node]: pinocchio joint idx_q=1 idx_v=1\n',
                  '[EtherCAT] 7 slaves found\n',

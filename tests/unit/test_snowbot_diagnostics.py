@@ -11,7 +11,7 @@ from types import SimpleNamespace as S
 import unittest
 from unittest.mock import patch
 
-spec=importlib.util.spec_from_file_location('snowbot_diagnostics',Path(find_spec('snowbot_bringup.teleop.snowbot_diagnostics').origin))
+spec=importlib.util.spec_from_file_location('snowbot_diagnostics',Path(find_spec('snowbot_bringup.visualization.snowbot_diagnostics').origin))
 diagnostics=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(diagnostics)
 
@@ -66,7 +66,7 @@ class DiagnosticTests(unittest.TestCase):
 
     def test_real_pdo_fixed_arrays_keep_integer_types_and_write_successfully(self):
         from snowbot_ctl_msgs.msg import PositionObservation
-        from snowbot_bringup.teleop.snowbot_pdo import observation_payload, PdoMonitor
+        from snowbot_bringup.visualization.snowbot_pdo import observation_payload, PdoMonitor
         msg=PositionObservation(boot_id=2**64-1,pdo_sample=1,pdo_age=0.,
             wkc=67,expected_wkc=67,valid_mask=(1<<20)-1,status=[0x40]*20)
         msg.header.stamp.sec=10
@@ -178,7 +178,7 @@ class WrenchObserverTests(unittest.TestCase):
 
     def test_live_observer_wires_force_capture_only_for_real_vendor_diagnostics(self):
         from contextlib import redirect_stdout
-        from snowbot_bringup.teleop import snowbot_live
+        from snowbot_bringup.visualization import snowbot_live
         for mode,backend in (('real','snowbot_vendor'),('simulation','kinematic')):
             with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory:
                 root=Path(directory);model=root/'model.urdf';model.write_text('offline fixture')
@@ -198,7 +198,7 @@ class WrenchObserverTests(unittest.TestCase):
                     'bindu_interfaces.msg':S(**{k:object for k in ('ExecutionState','RuntimeEvent','VRInput','MotionCommand','GripperState','TeleopModeState')}),
                     'bindu_runtime.common':S(EVENT_QOS=object()),
                     'bindu_runtime.robot_setup':S(RobotSetup=S(load=lambda path:robot)),
-                    'snowbot_bringup.teleop.snowbot_errors':S(EndEffectorErrors=lambda *a:S(sample=lambda *a:{}),pinocchio_fk=lambda *a:None)}
+                    'snowbot_bringup.visualization.snowbot_errors':S(EndEffectorErrors=lambda *a:S(sample=lambda *a:{}),pinocchio_fk=lambda *a:None)}
                 args=S(robot_config=config,run_id='run',runtime_mode=mode,device_backend=backend,
                        state_file=None,trace_file=root/'diagnostics.jsonl',namespace='fixture',duration=0.)
                 with patch.dict('sys.modules',modules),redirect_stdout(StringIO()):snowbot_live.observe(args,publish=snapshots.append)
@@ -333,7 +333,7 @@ class RepeatedLogTests(unittest.TestCase):
         self.assertIsNone(diagnostics.console_log('  File "[ERROR]", line 2\n','display'))
 
     def test_console_copy_preserves_tracebacks_and_coalesces_repeated_warning_lines(self):
-        from snowbot_bringup.teleop.run_vr import copy_output
+        from snowbot_bringup.runtime.run_vr import copy_output
         stack='Traceback (most recent call last):\n  File "a.py", line 2\nValueError: invalid target\n'
         lines=''.join(f'[WARN] [{10+i*.001:.3f}] [servo_node]: pdo_stale\n' for i in range(1000))+stack
         with tempfile.TemporaryDirectory() as directory:
@@ -352,7 +352,7 @@ class RepeatedLogTests(unittest.TestCase):
             self.assertEqual(health['dropped'],0)
 
     def test_slow_disk_cannot_block_pipe_drain_and_loss_is_exposed(self):
-        from snowbot_bringup.teleop.run_vr import copy_output
+        from snowbot_bringup.runtime.run_vr import copy_output
         gate=threading.Event();original=diagnostics.DiagnosticWriter.run
         def delayed(writer):gate.wait(2.);original(writer)
         with tempfile.TemporaryDirectory() as directory,patch.object(diagnostics.DiagnosticWriter,'run',delayed):

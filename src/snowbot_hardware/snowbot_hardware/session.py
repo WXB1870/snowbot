@@ -19,6 +19,39 @@ SLOTS = [*(f'arm_l_joint_{i}' for i in range(1, 9)),
          'head_joint_1', 'head_joint_2', 'body_joint_1', 'body_joint_2']
 
 
+# Joint-task order; EtherCAT wire order remains CONTROL_NAMES.
+REPLAY_GROUPS = ('waist', 'left_arm', 'right_arm')
+REPLAY_NAMES = ('body_joint_1', 'body_joint_2',
+                *(f'arm_{side}_joint_{i}' for side in ('l', 'r') for i in range(1, 8)))
+
+
+def checked_execution_state(msg, now, received, steady, profile_hash, *, owned=False, epoch=0, stationary=True,
+                  state_max_age=.1, feedback_max_age=.2):
+    feedback_age = now-(msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9)
+    if (msg.runtime_mode != 'real' or msg.simulated or msg.device_backend != 'snowbot_vendor' or
+            msg.profile_hash != profile_hash or msg.stop_failures or
+            not 0 <= steady-received <= state_max_age or
+            not 0 <= feedback_age <= feedback_max_age or
+            msg.state in ('FAILED', 'STOPPING')):
+        raise RuntimeError('EXECUTION_NOT_READY:state='+msg.state+';code='+msg.code+
+                           ';feedback_age='+str(round(feedback_age, 4))+
+                           ';state_age='+str(round(steady-received, 4))+
+                           ';profile_match='+str(msg.profile_hash == profile_hash)+
+                           ';stop_failures='+str(list(msg.stop_failures)))
+    if (msg.lease_active != owned or (owned and
+            (msg.lease_epoch != epoch or set(msg.lease_resources) != set(REPLAY_GROUPS)))):
+        raise RuntimeError('EXECUTION_OWNERSHIP_CHANGED')
+    if len(msg.joints.name) != len(set(msg.joints.name)) or not (
+            len(msg.joints.name) == len(msg.joints.position) == len(msg.joints.velocity)):
+        raise RuntimeError('MEASUREMENT_LAYOUT')
+    q, v = dict(zip(msg.joints.name, msg.joints.position)), dict(zip(msg.joints.name, msg.joints.velocity))
+    if any(n not in q or not all(math.isfinite(x) for x in (q[n], v[n])) for n in REPLAY_NAMES):
+        raise RuntimeError('MEASUREMENT_MISSING_OR_NONFINITE')
+    if stationary and not owned and any(abs(v[n]) > .01 for n in REPLAY_NAMES):
+        raise RuntimeError('MEASUREMENT_NOT_STATIONARY')
+    return q, v
+
+
 def decode_observation(msg, now):
     if msg.header.stamp.sec < 0 or not 0 <= msg.header.stamp.nanosec < 1_000_000_000:
         raise ValueError('SNOWBOT_OBSERVATION_STAMP')
