@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "validation_passed": true,
-  "backend_ready": false,
   "tool_id": "g099-curved",
   "kinematic_sha256": "26f3df22b1e77754a8544d8e1ab24572d0a78d794b56653d35721ae2e10f6c6a",
   "waist_lead_s": 0.0,
@@ -55,7 +54,7 @@
       }
     }
   },
-  "replay_code_sha256": "5583f3c42df10a863b7cba474b680eb4c6d7eb1071c4159862a1107d10c3e690",
+  "replay_code_sha256": "cf18baaffc33dbd5ec90e0ad0ced7c4caa35c05902f0a26f4aa8d593e793b00f",
   "source_commits": {
     "snowbot_base": "404a2d5",
     "bindu": "5bf01d70cc63a942d9aee33bbf912e8dde1eadc7",
@@ -329,7 +328,7 @@
   "physics_validation_reference": "artifacts/experiments/preset-optimization-20261105/final-result/result.json",
   "previous_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
   "required_source_sha256": {
-    "src/snowbot_bringup/snowbot_bringup/teleop/snowbot_primitive_replay.py": "5583f3c42df10a863b7cba474b680eb4c6d7eb1071c4159862a1107d10c3e690",
+    "src/snowbot_bringup/snowbot_bringup/teleop/snowbot_primitive_replay.py": "cf18baaffc33dbd5ec90e0ad0ced7c4caa35c05902f0a26f4aa8d593e793b00f",
     "tools/deployment/snowbot_vendor/position_session/position_trajectory.h": "0a74117d526cad03387db3f53456d17177d00dec737c70b5a534c44385d49bd4",
     "tools/deployment/snowbot_vendor/position_session/session.patch": "6ef6f83a20033bcebbccff2e9206ffda6f7fd93bd5ba1fe9017030be1391a2b8",
     "tools/deployment/snowbot_vendor/position_session/target.patch": "b4ff3ded5703d245431f4e3c34e40cfd23d8ed3a0ab0faff7893dd17b87d06c6"

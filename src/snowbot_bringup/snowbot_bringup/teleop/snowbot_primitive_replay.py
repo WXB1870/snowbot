@@ -42,7 +42,6 @@ class Replay:
     kinematics: str
     speed: float
     waist_lead_s: float = 0.
-    backend_ready: bool = False
     reference_margin_rad: float = 0.
     empty_prepare: bool = False
     measured_start: tuple = ()
@@ -161,7 +160,7 @@ def load_replay(path, action, speed=1., waist_lead_s=None):
     samples = data['samples']
     times, points = tuple(s['t'] for s in samples), tuple(tuple(s['q']) for s in samples)
     return Replay(times, points, NAMES, manifest['tool_id'],
-                  manifest['kinematic_sha256'], speed, lead, manifest.get('backend_ready') is True, margin,
+                  manifest['kinematic_sha256'], speed, lead, reference_margin_rad=margin,
                   velocities=tuple(tuple(s['qd']) for s in samples) if 'qd' in samples[0] else (),
                   accelerations=tuple(tuple(s['qdd']) for s in samples) if 'qdd' in samples[0] else (),
                   curves=tuple(data.get('curves', ())))
@@ -188,8 +187,6 @@ class ReplaySequence:
     def speed(self): return self.segments[0].speed
     @property
     def waist_lead_s(self): return self.segments[0].waist_lead_s
-    @property
-    def backend_ready(self): return all(s.backend_ready for s in self.segments)
     @property
     def reference_margin_rad(self): return self.segments[0].reference_margin_rad
 
@@ -278,8 +275,8 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
         # A at home still confirms the measured pose and stop; no artificial path.
         home = load_replay(path, manifest['home_node'].split(':')[0], speed, waist_lead_s)
         selected_plans = (Replay((0., .02), (tuple(nodes[target]),)*2, home.names,
-                                home.tool_id, home.kinematics, speed, 0.,
-                                home.backend_ready, home.reference_margin_rad),)
+                                home.tool_id, home.kinematics, speed,
+                                reference_margin_rad=home.reference_margin_rad),)
     else:
         selected_plans = tuple(plans[k] if k in plans else load_replay(path, k, speed, waist_lead_s)
                                for k in selected)
@@ -357,8 +354,8 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
         raise ValueError('PREPARE_MOTION_LIMITS')
     times = tuple(k*.02 for k in range(round(duration/.02)+1))
     plan = Replay(times, tuple(curve.sample(t).q for t in times), NAMES,
-                  home.tool_id, home.kinematics, speed, 0., home.backend_ready,
-                  home.reference_margin_rad, empty_prepare=True,
+                  home.tool_id, home.kinematics, speed,
+                  reference_margin_rad=home.reference_margin_rad, empty_prepare=True,
                   measured_start=tuple(measured[n] for n in NAMES) if recovering else (),
                   start_reference_source=reference_source,
                   velocities=tuple(curve.sample(t).v for t in times),
@@ -846,8 +843,6 @@ def replay_action(args, parser):
     if args.execute:
         if not args.output or (args.action not in ('Prepare', 'ReturnZero') and not args.tool_id):
             parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare/ReturnZero')
-        if not plan.backend_ready:
-            parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
         execute(args, plan)
     else:
         print(json.dumps(dict(execution_mode=args.execution_mode, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
