@@ -520,7 +520,7 @@ class DeploymentEntryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'STARTUP_TIMEOUT'):
             wait_service([], lambda:False, spin, stopped, timeout=0.)
 
-    def test_service_exit_is_reverse_order_and_never_force_kills(self):
+    def test_base_exit_waits_for_servo_then_reverses_other_children_without_force_kill(self):
         import signal
         from unittest.mock import Mock, patch
         from tools.deployment import deploy
@@ -531,7 +531,7 @@ class DeploymentEntryTests(unittest.TestCase):
         children[-1][1].wait.side_effect = [subprocess.TimeoutExpired('executor', 60.), 0]
         with patch.object(deploy.os, 'killpg') as send:
             self.assertTrue(deploy.stop_services(children))
-        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (4,3,2,1)])
+        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (1,4,3,2)])
         self.assertEqual(children[-1][1].wait.call_count, 2)
         children[0][1].wait.return_value = 2
         with patch.object(deploy.os, 'killpg'):

@@ -1,0 +1,19 @@
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -1764,3 +1764,3 @@
+ bool ServoNode::position_shutdown_control(double dt){
+-    (void)dt;return true;
++    return session_execution_mode_!="impedance" || session_impedance_step(dt);
+ }
+@@ -1809,3 +1809,3 @@
+             const auto q=position_output_.reference_position[i];
+-            if(!std::isfinite(q) || q<lower[i] || q>upper[i] || std::abs(q-obs.position[position_slot(i)])>.5)valid=false;
++            if(!std::isfinite(q) || q<lower[i] || q>upper[i] || ((i<14 || session_execution_mode_!="impedance") && std::abs(q-obs.position[position_slot(i)])>(session_execution_mode_=="impedance"?impedance_following_error_rad_:.5)))valid=false;
+             position_output_.q[i]=float(q);position_output_.v[i]=float(position_output_.reference_speed[i]);
+@@ -2682,4 +2682,4 @@
+  for(unsigned i=0;i<position_session::joint_count;++i){const auto slot=position_session::position_slot(i);
+-  session_nominal_[session_q_index_[slot]]=position_reference_mode_?position_trajectory_.q[i]:position_follower_.q[i];
+-  session_velocity_[session_v_index_[slot]]=position_reference_mode_?position_trajectory_.v[i]:position_follower_.v[i];
++  session_nominal_[session_q_index_[slot]]=shutdown_mode_?position_output_.reference_position[i]:position_reference_mode_?position_trajectory_.q[i]:position_follower_.q[i];
++  session_velocity_[session_v_index_[slot]]=shutdown_mode_?position_output_.reference_speed[i]:position_reference_mode_?position_trajectory_.v[i]:position_follower_.v[i];
+  }

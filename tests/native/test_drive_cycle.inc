@@ -47,6 +47,9 @@ void check_csp_snapshot(){
  std::array<motor_tx_pdo_t*,20> m_tx_{};std::array<bool,20> is_csp_motor_{};
  position_session::Observation observation_rt_;std::atomic<int> wkc_{67};int expectedWKC_=67;
  uint64_t timing_over_1ms_=0;
+ position_session::Output session_packet;
+ std::array<std::atomic<uint16_t>,20> motor_sent_cw_{};
+ std::array<sensor_tx_pdo_t*,2> s_tx_{};
  for(unsigned i=0;i<4;++i){unsigned m=16+i;is_csp_motor_[m]=true;csp_rx_[m]=&rx[i];csp_tx_[m]=&tx[i];
   rx[i].position=2147483647-int(i);rx[i].velocity=-2147483647+int(i);rx[i].torque=-32768;
   rx[i].controlword=0x1f;rx[i].ModeOp=8;
@@ -158,5 +161,26 @@ int main(){
   assert(crx[slot-16].position==position_session::csp_counts(.01f));
  }
 #endif
- std::cout<<"actual PDO writer: reset never enables or changes targets/gains/torques; 20-axis diagnostics passed\n";
+ EtherCATDriver shutdown;
+ for(unsigned m=0;m<20;++m){
+  shutdown.motor_enable_mask_[m].store(true);
+  if(m<16){shutdown.m_rx_[m]=&rx[m];shutdown.m_tx_[m]=&tx[m];tx[m].statusword=0x27;}
+  else{shutdown.is_csp_motor_[m]=true;shutdown.csp_rx_[m]=&crx[m-16];shutdown.csp_tx_[m]=&ctx[m-16];ctx[m-16].statusword=0x27;}
+ }
+ auto& fresh=shutdown.observation_rt_;fresh.valid_mask=0xfffff;fresh.wkc=fresh.expected_wkc=67;fresh.sample=1;fresh.status.fill(0x27);
+ position_session::Output request;request.selected=true;request.policy=2;request.operation=0;request.shutdown=true;
+ request.q.fill(.2f);request.kp.fill(1);request.kd.fill(.2f);request.torque.fill(6);
+ request.shutdown_deadline=position_session::steady_ns()+1000000000;
+ for(unsigned n=0;n<35;++n){
+  fresh.sampled_ns=position_session::steady_ns();
+  shutdown.sessionOutput(request);shutdown.cycle();
+ }
+ assert(rx[3].target_position==.2f&&rx[3].KP==1&&rx[3].KD==.2f&&rx[3].target_torque==6);
+ request.shutdown_disable=true;shutdown.sessionOutput(request);shutdown.cycle();
+ for(unsigned m=0;m<20;++m){
+  assert(shutdown.motor_enable_mask_[m].load()); // No partial mask handover.
+  if(m<16)assert(rx[m].controlword==6&&rx[m].KP==0&&rx[m].target_torque==0);
+  else assert(crx[m-16].controlword==6&&crx[m-16].velocity==0);
+ }
+ std::cout<<"actual PDO writer: shutdown preserves selected PT output, atomically disables all slots without legacy overwrite; reset and diagnostics passed\n";
 }
