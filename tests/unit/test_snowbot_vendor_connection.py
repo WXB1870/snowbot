@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','session_v3_only'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -98,7 +98,9 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertNotIn('impedance_calibration_confirmed',manifest)
         self.assertTrue(manifest['target_stream_available'])
         self.assertEqual((manifest['target_wire_version'],manifest['target_reference_mode']),(5,2))
-        self.assertEqual(manifest['session_wire_version'],3)
+        self.assertEqual(manifest['session_wire_version'],5)
+        self.assertEqual(manifest['position_protocol'],'session_v3')
+        self.assertEqual(manifest['reference_mode'],2)
         self.assertEqual(manifest['target_prepare_ms'],10.)
         servo=self.release/'src/servo_control'
         for name in ('include/impedance/cartesian_impedance_controller.h',
