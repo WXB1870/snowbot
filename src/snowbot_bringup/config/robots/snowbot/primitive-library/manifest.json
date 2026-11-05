@@ -13,17 +13,19 @@
   "actions": {
     "Push": {
       "targets": "Push.json.gz",
-      "sha256": "34358afb2f5103eaeade7ccb95d2a91fed4975da6c52d39e67a29eff220f3709",
+      "sha256": "6fb0c735bdab828ea0752fd3f141c3ab14bf5922540f0f46fa2a373734488467",
       "nominal_duration_s": 7.8,
       "duration_s": 7.8,
       "start_node": "Push:start",
       "end_node": "Push:end",
-      "source": "20261105 faster retiming with per-joint dynamic margin",
+      "source": "20261106 endpoint-preserving dual-arm path optimization with waist-delay clearance constraint",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_faster_balanced_85pct_nominal_and_010s_geometry",
-        "predicted_010s_geometry_passed": true
+        "stage": "accepted_endpoint_regularized_path_and_010s_clearance",
+        "predicted_010s_geometry_passed": true,
+        "physx_replay_passed": true,
+        "physx_scope": "empty shovel, fixed base, proxy grasp; Ready-Push-wait-original PushReverse; no hardware acceptance"
       },
       "speed_up_vs_previous": 1.4743589743589745
     },
