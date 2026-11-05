@@ -75,7 +75,7 @@ class HeadsetMappingTests(unittest.TestCase):
                        VRInput=lambda **kw:S(**kw))
         exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),namespace)
         owner=S(receiver=S(poll=lambda:packets.pop(0),poll_health=lambda:[]),last_frame=None,input_clock_offset=None,
-                last_poll=None,poll_delay_max=0.,
+                last_poll=None,poll_delay_max=0.,input_gap_warning_s=.1,
                 now=lambda:50.,runtime_mode='simulation',publisher=S(publish=published.append))
         first=self.frame();first=replace(first,stamp=1000.,head_stamp=999.98)
         packets.append((first,replace(first,side='right')));namespace['poll_input'](owner)

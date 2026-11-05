@@ -617,7 +617,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_real_impedance_enable_flag_retains_simulation_and_mode_guards(self):
         import ast
         from types import SimpleNamespace as S
-        path=Path(find_spec('snowbot_bringup.teleop.run_vr').origin)
+        path=Path(find_spec('snowbot_bringup.runtime.run_vr').origin)
         entry=next(n for n in ast.parse(path.read_text()).body if getattr(n,'name','')=='parse_args')
         block=next(n for n in entry.body if isinstance(n,ast.If) and isinstance(n.test,ast.Attribute)
                    and n.test.attr=='enable_commands')
@@ -637,7 +637,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_impedance_a_selects_confirmed_nominal_node_under_compliance(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock,patch
-        from snowbot_bringup.teleop.snowbot_primitive_replay import NAMES
+        from snowbot_teleop.replay import NAMES
         node=self.production('prepare_primitive');node.execution_mode='impedance'
         node.current=Mock();node.event=Mock();node.primitive_library='library';node.profile=object();node.names=NAMES
         node.control=S(load='held',teleop_mode='bimanual_tool');node.unheld_test=False
@@ -648,7 +648,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         held={'positions':dict.fromkeys(NAMES,0.)};node.prepare_hold_reference=AsyncMock(return_value=held)
         node.primitive_grasp_guard=S(check=Mock());node.move=AsyncMock()
         plan=S(names=NAMES,points=((0.,)*16,(.1,)*16),duration=2.,route=('route',),validate_profile=Mock())
-        with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',return_value=plan) as planner:
+        with patch('snowbot_teleop.replay.plan_from_current',return_value=plan) as planner:
             self.assertTrue(await node.prepare_primitive(S(token=1)))
             self.assertEqual(planner.call_args.args[2],held['positions'])
         node.move.assert_awaited_once()

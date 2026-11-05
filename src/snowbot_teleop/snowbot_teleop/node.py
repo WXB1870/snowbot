@@ -147,7 +147,7 @@ class PicoNode(RuntimeNode):
             from bindu_contracts.resources import resource_file
             from snowbot_teleop.replay import replay_graph, NAMES
             self.primitive_library = resource_file(self.cfg['primitive_library'])
-            library, _, _ = replay_graph(self.primitive_library, 1., None)
+            library, _, _ = replay_graph(self.primitive_library, 1., None, 0.)
             self.prepare_positions = dict(zip(NAMES, library['nodes'][library['home_node']]))
         prepare_names=[n for g in self.tool_cfg['resource_groups'] for n in self.profile.groups[g]]
         if self.prepare_positions is not None and (not set(prepare_names)<=set(self.prepare_positions) or any(

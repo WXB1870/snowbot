@@ -157,6 +157,7 @@ def main():
         d.node=d.graph=observer;d.health=SessionHealth(observer.now)
         d.envelopes=SourceEnvelope(session,observer.now)
         d.sent={};d.target_instance=d.source_identity=d.takeover_pending=None
+        d.takeover_previous_hold=None
         d.target_fault='';d.applied_sequence=0
         d.arm_type=PositionSessionCommand;d.publishers={'arms':cmd_pub}
         d.receivers={'arms':'/robot_upperMonitor','middle':'/dual_arm_control_node','head':'/servo_node'}
