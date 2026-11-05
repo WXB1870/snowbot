@@ -423,12 +423,12 @@ def executor_command(cfg, runs, execution_mode, namespace):
 def replay_commands(frontend, cfg, runs, execution_mode, stamp):
     common = [sys.executable, '-u', '-m', 'snowbot_bringup.runtime.snowbot_primitive_replay',
               '--library', str(cfg/'primitive-library/manifest.json'),
-              '--execution-mode', execution_mode, '--speed', '1.0', '--execute']
+              '--execution-mode', execution_mode, '--execute']
     result = []
     if frontend in ('replay', 'prepare'):
-        result.append([*common, '--action', 'Prepare', '--output', str(runs/f'Prepare-{stamp}.jsonl')])
+        result.append([*common, '--action', 'Prepare', '--speed', '0.5', '--output', str(runs/f'Prepare-{stamp}.jsonl')])
     if frontend in ('replay', 'menu'):
-        result.append([*common, '--interactive', '--tool-id', 'g099-curved', '--output-dir', str(runs)])
+        result.append([*common, '--interactive', '--speed', '1.0', '--tool-id', 'g099-curved', '--output-dir', str(runs)])
     return result
 
 
