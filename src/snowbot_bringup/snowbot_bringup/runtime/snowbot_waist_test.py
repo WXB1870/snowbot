@@ -974,7 +974,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--axis', choices=(*NAMES[:2], 'both'), default='body_joint_1',
                         help='both is available only with --backend waist_topic')
-    parser.add_argument('--degrees', type=float, default=1., help='code-scale excursion each way; default 1 deg, <=90; selected joint limits still apply')
+    parser.add_argument('--degrees', type=float, default=45., help='code-scale excursion each way; default 45 deg, <=90; selected joint limits still apply')
     parser.add_argument('--speed', type=float, default=.1, help='code-scale rad/s; default .1, <=1 and selected profile')
     parser.add_argument('--acceleration', type=float, default=.5, help='code-scale rad/s^2; default .5, <=3 and selected profile')
     parser.add_argument('--jerk', type=float, default=10., help='code-scale rad/s^3; default 10, <=162')
