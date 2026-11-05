@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','shutdown'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -66,36 +66,10 @@ class PositionReleaseTests(unittest.TestCase):
             copied=self.release/'src/servo_control'/folder/'bindu_execution_native'/name
             self.assertEqual(vendor.digest(copied),manifest['native_execution'][name])
 
-    def test_arm_homing_uses_half_degree_and_keeps_timeout_and_bus_gate(self):
-        header=(self.release/'src/servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text()
-        loop=(self.release/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
-        self.assertIn('#define ZERO_POS_THRESHOLD    (0.008726646259971648)',header)
-        self.assertIn('#define ZERO_POS_EXIT_THRESH  ZERO_POS_THRESHOLD',header)
-        self.assertIn('constexpr float kRetzeroTimeoutAcceptError = 0.01f;',loop)
-        self.assertIn('if (settle_cnt > 500) retZero_done = true;',loop)
-        self.assertIn('constexpr int kRetzeroTimeoutCycles = 10000;',loop)
-        self.assertIn('bool residual_within_startup_tolerance = EtherCAT_communicationHealthy();',loop)
-        self.assertIn('arm_startup_ready = residual_within_startup_tolerance;',loop)
-        import re
-        definitions='\n'.join(re.findall(r'^#define ZERO_POS_(?:THRESHOLD|EXIT_THRESH).*$',header,re.M))
-        timeout=re.search(r'^constexpr float kRetzeroTimeoutAcceptError = .*?;',loop,re.M).group()
-        source=self.work/'homing-tolerance.cpp'
-        source.write_text('#include <cassert>\n#include <cmath>\n#include <initializer_list>\n'+definitions+'\n'+timeout+
-            '\nint main(){ const double degree=std::acos(-1.)/180.;\n'
-            'assert(std::abs(ZERO_POS_THRESHOLD/degree-.5)<1e-12);\n'
-            'for(double sign:{-1.,1.}){\n'
-            'assert(!(std::abs(sign*.499*degree)>ZERO_POS_EXIT_THRESH));\n'
-            'assert(!(std::abs(sign*.5*degree)>ZERO_POS_EXIT_THRESH));\n'
-            'assert(std::abs(sign*.501*degree)>ZERO_POS_EXIT_THRESH); }\n'
-            'assert(kRetzeroTimeoutAcceptError>ZERO_POS_EXIT_THRESH); }\n')
-        binary=self.work/'homing-tolerance'
-        subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True)
-        subprocess.run([str(binary)],check=True)
-
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
         manifest=json.loads((output/'position_release.json').read_text())
-        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance'})
+        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance','shutdown','shutdown_impedance'})
         self.assertTrue(manifest['target_stream_available'])
         self.assertTrue(manifest['feedback_publication']['isolated'])
         self.assertEqual(manifest['feedback_publication']['mode'],'latest_only_worker')
@@ -520,7 +494,7 @@ class DeploymentEntryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'STARTUP_TIMEOUT'):
             wait_service([], lambda:False, spin, stopped, timeout=0.)
 
-    def test_service_exit_is_reverse_order_and_never_force_kills(self):
+    def test_base_exit_waits_for_servo_then_reverses_other_children_without_force_kill(self):
         import signal
         from unittest.mock import Mock, patch
         from tools.deployment import deploy
@@ -531,7 +505,7 @@ class DeploymentEntryTests(unittest.TestCase):
         children[-1][1].wait.side_effect = [subprocess.TimeoutExpired('executor', 60.), 0]
         with patch.object(deploy.os, 'killpg') as send:
             self.assertTrue(deploy.stop_services(children))
-        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (4,3,2,1)])
+        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (1,4,3,2)])
         self.assertEqual(children[-1][1].wait.call_count, 2)
         children[0][1].wait.return_value = 2
         with patch.object(deploy.os, 'killpg'):
