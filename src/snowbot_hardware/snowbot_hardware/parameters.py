@@ -44,7 +44,7 @@ _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
                  'queue_capacity',
                  'chunk_bytes'),
  'display': ('poll_ms', 'request_timeout_ms', 'stale_ms', 'reconnect_ms', 'report_ms')}
-_INTEGER_FIELDS = frozenset(('pdo_capacity','queue_capacity','chunk_bytes','poll_ms','request_timeout_ms','stale_ms','reconnect_ms','report_ms'))
+_INTEGER_FIELDS = frozenset(('controller_fps','pdo_capacity','queue_capacity','chunk_bytes','poll_ms','request_timeout_ms','stale_ms','reconnect_ms','report_ms'))
 
 
 def default_path():
@@ -74,7 +74,7 @@ def load_parameters(path=None):
                 continue
             allowed = set(result[group])
             if group == 'pico':
-                allowed.add('remote_input_timeout_s')
+                allowed.update(('remote_input_timeout_s', 'remote_source_timeout_s', 'controller_fps'))
             if not isinstance(values, dict) or set(values)-allowed:
                 raise ValueError('SNOWBOT_PARAMETERS_GROUP:'+group)
             result[group].update(values)

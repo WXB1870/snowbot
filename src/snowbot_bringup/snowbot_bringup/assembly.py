@@ -142,7 +142,10 @@ def assemble(context):
     vr = {key: ParameterValue(LaunchConfiguration(key), value_type=str)
           for key in ('host', 'cert_file', 'key_file')}
     if 'remote_input_timeout_s' in input_settings:
-        vr['remote_input_timeout_s'] = input_settings['remote_input_timeout_s']
+        vr['remote_input_timeout_s'] = input_settings.get('remote_source_timeout_s', input_settings['remote_input_timeout_s'])
+        vr['input_gap_warning_s'] = runtime_parameters['diagnostics']['input_gap_warning_s']
+    if 'controller_fps' in input_settings:
+        vr['controller_fps'] = input_settings['controller_fps']
     if pico:
         nodes.append(Node(package='snowbot_teleop',executable='pico_control',namespace=ns,output='screen',
             parameters=[{**common,**model,'parameters_config':value('parameters_config'),'tool_config':str(robot.tool_config),

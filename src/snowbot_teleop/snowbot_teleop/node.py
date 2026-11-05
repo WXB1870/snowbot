@@ -69,13 +69,15 @@ class PicoNode(RuntimeNode):
         self.declare_parameter('gripper_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('base_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('command_enabled',False,descriptor=ParameterDescriptor(read_only=True))
+        from snowbot_hardware.parameters import load_parameters, apply_tool_timing, load_mode_config
+        self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         self.base = None
         if self.get_parameter('base_config').value:
             from bindu_runtime.teleop_base import TeleopBase
+            pico = self.runtime_parameters['pico']
             self.base = TeleopBase(self, self.get_parameter('base_config').value,
-                                  self.get_parameter('command_enabled').value)
-        from snowbot_hardware.parameters import load_parameters, apply_tool_timing, load_mode_config
-        self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
+                                  self.get_parameter('command_enabled').value,
+                                  pair_max_skew_s=(pico['pair_max_skew_s'] if 'remote_input_timeout_s' in pico else 0.))
         self.cfg=load_mode_config(self.get_parameter('pico_config').value,self.runtime_mode)
         self.position_contract = self.cfg.get('schema_version') == 2
         if self.cfg.get('schema_version') not in (1,2):
@@ -330,7 +332,7 @@ class PicoNode(RuntimeNode):
 
     def on_frame(self,msg):
         if not self.matches_mode(msg) or msg.side not in ('left','right'):return
-        if self.control.remote_vr and msg.source_id in self.control.retired:
+        if self.control.superseded_remote_input(msg.source_id, msg.seq):
             return
         self.frames[msg.side]=msg
         if set(self.frames)!= {'left','right'}:return
@@ -357,6 +359,8 @@ class PicoNode(RuntimeNode):
                           head_age_s=getattr(m,'head_age_s',0.),head_source_id=getattr(m,'head_source_id',''),
                           head_seq=int(getattr(m,'head_seq',0)))
                    for m in (a,b))
+        if self.control.expired_remote_pair(pair, now):
+            return
         if self.base:
             self.base.ingest(pair, now)
         self.control.update_feedback(self.feedback(),self.now())

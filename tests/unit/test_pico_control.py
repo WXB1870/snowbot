@@ -1460,6 +1460,24 @@ class StateTests(unittest.TestCase):
         rig.core.tick(rig.now + .3)
         self.assertEqual(rig.core.reason, 'PICO_FEEDBACK_STALE')
 
+    def test_remote_duplicate_and_expired_pairs_do_not_fault_or_refresh_input(self):
+        rig = Rig(settings=self.remote_parameters()['pico'])
+        core = rig.core
+        core.phase = 'following'
+        frames = core.frames
+        for queued in ([replace(f, valid=False) for f in frames],
+                       [replace(f, seq=f.seq+1, stamp=f.stamp-2.) for f in frames]):
+            core.ingest(*queued, rig.now)
+            self.assertIs(core.frames, frames)
+            self.assertEqual(core.phase, 'following')
+            self.assertEqual(core.drain(), [])
+        # A queue of old events cannot hide a genuine loss of current input.
+        now = rig.now + 1.01
+        core.update_feedback(PicoFeedback(now, True), now)
+        core.tick(now)
+        self.assertEqual(core.reason, 'PICO_INPUT_TIMEOUT')
+        self.assertEqual([i.operation for i in core.drain()], ['stop'])
+
     def test_remote_reconnect_in_standby_and_in_motion(self):
         settings = self.remote_parameters()['pico']
         rig = Rig(settings=settings)

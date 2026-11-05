@@ -221,9 +221,21 @@ class PicoControl:
         if self.phase!='checking' and self.feedback and not 0 <= now-self.feedback.stamp <= self.feedback_max_age:
             self.lock('PICO_FEEDBACK_STALE',now)
 
+    def superseded_remote_input(self, source_id, seq):
+        return self.remote_vr and (source_id in self.retired or
+                                   (source_id == self.source and seq <= self.seq))
+
+    def expired_remote_pair(self, pair, now):
+        # A queued pair cannot renew the input deadline or claim a new session.
+        # Keep an explicit stop on the normal stop/lock path.
+        return self.remote_vr and all(not f.stop and math.isfinite(f.stamp)
+                                      and now-f.stamp > self.max_age for f in pair)
+
     def ingest(self, left, right, now):
         pair=(left,right)
-        if self.remote_vr and left.source_id == right.source_id and left.source_id in self.retired:
+        if ((left.source_id == right.source_id and left.seq == right.seq
+             and self.superseded_remote_input(left.source_id, left.seq))
+                or self.expired_remote_pair(pair, now)):
             return
         idle_reconnect = (self.remote_vr and self.phase == 'standby' and not self.pending
                           and not self.fault_active and self.rest(now)
@@ -288,12 +300,9 @@ class PicoControl:
         states=[];counts=[]
         for side,f in enumerate(pair):
             physical=[bool(f.buttons & (1<<i)) for i in range(3)]
-            differences=[f.button_edges[2*i]-f.button_edges[2*i+1] for i in range(4)]
-            if (any(v not in (0,1) for v in differences) or
-                    any(v!=int(held) for v,held in zip(differences[:3],physical)) or
-                    f.trigger>self.settings['trigger_press_threshold'] and differences[3]!=1 or f.trigger<self.settings['trigger_release_threshold'] and differences[3]!=0):
-                self.lock('PICO_BUTTON_STATE_COUNTER_MISMATCH',now);return
-            states.extend(physical+[bool(differences[3])])
+            # The receiver owns trigger hysteresis and counts both edges.
+            trigger_held = f.button_edges[6] > f.button_edges[7]
+            states.extend(physical + [trigger_held])
             counts.extend(f.button_edges)
             if f.grip<self.settings['grip_release_threshold']:self.squeeze_released[side]=True
         if self.previous is None:

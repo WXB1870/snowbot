@@ -234,7 +234,7 @@ class RuntimeParameterTests(unittest.TestCase):
         rig=Rig();rig.core=PicoControl(initial_load='empty',settings=cfg['pico'])
         rig.counters=[ButtonCounters(.6,.2),ButtonCounters(.6,.2)]
         rig.step();rig.triggers[0]=.65;rig.step()
-        self.assertNotEqual(rig.core.reason,'PICO_BUTTON_STATE_COUNTER_MISMATCH')
+        self.assertEqual(rig.core.previous[6:8], (1, 0))
         self.assertEqual(rig.counters[0].counts[6],1)
         # The trigger above intentionally starts a separate operation. Use an
         # idle coordinator for the independent A-button hold requirement.
