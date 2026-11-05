@@ -53,13 +53,13 @@ PICO 配方由 `vr_input → pico_control → execution → 厂商 upper/middle/
 | [node.py](src/snowbot_teleop/snowbot_teleop/node.py) | ROS 发布、订阅、服务和组件装配 |
 | [application.py](src/snowbot_teleop/snowbot_teleop/application.py) | 准备、模式切换、跟随、取消及操作交接 |
 | [control.py](src/snowbot_teleop/snowbot_teleop/control.py) | PICO 按键状态机与操作意图 |
-| [preparation.py](src/snowbot_teleop/snowbot_teleop/preparation.py) | 准备路径、目标生成及实测到位检查 |
+| [preparation.py](src/snowbot_teleop/snowbot_teleop/preparation.py) | 准备路径、保持参考、目标生成及实测到位检查 |
 | [position.py](src/snowbot_teleop/snowbot_teleop/position.py) | 夹爪操作及夹爪反馈 |
 | [status.py](src/snowbot_teleop/snowbot_teleop/status.py) | 面向操作者的状态视图 |
 | Bindu `tool_session.py` / `tool_follow.py` | 会话就绪、输入映射、QP 事务、执行租约与清理 |
 | Bindu `execution_client.py` | 执行服务客户端和唯一执行反馈缓存 |
 
-模式选择和会话启动在应用内直接调用，`teleop/mode_state` 与 `teleop/state` 提供观察出口。`teleop/vr/input` 在存在观察或记录订阅者时发布处理后输入，独立夹爪通过 `teleop/vr/gripper_input` 接收扳机。执行层继续通过租约、修订号和实测反馈确认命令与停止。
+模式选择和会话启动在应用内直接调用，会话结果及租约拒绝证据使用 Bindu 结构化对象传递。`teleop/mode_state` 与 `teleop/state` 提供观察出口。`teleop/vr/input` 在存在观察或记录订阅者时发布处理后输入，独立夹爪通过 `teleop/vr/gripper_input` 接收扳机。执行层继续通过租约、修订号和实测反馈确认命令与停止。
 
 日常 QP 诊断和稳定会话反馈以约 10 Hz 更新，阶段变化及时报告。`--diagnostics` 启用逐次 QP 诊断，采集与浏览器显示由独立观察进程处理。
 

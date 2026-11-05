@@ -10,6 +10,7 @@ from bindu_contracts.teleoperation import VRFrame
 from bindu_teleoperation.vr.receiver import decode_controller, ButtonCounters
 from snowbot_teleop.control import PicoControl, PicoFeedback, PICO_MAPPING, temporary_capture_refusal
 from bindu_teleoperation.bimanual_session import BimanualSession
+from bindu_runtime.session_operation import LeaseRejection, SessionResult
 
 
 from tests.support.pico import Rig
@@ -53,11 +54,11 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_not_ready_returns_to_standby_only_after_confirmed_stop(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock
-        lease_refusal='BIMANUAL_LEASE_NOT_ACQUIRED:'+json.dumps(dict(
-            reason='FEEDBACK_NOT_STATIONARY',instance_id='executor',profile_hash='p',epoch=3))
+        refusal=LeaseRejection('executor',3,'p','FEEDBACK_NOT_STATIONARY')
+        lease_refusal='FEEDBACK_NOT_STATIONARY'
         for accepted,stop_ok,code in ((0,True,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
                 (0,True,lease_refusal),(1,True,lease_refusal),(0,False,lease_refusal),
-                (0,True,lease_refusal.replace('FEEDBACK_NOT_STATIONARY','DEVICE_FAULT')),
+                (0,True,'DEVICE_FAULT'),
                 (0,True,'BIMANUAL_LEASE_NOT_ACQUIRED:FEEDBACK_NOT_STATIONARY'),
                 (1,True,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
                 (0,False,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
@@ -67,11 +68,12 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 node=self.production('perform');node.control=r.core;node.position_contract=False
                 node.cancel_tool=AsyncMock(side_effect=[None,None if stop_ok else RuntimeError('STOP_UNCONFIRMED')])
                 node.current=Mock();node.select_tool_mode=AsyncMock();node.follow=AsyncMock(side_effect=RuntimeError(code))
-                node.tool_result=S(done=lambda:True,result=lambda:S(code=code,accepted_commands=accepted))
+                proof=refusal if code==lease_refusal else None
+                node.tool_result=S(done=lambda:True,result=lambda:SessionResult(simulated=False,code=code,accepted_commands=accepted,lease_rejection=proof))
                 node.now=lambda:r.now;node.feedback=lambda:PicoFeedback(r.now,stop_ok)
                 node.event=Mock();node.simulation=False
                 await node.perform(intent)
-                retry=stop_ok and temporary_capture_refusal(code,accepted)
+                retry=stop_ok and temporary_capture_refusal(node.tool_result.result())
                 self.assertEqual(r.core.phase,'standby' if retry else 'locked')
                 self.assertEqual(r.core.squeeze_released,[False,False])
                 self.assertIsNone(r.core.pending)
@@ -82,8 +84,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_pending_capture_refusal_is_not_locked_by_timer_before_cleanup(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock
-        lease_refusal='BIMANUAL_LEASE_NOT_ACQUIRED:'+json.dumps(dict(
-            reason='FEEDBACK_NOT_STATIONARY',instance_id='executor',profile_hash='p',epoch=3))
+        refusal=LeaseRejection('executor',3,'p','FEEDBACK_NOT_STATIONARY')
+        lease_refusal='FEEDBACK_NOT_STATIONARY'
         for code in ('SNOWBOT_HELD_REFERENCE_NOT_STATIONARY',lease_refusal,'SNOWBOT_PDO_STALE',
                      'BIMANUAL_LEASE_NOT_ACQUIRED:bad-json'):
             node=self.production('tick');node.last_tick_at=None;node.waiters=set();node.validator=S(poll=lambda:None)
@@ -91,10 +93,11 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.now=lambda:1.;node.feedback=lambda:PicoFeedback(1.,True)
             node.control=S(phase='engaging',teleop_mode='bimanual_tool',context_at=1.,pending=S(operation='follow'),
                 lock=Mock(),update_feedback=Mock(),tick=Mock(),drain=lambda:[])
-            node.tool_result=S(done=lambda:True,result=lambda:S(code=code,accepted_commands=0))
+            proof=refusal if code==lease_refusal else None
+            node.tool_result=S(done=lambda:True,result=lambda:SessionResult(simulated=False,code=code,accepted_commands=0,lease_rejection=proof))
             node.pending_intent=node.record_future=node.running=None
             node.tick()
-            self.assertEqual(node.control.lock.called,not temporary_capture_refusal(code,0))
+            self.assertEqual(node.control.lock.called,not temporary_capture_refusal(node.tool_result.result()))
 
     def test_continuous_axial_ignores_x_without_changing_gripper_opening(self):
         r=Rig(load='held',guided=True,dual=True,direct=True)

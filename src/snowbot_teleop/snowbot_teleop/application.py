@@ -10,7 +10,7 @@ import time
 from snowbot_hardware.parameters import parameters_for
 from copy import copy
 from types import SimpleNamespace
-from bindu_runtime.tool_session import SessionOperation
+from bindu_runtime.session_operation import SessionOperation
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from rclpy.action import GoalResponse
@@ -33,6 +33,7 @@ from bindu_interfaces.srv import Lease, ControlExecution
 from bindu_interfaces.action import TeleopSession
 from bindu_runtime.common import seconds, stamp, joints_at_rest
 from bindu_runtime.stop_evidence import stop_feedback_matches
+from bindu_runtime.execution_client import wait_for
 
 
 class Superseded(RuntimeError):
@@ -769,12 +770,7 @@ class PicoApplication:
     async def wait(self, future, timeout=None):
         if timeout is None:
             timeout = parameters_for(self, "pico")["rpc_timeout_s"]
-        end = time.monotonic() + timeout
-        while not future.done():
-            if time.monotonic() > end:
-                raise RuntimeError("PICO_RPC_TIMEOUT")
-            await self.pause()
-        return future.result()
+        return await wait_for(future, self.pause, timeout, "PICO_RPC_TIMEOUT", clock=time.monotonic)
 
     def begin_stop_wait(self, instance_id, epoch, lease_active):
         if self.stop_request is not None:
@@ -922,22 +918,16 @@ class PicoApplication:
                 code = ended.code
                 if "STOP_UNCONFIRMED" in code:
                     self.stop_unconfirmed(request, "TOOL_STOP_UNCONFIRMED")
-                prefix = "BIMANUAL_LEASE_NOT_ACQUIRED:"
-                if code.startswith(prefix):
-                    try:
-                        proof = json.loads(code[len(prefix) :])
-                    except (ValueError, TypeError):
-                        self.stop_unconfirmed(request, "TOOL_NO_GRANT_EVIDENCE_INVALID")
+                proof = ended.lease_rejection
+                if proof is not None:
                     if (
                         context is None
-                        or not isinstance(proof, dict)
-                        or proof.get("instance_id") != context["instance_id"]
-                        or proof.get("profile_hash") != self.profile.digest
-                        or type(proof.get("epoch")) is not int
-                        or proof["epoch"] != context["epoch"] - 1
+                        or proof.instance_id != context["instance_id"]
+                        or proof.profile_hash != self.profile.digest
+                        or proof.epoch != context["epoch"] - 1
                     ):
                         self.stop_unconfirmed(request, "TOOL_NO_GRANT_EVIDENCE_MISMATCH")
-                    request["epoch"] = proof["epoch"]
+                    request["epoch"] = proof.epoch
                 if (
                     self.tool_goal is not goal
                     or self.tool_result is not result
@@ -1016,66 +1006,9 @@ class PicoApplication:
     async def prepare_hold_reference(
         self, intent, *, lease=None, previous=None, allow_feedback_fault=False
     ):
-        """Authenticate the stopped PAUSE again after every ownership transition."""
-        self.current(intent)
-        if not self.prepare_hold_client or self.stop_request is not None:
-            raise RuntimeError("PREPARE_LIMIT_RECOVERY_HOLD_REQUIRED")
-        reply = await self.wait(self.prepare_hold_client.call_async(Trigger.Request()))
-        self.current(intent)
-        if not reply.success:
-            raise RuntimeError(reply.message)
-        try:
-            data = json.loads(reply.message)
-            s, q = self.reading()
-            stopped_state = (
-                s.state in ("READY", "CANCELED", "SUCCEEDED")
-                or allow_feedback_fault
-                and s.state == "FAILED"
-                and s.code == "DEVICE_FEEDBACK_ERROR"
-            )
-            if (
-                s.stop_failures
-                or not stopped_state
-                or s.lease_active is not (lease is not None)
-                or data["instance_id"] != s.instance_id
-                or data["profile_hash"] != self.profile.digest
-                or data["lease_id"] != (lease.lease_id if lease else "")
-                or data["epoch"] != (lease.epoch if lease else s.lease_epoch)
-                or data["revision"] != s.revision
-                or not 0 <= self.now() - data["stamp"] <= self.tool_cfg["feedback_max_age"]
-                or set(data["positions"]) != set(self.names)
-                or any(
-                    type(data[k]) is not int or data[k] <= 0
-                    for k in ("boot_id", "session", "sequence")
-                )
-                or not joints_at_rest(
-                    s.joints,
-                    self.names,
-                    parameters_for(self, "execution")["held_reference_velocity_tolerance_rad_s"],
-                )
-            ):
-                raise ValueError("identity")
-            if previous is not None and any(
-                data[k] != previous[k]
-                for k in (
-                    "instance_id",
-                    "profile_hash",
-                    "boot_id",
-                    "session",
-                    "sequence",
-                    "positions",
-                )
-            ):
-                raise ValueError("hold changed")
-            if any(
-                not math.isfinite(v)
-                or not self.profile.limits[n][0] <= v <= self.profile.limits[n][1]
-                for n, v in data["positions"].items()
-            ):
-                raise ValueError("limits")
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("PREPARE_LIMIT_RECOVERY_HOLD_CHANGED") from exc
-        return data
+        return await preparation.prepare_hold_reference(
+            self, intent, lease=lease, previous=previous, allow_feedback_fault=allow_feedback_fault
+        )
 
     async def prepare_primitive(self, intent):
         return await preparation.prepare_primitive(self, intent)
@@ -1589,14 +1522,16 @@ class PicoApplication:
                 reason += ":" + type(stop_error).__name__ + ":" + str(stop_error)
         except Exception as exc:
             reason = type(exc).__name__ + ":" + str(exc)
+            ended = (
+                self.tool_result.result()
+                if self.tool_result is not None and self.tool_result.done()
+                else None
+            )
             capture_not_ready = (
                 intent.operation == "follow"
-                and self.tool_result is not None
-                and self.tool_result.done()
-                and str(exc) == self.tool_result.result().code
-                and temporary_capture_refusal(
-                    self.tool_result.result().code, self.tool_result.result().accepted_commands
-                )
+                and ended is not None
+                and str(exc) == ended.code
+                and temporary_capture_refusal(ended)
             )
             try:
                 if intent.operation != "recover":
@@ -1738,7 +1673,7 @@ class PicoApplication:
             canceling_capture = (
                 self.control.pending
                 and self.control.pending.operation == "follow"
-                and temporary_capture_refusal(ended.code, ended.accepted_commands)
+                and temporary_capture_refusal(ended)
             )
             if not canceling_capture:
                 prefix = (

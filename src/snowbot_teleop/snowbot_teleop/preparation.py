@@ -5,6 +5,8 @@ barrier. This module owns preparation geometry and target generation.
 """
 
 import json
+import math
+from std_srvs.srv import Trigger
 import time
 import uuid
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -575,3 +577,66 @@ async def validate_prepare(app, intent, targets=None, *, allow_recovery=True):
     if app.prepare_recovery:
         app.event("PICO_PREPARE_RECOVERY", json.dumps(app.prepare_recovery))
     return target
+
+
+async def prepare_hold_reference(
+    app, intent, *, lease=None, previous=None, allow_feedback_fault=False
+):
+    """Authenticate the stopped PAUSE again after every ownership transition."""
+    app.current(intent)
+    if not app.prepare_hold_client or app.stop_request is not None:
+        raise RuntimeError("PREPARE_LIMIT_RECOVERY_HOLD_REQUIRED")
+    reply = await app.wait(app.prepare_hold_client.call_async(Trigger.Request()))
+    app.current(intent)
+    if not reply.success:
+        raise RuntimeError(reply.message)
+    try:
+        data = json.loads(reply.message)
+        s, q = app.reading()
+        stopped_state = (
+            s.state in ("READY", "CANCELED", "SUCCEEDED")
+            or allow_feedback_fault
+            and s.state == "FAILED"
+            and s.code == "DEVICE_FEEDBACK_ERROR"
+        )
+        if (
+            s.stop_failures
+            or not stopped_state
+            or s.lease_active is not (lease is not None)
+            or data["instance_id"] != s.instance_id
+            or data["profile_hash"] != app.profile.digest
+            or data["lease_id"] != (lease.lease_id if lease else "")
+            or data["epoch"] != (lease.epoch if lease else s.lease_epoch)
+            or data["revision"] != s.revision
+            or not 0 <= app.now() - data["stamp"] <= app.tool_cfg["feedback_max_age"]
+            or set(data["positions"]) != set(app.names)
+            or any(
+                type(data[k]) is not int or data[k] <= 0 for k in ("boot_id", "session", "sequence")
+            )
+            or not joints_at_rest(
+                s.joints,
+                app.names,
+                parameters_for(app, "execution")["held_reference_velocity_tolerance_rad_s"],
+            )
+        ):
+            raise ValueError("identity")
+        if previous is not None and any(
+            data[k] != previous[k]
+            for k in (
+                "instance_id",
+                "profile_hash",
+                "boot_id",
+                "session",
+                "sequence",
+                "positions",
+            )
+        ):
+            raise ValueError("hold changed")
+        if any(
+            not math.isfinite(v) or not app.profile.limits[n][0] <= v <= app.profile.limits[n][1]
+            for n, v in data["positions"].items()
+        ):
+            raise ValueError("limits")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("PREPARE_LIMIT_RECOVERY_HOLD_CHANGED") from exc
+    return data
