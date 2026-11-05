@@ -438,7 +438,8 @@ class SimulationEntryTests(unittest.TestCase):
             parameters.write_text(json.dumps({'pico':{'prepare_command_period_s':.2},
                                                'execution':{'target_stream_brake_lead_s':.04}}))
             parsed=entry.parse_args(['--config',str(site)])
-            self.assertEqual(parsed.deployment['target_stream_brake_lead_s'],'0.04')
+            self.assertNotIn('target_stream_brake_lead_s',parsed.deployment)
+            self.assertEqual(parsed.runtime_parameters['execution']['target_stream_brake_lead_s'],.04)
             recipe['arguments']['target_stream_brake_lead_s']=.12;site.write_text(json.dumps(recipe))
             with self.assertRaisesRegex(ValueError,'SNOWBOT_BRAKE_LEAD_MOVED'):
                 entry.parse_args(['--config',str(site)])
@@ -524,7 +525,7 @@ from snowbot_bringup.simulation import scene,physics,kinematic_scene
         self.assertIn('runtime_mode:=real',control)
         self.assertIn('device_backend:=snowbot_vendor',control)
         self.assertIn('command_enabled:=false',control)
-        self.assertIn('position_contract:=true',control)
+        self.assertFalse(any(value.startswith('position_contract:=') for value in control))
         self.assertIn('execution_mode:=impedance',control)
         self.assertNotIn('pico_simulation_demo:=true',control)
         self.assertEqual(display[display.index('--runtime-mode')+1],'real')

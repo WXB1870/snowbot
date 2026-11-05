@@ -132,11 +132,11 @@ def check_runtime(args, robot):
     for module in ('pinocchio', 'casadi', 'vuer', 'bindu_execution.interpolation'):
         importlib.import_module(module)
     tool = load_tool_config(robot.tool_config)
-    if args.get('position_contract') in (True,'true'):
-        from snowbot_hardware.parameters import load_parameters, apply_tool_timing
-        tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))
+    from snowbot_hardware.parameters import load_parameters, apply_tool_timing
+    tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))
     from bindu_runtime.teleop_deployment import apply_execution_tracking
-    tool = apply_execution_tracking(tool, args.get('execution_mode','position'))
+    tool = apply_execution_tracking(tool, args.get('execution_mode','position'),
+                                    trajectory_reference=args['runtime_mode']=='real')
     tool['urdf'] = str(robot.urdf)
     solver = BimanualQP(tool, robot.profile)
     solver.close()
@@ -148,7 +148,7 @@ def check_runtime(args, robot):
 
 def vendor_endpoints(args):
     """Expected native interfaces plus the existing, separate safety contract."""
-    value = args.get('vendor_namespace', '/snowbot')
+    value = args.get('vendor_namespace', '/')
     if (not isinstance(value, str) or not value.startswith('/') or '//' in value or
             value != '/' and value.endswith('/')):
         raise ValueError('SNOWBOT_VENDOR_NAMESPACE')

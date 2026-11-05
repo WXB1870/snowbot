@@ -5,7 +5,7 @@ import math
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
 from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
-from .parameters import load_parameters, parameters_for, braking_lead
+from .parameters import load_parameters, parameters_for
 
 
 from bindu_runtime.stop_evidence import sampled_nominal_reference
@@ -111,6 +111,8 @@ class PositionSessionDevices:
         node.declare_parameter('vendor_namespace', '/', descriptor=ParameterDescriptor(read_only=True))
         if node.get_parameter('vendor_namespace').value != '/':
             raise ValueError('SNOWBOT_POSITION_SESSION_ROOT_NAMESPACE_REQUIRED')
+        if 'target_stream_brake_lead_s' in node._parameter_overrides:
+            raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s in parameters_config')
         for key in ('arm_receiver_node', 'mid_receiver_node', 'servo_receiver_node'):
             node.declare_parameter(key, '', descriptor=ParameterDescriptor(read_only=True))
         self.receivers = {key: node.get_parameter(parameter).value or default for key, parameter, default in (
@@ -119,10 +121,9 @@ class PositionSessionDevices:
             ('head', 'servo_receiver_node', '/servo_node'))}
         self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode)
         self.trajectory_limits = target_stream_limits({
-            key: node.declare_parameter(key, braking_lead(self.runtime_parameters) if key=='target_stream_brake_lead_s' else default,
+            key: node.declare_parameter(key, default,
                                         descriptor=ParameterDescriptor(read_only=True)).value
             for key, default in TARGET_STREAM_LIMIT_DEFAULTS.items()})
-        braking_lead(self.runtime_parameters,self.trajectory_limits['target_stream_brake_lead_s'])
         self.envelopes = SourceEnvelope(new_session_id(node.now()), node.now)
         self.sent = {}
         self.target_instance = None
@@ -479,8 +480,7 @@ class PositionSessionDevices:
         if not engine.active or engine.stopping:
             return
         sent = self.sent.get(self.envelopes.sequence)
-        lead_ns = round(self.trajectory_limits.get('target_stream_brake_lead_s',
-            TARGET_STREAM_LIMIT_DEFAULTS['target_stream_brake_lead_s'])*1e9)
+        lead_ns = round(self.runtime_parameters['execution']['target_stream_brake_lead_s']*1e9)
         if sent and sent[0]['operation'] != 2:
             # Keep the ordinary execution path to one tick. The extra dispatch
             # is needed only when the preceding packet is about to be fenced.

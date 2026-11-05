@@ -9,12 +9,12 @@ from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 from bindu_runtime.robot_setup import RobotSetup
 from bindu_contracts.runtime_mode import resolve_mode
-from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
+from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits, execution_backend
 
 
 def assemble(context):
     value = lambda name, default='': LaunchConfiguration(name, default=default).perform(context)
-    from snowbot_hardware.parameters import execution_backend, load_parameters, validate_pico_timing, braking_lead, apply_tool_timing, load_mode_config
+    from snowbot_hardware.parameters import load_parameters, validate_pico_timing, load_mode_config
     runtime_parameters = load_parameters(value('parameters_config') or None)
     input_settings = runtime_parameters['pico']
     def enabled(name, default='true'):
@@ -23,6 +23,10 @@ def assemble(context):
         return raw=='true'
     if value('position_protocol'):
         raise ValueError('SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol')
+    if value('position_contract'):
+        raise ValueError('SNOWBOT_POSITION_CONTRACT_REMOVED: selected by robot tool configuration; remove position_contract')
+    if value('target_stream_brake_lead_s'):
+        raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s in parameters_config')
     single_enabled=enabled('single_arm_enabled')
     recorder_enabled=enabled('recorder_enabled')
     if not recorder_enabled and value('recording_mode')!='off':
@@ -30,23 +34,19 @@ def assemble(context):
     mode = resolve_mode(value('runtime_mode', 'simulation'))
     execution_mode=value('execution_mode','position')
     backend=execution_backend(mode,value('device_backend'),execution_mode)
-    position_contract=mode=='real' or enabled('position_contract','false')
-    if value('gripper_config') and mode != 'real' and not position_contract:
-        raise ValueError('GRIPPER_REQUIRES_REAL_MODE')
     legacy = not value('robot_config')
     selection = value('robot_config') or str(Path(get_package_share_directory('snowbot_bringup'))/'config/examples/snowbot/robot_snowbot.json')
     overrides = {'profile': value('profile'), 'tool': value('bimanual_config')} if legacy else None
     robot = RobotSetup.load(selection, overrides=overrides)
+    tool_settings=json.loads(robot.tool_config.read_text())
+    position_contract=tool_settings.get('simulation_only') is False
+    if value('gripper_config') and not position_contract:
+        raise ValueError('GRIPPER_REQUIRES_POSITION_CONTRACT')
     if position_contract and (robot.robot_id!='snowbot' or single_enabled):
         raise ValueError('POSITION_CONTRACT_REQUIRES_SNOWBOT_BIMANUAL')
     side = value('side')
     if single_enabled and side not in robot.single_arm:
         raise ValueError('ROBOT_SINGLE_ARM_UNAVAILABLE:' + side)
-    if mode=='real' and (robot.robot_id!='snowbot' or single_enabled):
-        raise ValueError('REAL_REQUIRES_SNOWBOT_BIMANUAL_POSITION')
-    tool_settings=json.loads(robot.tool_config.read_text())
-    if position_contract:
-        apply_tool_timing(tool_settings,runtime_parameters)
     if tool_settings.get('simulation_only') is not (mode=='simulation' and not position_contract):
         raise ValueError('BIMANUAL_CONFIG_RUNTIME_MODE_MISMATCH')
     if value('tool_input_source') not in ('tool_pose', 'vr'):
@@ -85,14 +85,13 @@ def assemble(context):
     if mode=='real' or position_contract:
         execution.update(command_enabled=enabled('command_enabled','false'),
             **{key:value(key,default) for key,default in (
-                ('execution_mode','position'),('gripper_config',''),('parameters_config',''),('vendor_namespace','/snowbot'),('arm_receiver_node',''),
+                ('execution_mode','position'),('gripper_config',''),('parameters_config',''),('vendor_namespace','/'),('arm_receiver_node',''),
                 ('servo_receiver_node',''),('mid_receiver_node',''))})
     if mode=='real':
         limits={key:value(key,str(default)) for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}
-        limits['target_stream_brake_lead_s']=braking_lead(runtime_parameters,value('target_stream_brake_lead_s'))
         execution.update(target_stream_limits(limits))
     if pico and position_contract:
-        validate_pico_timing(runtime_parameters,brake_lead_s=execution.get('target_stream_brake_lead_s',0.))
+        validate_pico_timing(runtime_parameters,brake_lead_s=runtime_parameters['execution']['target_stream_brake_lead_s'] if mode=='real' else 0.)
     nodes.append(Node(package='snowbot_hardware', executable='snowbot_adapter' if mode=='real' else 'snowbot_position_sim' if position_contract else 'execution', namespace=ns,
                       output='screen', parameters=[execution]))
     if recorder_enabled:
@@ -144,6 +143,7 @@ def assemble(context):
         nodes.append(Node(package='snowbot_teleop',executable='pico_control',namespace=ns,output='screen',
             parameters=[{**common,**model,'parameters_config':value('parameters_config'),'tool_config':str(robot.tool_config),
                          'pico_config':pico_config,'device_backend':backend,'recording_enabled':recorder_enabled,
+                         'position_contract':position_contract,
                          'execution_mode':execution_mode,
                          'gripper_config':value('gripper_config'),
                          'base_config':base_config, 'command_enabled':enabled('command_enabled','false'),

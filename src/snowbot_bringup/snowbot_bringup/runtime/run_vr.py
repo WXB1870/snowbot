@@ -355,7 +355,7 @@ def parse_args(argv=None):
     args.context_run_id=args.run_id
     args.run_id=args.run_id or 'vr_'+uuid.uuid4().hex[:12]
     from ament_index_python.packages import get_package_share_directory
-    from bindu_runtime.teleop_deployment import load_deployment, target_stream_limits
+    from bindu_runtime.teleop_deployment import load_deployment
     if args.config is None:
         args.config = package_share('snowbot_bringup')/'config/deployments/snowbot_vr_sim.json'
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
@@ -363,7 +363,7 @@ def parse_args(argv=None):
     d=args.deployment
     if args.execution_mode:
         d['execution_mode'] = args.execution_mode
-    from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, braking_lead, load_mode_config
+    from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, load_mode_config
     d['parameters_config']=d.get('parameters_config') or str(default_path())
     args.runtime_parameters=load_parameters(d['parameters_config'])
     if args.enable_commands:
@@ -378,17 +378,15 @@ def parse_args(argv=None):
         d['device_backend']='external_simulation'
     if d.get('device_backend')=='external_simulation' and not d.get('physics_config'):
         d['physics_config']=str(package_share('snowbot_bringup')/'config/robots/snowbot/snowbot_shovel_physics.json')
-    if (args.launch!='robot_teleop.launch.py' or d.get('position_contract')!='true' or
+    if (args.launch!='robot_teleop.launch.py' or
             d.get('pico_enabled')!='true' or d.get('vr_enabled')!='true'):
-        parser.error('此入口要求启用 position_contract、PICO 和 VR 的部署配置')
+        parser.error('此入口要求启用 PICO 和 VR 的部署配置')
     pico=load_mode_config(d['pico_config'],d['runtime_mode'])
     if pico.get('tool_grasp_confirmation') not in ('calibrated','operator'):
         raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
     lead=0.
     if d.get('runtime_mode')=='real':
-        lead=braking_lead(args.runtime_parameters,d.get('target_stream_brake_lead_s'))
-        d['target_stream_brake_lead_s']=str(lead)
-        target_stream_limits(d)
+        lead=args.runtime_parameters['execution']['target_stream_brake_lead_s']
     validate_pico_timing(args.runtime_parameters,brake_lead_s=lead)
     for key,attribute,default in (('namespace','namespace','bindu_snowbot'),('host','host','127.0.0.1'),
             ('port','vr_port','8012'),('cert_file','cert_file',''),('key_file','key_file','')):

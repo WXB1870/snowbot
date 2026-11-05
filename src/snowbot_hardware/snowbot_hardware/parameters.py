@@ -7,17 +7,6 @@ from pathlib import Path
 from functools import lru_cache
 
 
-def execution_backend(runtime_mode, backend='', execution_mode='position'):
-    """Choose the installed backend once for both launch entry points."""
-    if execution_mode not in ('position', 'impedance'):
-        raise ValueError('SNOWBOT_EXECUTION_MODE')
-    backend = backend or ('snowbot_vendor' if runtime_mode == 'real' else 'kinematic')
-    supported = ('snowbot_vendor',) if runtime_mode == 'real' else ('kinematic', 'external_simulation')
-    if backend not in supported or execution_mode == 'impedance' and backend != 'snowbot_vendor':
-        raise ValueError('ROBOT_HARDWARE_BACKEND_NOT_IMPLEMENTED:'+backend+':'+execution_mode)
-    return backend
-
-
 _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
  'solver': ('timeout_s', 'worker_timeout_s', 'startup_timeout_s'),
  'pico': ('prepare_button_hold_s',
@@ -168,20 +157,6 @@ def apply_tool_timing(config, parameters):
     if gap > result['input_max_age']:
         raise ValueError('BIMANUAL_SAMPLE_GAP_EXCEEDS_INPUT_TIMEOUT')
     return result
-
-
-def braking_lead(parameters, legacy=None):
-    """Read shared timing; accept an old deployment key only if it agrees."""
-    selected = parameters['execution']['target_stream_brake_lead_s']
-    if legacy not in (None, ''):
-        try:
-            value = float(legacy) if type(legacy) in (str, float, int) else float('nan')
-        except (ValueError, OverflowError):
-            value = float('nan')
-        if value != selected:
-            raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s '
-                             'in parameters_config and remove target_stream_brake_lead_s from the deployment')
-    return selected
 
 
 def select_mode_config(config, mode):

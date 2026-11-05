@@ -81,15 +81,14 @@ class PicoNode(RuntimeNode):
                                   self.get_parameter('command_enabled').value,
                                   pair_max_skew_s=(pico['pair_max_skew_s'] if 'remote_input_timeout_s' in pico else 0.))
         self.cfg=load_mode_config(self.get_parameter('pico_config').value,self.runtime_mode)
-        self.position_contract = self.cfg.get('schema_version') == 2
-        if self.cfg.get('schema_version') not in (1,2):
+        self.position_contract=self.declare_parameter('position_contract',False,descriptor=ParameterDescriptor(read_only=True)).value
+        if self.cfg.get('schema_version') != (2 if self.position_contract else 1):
             raise ValueError('PICO_CONFIG_SCHEMA')
-        if self.cfg.get('simulation_only') is not self.simulation or self.cfg.get('mapping')!=PICO_MAPPING:
+        if self.cfg.get('mapping')!=PICO_MAPPING:
             raise ValueError('PICO_CONFIG_RUNTIME_MODE_MISMATCH')
-        self.backend=self.get_parameter('device_backend').value
-        if (not self.position_contract and not self.simulation or
-                self.backend not in (('kinematic','external_simulation') if self.simulation and self.position_contract else
-                                     ('kinematic',) if self.simulation else ('snowbot_vendor',))):
+        from bindu_runtime.teleop_deployment import execution_backend
+        self.backend=execution_backend(self.runtime_mode,self.get_parameter('device_backend').value,self.execution_mode)
+        if not self.position_contract and self.backend!='kinematic':
             raise ValueError('PICO_ACTUATOR_BACKEND_UNAVAILABLE:'+self.backend)
         self.tool_cfg=load_tool_config(self.get_parameter('tool_config').value)
         if self.position_contract:

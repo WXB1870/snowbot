@@ -16,6 +16,30 @@ from tests.support.pico import Rig
 
 
 class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_execution_contract_is_supplied_by_assembly(self):
+        import ast
+        from types import SimpleNamespace as S
+        path=Path(find_spec('snowbot_teleop.node').origin)
+        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoNode')
+        init=next(n for n in node.body if getattr(n,'name','')=='__init__')
+        def assigned(item,name):
+            return isinstance(item,ast.Assign) and isinstance(item.targets[0],ast.Attribute) and item.targets[0].attr==name
+        begin=next(i for i,item in enumerate(init.body) if assigned(item,'position_contract'))
+        end=next(i for i,item in enumerate(init.body) if assigned(item,'tool_cfg'))
+        code=compile(ast.Module(body=init.body[begin:end],type_ignores=[]),str(path),'exec')
+        for selected,schema,mode,backend,execution in (
+                (True,2,'real','snowbot_vendor','impedance'),
+                (True,2,'simulation','kinematic','position'),
+                (False,1,'simulation','kinematic','position')):
+            owner=S(cfg={'schema_version':schema,'mapping':PICO_MAPPING},runtime_mode=mode,execution_mode=execution,
+                declare_parameter=lambda *a,**kw:S(value=selected),get_parameter=lambda *a:S(value=backend))
+            exec(code,{'self':owner,'PICO_MAPPING':PICO_MAPPING,'ParameterDescriptor':lambda **kw:kw})
+            self.assertIs(owner.position_contract,selected)
+            self.assertEqual(owner.backend,backend)
+        owner.cfg['schema_version']=2
+        with self.assertRaisesRegex(ValueError,'PICO_CONFIG_SCHEMA'):
+            exec(code,{'self':owner,'PICO_MAPPING':PICO_MAPPING,'ParameterDescriptor':lambda **kw:kw})
+
     def test_control_chain_sets_async_transport_before_ros_init_and_honors_site_override(self):
         import ast,os
         from unittest.mock import Mock,patch
