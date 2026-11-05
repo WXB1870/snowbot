@@ -208,8 +208,9 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert all(n in initial and abs(initial[n]-v)<(.003 if physics else 1e-9)
                    for n,v in fixture['device_initial_positions_rad'].items()),'startup feedback differs from configured fixture'
         assert states[-1].simulated==(mode=='simulation') and states[-1].runtime_mode==mode
-        assert views[-1]['capabilities']['axial_grasp'] is True
-        checks.append('same feedback contract, no startup commands, configured axial position capability explicit')
+        assert views[-1]['capabilities']['continuous_axial_grasp'] is True
+        assert views[-1]['capabilities']['axial_grasp'] is False
+        checks.append('same feedback contract, no startup commands, continuous measured axial grasp capability explicit')
         pump(.3)
         if prepare_return:
             expected_mode='independent_arms' if ordinary else 'bimanual_tool'
@@ -520,7 +521,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         checks.append('A accepts unknown load at the reached preparation pose without motion or gripper commands')
         before=len(accepted);source['grip']=1.;phase('following');set_delta(.006)
         wait(lambda:len(accepted)>before+5)
-        error_sample('rigid')
+        error_sample('right_axial')
         left_position=grippers['left'].measured_position
         if physics:
             # X must brake a moving pair, not only confirm an already-resting
@@ -528,30 +529,26 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             for _ in range(8):
                 source['delta']+=.002;pump(.02)
         source['buttons'][0]=1
-        wait(lambda:views[-1]['phase']=='following' and views[-1]['grasp_applied']=='right_axial' and
-             views[-1]['tool_phase']=='follow:right_axial',20.)
-        expected_virtual=load_mode_config(CFG/'grippers.json','simulation')['grippers']['right']['virtual']
-        assert abs(grippers['right'].measured_position-expected_virtual)<.003
+        pump(.3)
+        assert views[-1]['phase']=='following' and views[-1]['tool_phase']=='follow:right_axial'
+        assert abs(grippers['right'].measured_position)<.003
+        assert abs(grippers['left'].measured_position-left_position)<(.003 if physics else 1e-9)
+        source['buttons'][0]=0
+        pump(.3)
+        assert views[-1]['phase']=='following' and views[-1]['tool_phase']=='follow:right_axial'
+        assert abs(grippers['right'].measured_position)<.003
         assert abs(grippers['left'].measured_position-left_position)<(.003 if physics else 1e-9)
         assert all(g.grasp_state=='unknown' for g in grippers.values())
-        before_virtual=len(accepted);set_delta(source['delta']+.003)
-        wait(lambda:len(accepted)>before_virtual+5)
-        error_sample('right_axial')
-        source['buttons'][0]=0
-        wait(lambda:views[-1]['phase']=='following' and views[-1]['grasp_applied']=='rigid' and
-             views[-1]['tool_phase']=='follow:rigid',20.)
-        assert abs(grippers['right'].measured_position)<.003
-        assert abs(grippers['left'].measured_position-left_position)<(.003 if physics else 1e-9)
-        checks.append('X changes only right gripper position, waits for acknowledgement/hold, captures axial QP and returns to measured rigid grasp')
+        checks.append('continuous measured axial grasp ignores X press/release without changing either gripper')
         source['buttons'][0]=1
-        wait(lambda:views[-1]['phase']=='following' and views[-1]['tool_phase']=='follow:right_axial',20.)
+        pump(.3)
         source['grip']=0.;phase('tool_standby')
         source['buttons'][0]=0;paused=len(accepted);pump(.3)
-        assert len(accepted)==paused and abs(grippers['right'].measured_position-expected_virtual)<.003
+        assert len(accepted)==paused and abs(grippers['right'].measured_position)<.003
         source['grip']=1.
-        wait(lambda:views[-1]['phase']=='following' and views[-1]['tool_phase']=='follow:rigid',20.)
+        wait(lambda:views[-1]['phase']=='following' and views[-1]['tool_phase']=='follow:right_axial',20.)
         assert abs(grippers['right'].measured_position)<.003
-        checks.append('paused X release retains virtual opening; a fresh two-hand clutch confirms rigid position before resuming')
+        checks.append('paused X release sends no command; a fresh two-hand clutch recaptures measured axial grasp')
         source['grip']=0.;phase('tool_standby')
         wait(lambda:states and not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
         assert not states[-1].stop_failures

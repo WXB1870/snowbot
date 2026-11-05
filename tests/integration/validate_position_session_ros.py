@@ -87,7 +87,8 @@ def main():
                 msg.boot_id=333;msg.pdo_sample=max(1,sample);msg.pdo_age=max(0.,now-freeze_started) if frozen else .001
                 msg.receive_attempt=sample;msg.wkc=msg.expected_wkc=67;msg.valid_mask=0xfffff
                 msg.position=q;msg.speed=[0.]*20;msg.current=[0.]*20;msg.status=[0x27]*20
-                msg.reference_mode=2;msg.execution_mode=0
+                msg.reference_mode=2;msg.execution_mode=int(args.execution_mode=='impedance')
+                msg.sensor_valid_mask=3 if args.execution_mode=='impedance' else 0
                 msg.sample_time_ns=msg.header.stamp.sec*1_000_000_000+msg.header.stamp.nanosec
                 # This nominal reference is an explicit in-memory servo fixture.
                 # No servo executable, trajectory generator or device is running.
@@ -150,11 +151,13 @@ def main():
         from types import SimpleNamespace as S
         from bindu_hardware.snowbot_session import CONTROL_GROUPS,SourceEnvelope,SessionHealth
         from bindu_runtime.snowbot_position_session import PositionSessionDevices
+        from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS
         pump(.25);active_meta=None
         d=PositionSessionDevices.__new__(PositionSessionDevices)
         observer.now=lambda:observer.get_clock().now().nanoseconds*1e-9
         events=[];observer.event=lambda *args,**kwargs:events.append((args,kwargs))
-        d.node=d.graph=observer;d.health=SessionHealth(observer.now)
+        d.node=d.graph=observer;d.health=SessionHealth(observer.now,execution_mode=args.execution_mode)
+        d.trajectory_limits=dict(TARGET_STREAM_LIMIT_DEFAULTS)
         d.envelopes=SourceEnvelope(session,observer.now)
         d.sent={};d.target_instance=d.source_identity=d.takeover_pending=None
         d.takeover_previous_hold=None
@@ -245,7 +248,7 @@ def main():
         assert all(frame.meta.expires_at_ns==msg.meta.expires_at_ns for frame in matching)
         checks['empty_curve_target_recipe_and_source_identity_relayed_unchanged']=True
         observed=observations['last']
-        assert observed.reference_mode==2 and observed.execution_mode==0
+        assert observed.reference_mode==2 and observed.execution_mode==int(args.execution_mode=='impedance')
         assert observed.reference_valid and observed.output_valid and observed.segment_id==1
         assert observed.sample_time_ns==observed.header.stamp.sec*1_000_000_000+observed.header.stamp.nanosec
         assert list(observed.reference_position)==q[:7]+q[8:15]+q[18:20]
