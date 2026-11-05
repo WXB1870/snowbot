@@ -13,218 +13,218 @@
   "actions": {
     "Push": {
       "targets": "Push.json.gz",
-      "sha256": "8f8d72a4b79b78ca38f252e851f313a0b925762977a25c4f6bb0fc41b8341c5d",
+      "sha256": "4a299d92f7dad2c70744aee8bbe5dd89c61d4406e7ff6b6b81af0dcf81e265e3",
       "nominal_duration_s": 11.5,
       "duration_s": 11.5,
       "start_node": "Push:start",
       "end_node": "Push:end",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     },
     "SideScoop": {
       "targets": "SideScoop.json.gz",
-      "sha256": "eedebea0529b85e8fd54701799148e7d5994bbfd9f9740b08080419266609f89",
+      "sha256": "276f9c0afdd4aaf758c374cf4ca721d93e332dd5c8963610cab39f0a6be51078",
       "nominal_duration_s": 8.9,
       "duration_s": 8.9,
       "start_node": "SideScoop:start",
       "end_node": "Flip:start",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     },
     "Flip": {
       "targets": "Flip.json.gz",
-      "sha256": "087e6b2bd7fdbc5ecbe981004dedd95cad4e5e4ad78a4bf1d9b87b136449cb87",
+      "sha256": "858e206c75e7dc5424098ad10e21dbbeda59e525025ab02408a0ac24f3ba4708",
       "nominal_duration_s": 16.18,
       "duration_s": 16.18,
       "start_node": "Flip:start",
       "end_node": "Dump:end",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     }
   },
   "replay_code_sha256": "cf18baaffc33dbd5ec90e0ad0ced7c4caa35c05902f0a26f4aa8d593e793b00f",
   "source_commits": {
-    "snowbot_base": "404a2d5",
-    "bindu": "5bf01d70cc63a942d9aee33bbf912e8dde1eadc7",
+    "snowbot_base": "8c9f167",
+    "bindu": "28e828b",
     "branch": "xavier/impedance-control",
     "reference_validation_framework_base": "14b58b686e989e14cde6f23e95123396d965f2a0",
     "reference_validation_application_base": "7693ce938494467b59c9ad1d377102180a628a68"
   },
-  "validation_kind": "final accepted curves: native continuous dynamics and reserved limits, dense grasp/collision, 116 PhysX full reference replay; no hardware acceptance",
+  "validation_kind": "fixed-waist IK retarget; native continuous dynamics and reserved limits; dense grasp/collision; 116 PhysX full reference replay; no hardware acceptance",
   "transfers": {
     "PushReverse": {
       "targets": "PushReverse.json.gz",
-      "sha256": "7d8d92749e4e2cbb38a51dd6dad0e8af436cffba720654077e30186661ef9f7d",
+      "sha256": "c419bc309a5da700e61c4a78854fe41896f7f62396f739f9009a92b49b92105c",
       "nominal_duration_s": 11.5,
       "duration_s": 11.5,
       "start_node": "Push:end",
       "end_node": "Push:start",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     },
     "BridgeForward": {
       "targets": "BridgeForward.json.gz",
-      "sha256": "dd80cfe920d09aa2ff71ad04dbfa1214128f3ef56f9a2e88f8073ef8ac8788f6",
+      "sha256": "7f11eceeaf9e8d52f8cd1a1ecaeaa98b0f031608056245f3a534e7e35455e0cb",
       "nominal_duration_s": 12.0,
       "duration_s": 12.0,
       "start_node": "Push:start",
       "end_node": "SideScoop:start",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     },
     "BridgeReverse": {
       "targets": "BridgeReverse.json.gz",
-      "sha256": "9ee3292e7f7e9f6d7736b7d4c6a1b397b0e0c01b8999135f2cefaef768e1d1aa",
+      "sha256": "3f275dd9f4719415bb8e280f6f20adb485204bcf116251cb91c449da8c6ff01f",
       "nominal_duration_s": 12.0,
       "duration_s": 12.0,
       "start_node": "SideScoop:start",
       "end_node": "Push:start",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     },
     "ScoopReturn": {
       "targets": "ScoopReturn.json.gz",
-      "sha256": "ae61f7712da43228fdf158d7d24290e5f74e367f8375e75be499239667fc9ebe",
+      "sha256": "3cb49da0041f470bc573fdd8c74672ec952a15d818a822f2702ec3989e82f7d4",
       "nominal_duration_s": 8.0,
       "duration_s": 8.0,
       "start_node": "Flip:start",
       "end_node": "SideScoop:start",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     },
     "DumpReturn": {
       "targets": "DumpReturn.json.gz",
-      "sha256": "f34b6ce7b95e7a4424b4a05a07650f2788553eb8f2522a17bc427fad1a3ac762",
+      "sha256": "1328e0ce44fb27eb19e05d814bb6706f9d9c9a3fa3346dd6d36a930e17e1a548",
       "nominal_duration_s": 14.0,
       "duration_s": 14.0,
       "start_node": "Dump:end",
       "end_node": "SideScoop:start",
-      "source": "20261105 half-speed accepted QP/curve reference",
+      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_after_qp_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
       }
     }
   },
   "nodes": {
     "Push:start": [
-      0.1268286483540456,
-      -0.14121513330617333,
-      -0.2995914378022514,
-      0.028453292519943305,
-      0.7341525642359215,
-      -0.8603358725303146,
-      -1.1280435339659691,
-      0.45501854088370225,
-      1.32145870388653,
-      0.10356993482226635,
-      -0.2646468489476671,
-      -0.49667310722626595,
-      -0.13258806898699357,
-      0.21794232542490388,
-      -0.2303526336697379,
-      0.7527019936080958
+      0.17,
+      0.08,
+      -0.43989532300826684,
+      0.05590658503988659,
+      0.9073340421750661,
+      -0.9511160231344962,
+      -0.9853968233586756,
+      0.5067876195806802,
+      1.2364848808523192,
+      0.17106885321591425,
+      -0.3510767478170303,
+      -0.45055478677895244,
+      0.0694898297268099,
+      0.21786149108859795,
+      -0.19312895778346664,
+      0.7911060166915542
     ],
     "Push:end": [
-      0.15485271123452057,
-      0.19399122407291036,
-      -0.992842798848304,
-      0.02845329308714527,
-      0.7523088198255341,
-      -0.2817365233481203,
-      -1.5303602796475038,
-      0.6551674205130747,
-      1.0261703401514515,
-      0.8855894231394181,
-      -0.2057527627876346,
-      -0.8953039027284396,
-      -0.8324042805828106,
-      0.5500883235804672,
-      -0.5764085599006326,
-      0.18995281129850414
+      0.17,
+      0.08,
+      -0.9895412036930198,
+      0.05590658503988659,
+      0.8214991224661586,
+      -0.170737283922384,
+      -1.6732452772152504,
+      0.7300454784096522,
+      1.0003253696562044,
+      0.8492082958087341,
+      -0.0559065865728073,
+      -0.8833893739046881,
+      -1.1360933255291923,
+      0.5525544688288223,
+      -0.7013562959225135,
+      0.03573490430893518
     ],
     "SideScoop:start": [
-      0.1158349001268172,
-      -0.043904373458882186,
-      -0.4557817822179989,
-      0.18674685517445502,
-      0.5139438009867956,
-      -0.9312254490863477,
-      -2.0096399986536553,
-      0.26026418391039285,
-      1.2781995723006954,
-      0.11349964430623788,
-      -0.4595922519583618,
-      -0.42587489153129554,
-      0.06004098634014539,
-      0.2691225241726361,
-      -0.08397615823868958,
-      0.8413062825528569
+      0.17,
+      0.08,
+      -0.5213709717771637,
+      0.12797073865234618,
+      0.5815354066231716,
+      -0.9851048500722759,
+      -1.9424110119875178,
+      0.23446900159626416,
+      1.2528518371195523,
+      0.1277490016909385,
+      -0.5389841817109068,
+      -0.36512700125751124,
+      0.16976688712622803,
+      0.3014276499494115,
+      -0.08058799009561424,
+      0.8743214893793723
     ],
     "Flip:start": [
-      0.17334664298646102,
-      -0.11044792425660507,
-      -0.49736283880901466,
-      0.3318507994810329,
-      1.0269719021299517,
-      -0.9050372950414501,
-      -1.7962560929623945,
-      0.6696309738958184,
-      1.10227183780215,
-      0.09989036762318383,
-      -0.5070798186348392,
-      -0.3200627470115209,
-      -0.31362138215723206,
-      0.09263630050866091,
-      -0.5655867042354871,
-      0.6810843110348305
+      0.17,
+      0.08,
+      -0.5383410119612481,
+      0.3043087665680188,
+      1.0773784547135183,
+      -1.0014925590484423,
+      -1.591846039588881,
+      0.6224751006910535,
+      1.085297252336527,
+      0.14560414458491117,
+      -0.5627226583526274,
+      -0.2805849298552384,
+      -0.13183558851781185,
+      0.09641449611711156,
+      -0.523701446822844,
+      0.6902801462306611
     ],
     "Dump:end": [
-      0.036677807121592826,
-      -0.15351701867887063,
-      -1.23186031535798,
-      1.0115151425546451,
-      0.8175505724271958,
-      -0.9669933478446722,
-      -1.3763168722562995,
-      -1.0231675194419294,
-      1.3070398696695953,
-      0.39115392712969577,
-      -0.32764352707695027,
-      -0.35448817178164654,
-      0.5928219696557099,
-      -0.6942083228320799,
-      0.5723628479264136,
-      0.7130839421883981
+      0.17,
+      0.08,
+      -1.4942010228534741,
+      0.8866967782889085,
+      0.7360052932139101,
+      -1.035246842538277,
+      -1.5775920316579057,
+      -1.0895748799081901,
+      1.3010696119423069,
+      0.35456041767772356,
+      -0.3779596818089751,
+      -0.1919477536926372,
+      0.8872341860380488,
+      -0.816623270555623,
+      0.6355865214281957,
+      0.674395140269295
     ]
   },
   "home_node": "SideScoop:start",
@@ -311,7 +311,7 @@
     "minimum_duration_s": 2.0
   },
   "reference_validation_execution_mode": "position",
-  "validation_reference": "artifacts/experiments/preset-optimization-20261105/reference-validation.json",
+  "validation_reference": "artifacts/experiments/preset-optimization-20261105/fixed-waist/reference-validation.json",
   "runtime_validation": {
     "prepared_trajectory_version": 4,
     "source_ttl_s": 0.25,
@@ -325,12 +325,16 @@
   },
   "planning_speed_vs_original": 0.5,
   "playback_speed": 1.0,
-  "physics_validation_reference": "artifacts/experiments/preset-optimization-20261105/final-result/result.json",
+  "physics_validation_reference": "artifacts/experiments/preset-optimization-20261105/fixed-waist/final-result/result.json",
   "previous_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
   "required_source_sha256": {
     "src/snowbot_bringup/snowbot_bringup/teleop/snowbot_primitive_replay.py": "cf18baaffc33dbd5ec90e0ad0ced7c4caa35c05902f0a26f4aa8d593e793b00f",
     "tools/deployment/snowbot_vendor/position_session/position_trajectory.h": "0a74117d526cad03387db3f53456d17177d00dec737c70b5a534c44385d49bd4",
     "tools/deployment/snowbot_vendor/position_session/session.patch": "6ef6f83a20033bcebbccff2e9206ffda6f7fd93bd5ba1fe9017030be1391a2b8",
     "tools/deployment/snowbot_vendor/position_session/target.patch": "b4ff3ded5703d245431f4e3c34e40cfd23d8ed3a0ab0faff7893dd17b87d06c6"
+  },
+  "fixed_waist_rad": {
+    "body_joint_1": 0.17,
+    "body_joint_2": 0.08
   }
 }
