@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from snowbot_hardware.parameters import load_parameters, validate_pico_timing, apply_tool_timing, braking_lead, load_mode_config, select_mode_config, mode_config_digest
+from snowbot_hardware.parameters import load_parameters, validate_pico_timing, apply_tool_timing, load_mode_config, select_mode_config, mode_config_digest
 
 
 class RuntimeParameterTests(unittest.TestCase):
@@ -76,13 +76,9 @@ class RuntimeParameterTests(unittest.TestCase):
         session.ingest(*frames,1.28)
         with self.assertRaises(ValueError):session.ingest(*frames,1.31)
 
-    def test_migrated_braking_has_one_source_and_rejects_conflicts(self):
+    def test_braking_configuration_keeps_timing_constraints(self):
         cfg=self.load({'execution':{'target_stream_brake_lead_s':.04}})
-        self.assertEqual(braking_lead(cfg),.04)
-        self.assertEqual(braking_lead(cfg,'0.04'),.04)
-        for legacy in (.12,True,'nan'):
-            with self.assertRaisesRegex(ValueError,'SNOWBOT_BRAKE_LEAD_MOVED'):
-                braking_lead(cfg,legacy)
+        self.assertEqual(cfg['execution']['target_stream_brake_lead_s'],.04)
         with self.assertRaisesRegex(ValueError,'SAMPLE_GAP'):
             apply_tool_timing({'integration_max_sample_gap':.25},
                              self.load({'teleop':{'input_max_age_s':.2}}))

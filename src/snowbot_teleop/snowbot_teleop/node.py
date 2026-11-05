@@ -65,7 +65,8 @@ class PicoNode(RuntimeNode):
         self.declare_parameter('tool_config',str(share/'config/examples/snowbot/bimanual_snowbot_shovel.json'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('model_root',str(Path(get_package_share_directory('snowbot_description'))/'urdf'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('device_backend','kinematic',descriptor=ParameterDescriptor(read_only=True))
-        self.declare_parameter('position_protocol','legacy_guard',descriptor=ParameterDescriptor(read_only=True))
+        if 'position_protocol' in self._parameter_overrides:
+            raise ValueError('SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol')
         self.execution_mode=self.declare_parameter('execution_mode','position',descriptor=ParameterDescriptor(read_only=True)).value
         self.declare_parameter('gripper_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('base_config','',descriptor=ParameterDescriptor(read_only=True))
@@ -80,15 +81,14 @@ class PicoNode(RuntimeNode):
                                   self.get_parameter('command_enabled').value,
                                   pair_max_skew_s=(pico['pair_max_skew_s'] if 'remote_input_timeout_s' in pico else 0.))
         self.cfg=load_mode_config(self.get_parameter('pico_config').value,self.runtime_mode)
-        self.position_contract = self.cfg.get('schema_version') == 2
-        if self.cfg.get('schema_version') not in (1,2):
+        self.position_contract=self.declare_parameter('position_contract',False,descriptor=ParameterDescriptor(read_only=True)).value
+        if self.cfg.get('schema_version') != (2 if self.position_contract else 1):
             raise ValueError('PICO_CONFIG_SCHEMA')
-        if self.cfg.get('simulation_only') is not self.simulation or self.cfg.get('mapping')!=PICO_MAPPING:
+        if self.cfg.get('mapping')!=PICO_MAPPING:
             raise ValueError('PICO_CONFIG_RUNTIME_MODE_MISMATCH')
-        self.backend=self.get_parameter('device_backend').value
-        if (not self.position_contract and not self.simulation or
-                self.backend not in (('kinematic','external_simulation') if self.simulation and self.position_contract else
-                                     ('kinematic',) if self.simulation else ('snowbot_vendor',))):
+        from bindu_runtime.teleop_deployment import execution_backend
+        self.backend=execution_backend(self.runtime_mode,self.get_parameter('device_backend').value,self.execution_mode)
+        if not self.position_contract and self.backend!='kinematic':
             raise ValueError('PICO_ACTUATOR_BACKEND_UNAVAILABLE:'+self.backend)
         self.tool_cfg=load_tool_config(self.get_parameter('tool_config').value)
         if self.position_contract:
@@ -164,7 +164,7 @@ class PicoNode(RuntimeNode):
         if (not math.isfinite(self.prepare_limit_max) or
                 not 0<=self.prepare_limit_max<=self.prepare_position_tolerance):
             raise ValueError('PICO_PREPARE_LIMIT_RECOVERY_CONFIG')
-        if self.simulation or self.get_parameter('position_protocol').value!='session_v3':
+        if self.simulation:
             self.prepare_limit_max=0.
         self.control=PicoControl(initial_load=initial_load,simulation_demo=self.simulation_demo,
                                  max_age=(self.runtime_parameters['teleop']['input_max_age_s'] if self.position_contract
@@ -933,9 +933,6 @@ class PicoNode(RuntimeNode):
         f=self.feedback()
         if not f.healthy:raise RuntimeError('PICO_FEEDBACK_UNAVAILABLE')
         if not f.stopped:raise RuntimeError('PICO_MODE_REQUIRES_STOPPED')
-        if mode=='bimanual_tool' and not self.position_contract and not self.unheld_test and not getattr(self,'independent_grippers',False) and getattr(self,'automatic_close_grippers',False):
-            await self.position_ops.close_grippers(intent,allow_command=intent.operation in ('select_mode','confirm_tool'))
-            self.current(intent)
         if mode=='bimanual_tool' and self.position_contract and self.operator_grasp:
             self.operator_grasp_positions={}
             self.control.virtual=False
@@ -1095,10 +1092,6 @@ class PicoNode(RuntimeNode):
             else:await self.cancel_tool()
             self.current(intent)
             read_only=intent.operation in ('prepare','confirm_tool','follow','select_mode')
-            if (not self.position_contract and getattr(self,'automatic_close_grippers',False) and
-                    not getattr(self,'independent_grippers',False) and not self.unheld_test and
-                    (intent.operation=='confirm_tool' or intent.operation=='select_mode' and intent.value=='bimanual_tool')):
-                read_only=False
             if intent.operation=='prepare':
                 # A targets the configured ready pose; held-node returns use the certified graph.
                 if not self.position_contract and self.control.load!='empty':raise RuntimeError('PICO_PREPARE_REQUIRES_EMPTY')
@@ -1248,22 +1241,6 @@ class PicoNode(RuntimeNode):
         feedback=self.feedback()
         if self.state and not self.state.lease_active and feedback.healthy and feedback.stopped:
             self.handoff_complete=True
-        if self.position_ops and not self.position_contract and not getattr(self,'independent_grippers',False) and not self.unheld_test and self.control.teleop_mode=='bimanual_tool' and feedback.healthy:
-            if (not self.operator_grasp and not self.control.pending and feedback.stopped and
-                    self.control.phase in ('checking','standby','tool_standby') and
-                    feedback.modes[1] in ('closed','virtual')):
-                self.control.virtual=feedback.modes[1]=='virtual'
-            if self.operator_grasp and self.control.phase in ('engaging','following') and self.operator_grasp_positions:
-                try:
-                    for side,position in self.operator_grasp_positions.items():
-                        s=self.position_ops.reading(side)
-                        if (s.state in ('MOVING','STOPPING') or
-                                abs(s.measured_position-position)>self.position_ops.config['position_tolerance']):
-                            raise RuntimeError('PICO_GRASP_POSITION_CHANGED')
-                except RuntimeError as exc:self.control.lock(str(exc),self.now())
-            if (not self.operator_grasp and self.control.phase in ('engaging','following') and
-                    feedback.modes!=('closed','virtual' if self.control.virtual else 'closed')):
-                self.control.lock('PICO_GRASP_POSITION_CHANGED',self.now())
         self.control.update_feedback(feedback,self.now());self.control.tick(self.now())
         if self.control.context_at!=self.last_context_at:
             self.last_context_at=self.control.context_at

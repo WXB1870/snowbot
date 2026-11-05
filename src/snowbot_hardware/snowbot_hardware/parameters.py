@@ -159,20 +159,6 @@ def apply_tool_timing(config, parameters):
     return result
 
 
-def braking_lead(parameters, legacy=None):
-    """Read shared timing; accept an old deployment key only if it agrees."""
-    selected = parameters['execution']['target_stream_brake_lead_s']
-    if legacy not in (None, ''):
-        try:
-            value = float(legacy) if type(legacy) in (str, float, int) else float('nan')
-        except (ValueError, OverflowError):
-            value = float('nan')
-        if value != selected:
-            raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s '
-                             'in parameters_config and remove target_stream_brake_lead_s from the deployment')
-    return selected
-
-
 def select_mode_config(config, mode):
     """Expand a shared teleop/device file for one explicit runtime mode."""
     if mode not in ('real', 'simulation') or not isinstance(config, dict):

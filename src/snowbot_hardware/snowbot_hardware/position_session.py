@@ -5,7 +5,7 @@ import math
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
 from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
-from .parameters import load_parameters, parameters_for, braking_lead
+from .parameters import load_parameters, parameters_for
 
 
 from bindu_runtime.stop_evidence import sampled_nominal_reference
@@ -13,8 +13,8 @@ from bindu_runtime.stop_evidence import sampled_nominal_reference
 
 class PositionSessionIO(SnowbotIO):
     requesting_pause = False
-    trajectory_reference = False
-    target_stream = False
+    trajectory_reference = True
+    target_stream = True
     servo_reference = None
     captured_pause_request = None
 
@@ -29,10 +29,10 @@ class PositionSessionIO(SnowbotIO):
     def stop_arrival_joints(self):
         # A quiet speed sample cannot prove CSP rest while the drive still
         # has position travel left to its fixed, acknowledged hold point.
-        return tuple(self.profile.groups.get('waist', ())) if self.target_stream else ()
+        return tuple(self.profile.groups.get('waist', ()))
 
     def validate_motion(self, motion, now):
-        SourceEnvelope.validate_motion(motion, now, target_stream=self.target_stream)
+        SourceEnvelope.validate_motion(motion, now)
 
     def capture(self, groups):
         if set(groups) != CONTROL_GROUPS:
@@ -45,8 +45,6 @@ class PositionSessionIO(SnowbotIO):
         self.after_capture()
 
     def sampled_reference(self):
-        if not self.trajectory_reference:
-            return None
         sample = self.servo_reference
         if (sample is None or not (self.targets or self.stop_targets) or
                 not 0 <= self.now()-sample[0] <= .02):
@@ -55,9 +53,7 @@ class PositionSessionIO(SnowbotIO):
 
     @property
     def reference_positions(self):
-        if self.trajectory_reference:
-            return self.sampled_reference()[1]
-        return super().reference_positions
+        return self.sampled_reference()[1]
 
     def confirmed_stop_targets(self):
         targets = self.pause_feedback(getattr(self, 'pause_request', None))
@@ -76,26 +72,23 @@ class PositionSessionIO(SnowbotIO):
         previous = self.requesting_pause
         self.requesting_pause = True
         try:
-            if self.trajectory_reference:
-                # PAUSE carries the existing session authority. Its position
-                # fields are only a wire/layout footprint: the servo brakes
-                # from its own reference, and its ACK supplies the hold point.
-                # In particular, do not require a fresh ROS measurement to ask
-                # that a following session stop producing motion.
-                self.reference.clear()
-                if not self.targets:
-                    return  # Pending PAUSE is not renewed on repeated faults.
-                self.stop_requested_at = self.now()
-                target = dict(self.targets)
-                try:
-                    self._send(target, hold=True)
-                except RuntimeError:
-                    self.stop_failures = tuple(sorted(self._groups(target)))
-                else:
-                    self.stop_targets = target
-                self.targets.clear()
-                return
-            return super().stop()
+            # PAUSE carries the existing session authority. Its position
+            # fields are only a wire/layout footprint: the servo brakes
+            # from its own reference, and its ACK supplies the hold point.
+            # In particular, do not require a fresh ROS measurement to ask
+            # that a following session stop producing motion.
+            self.reference.clear()
+            if not self.targets:
+                return  # Pending PAUSE is not renewed on repeated faults.
+            self.stop_requested_at = self.now()
+            target = dict(self.targets)
+            try:
+                self._send(target, hold=True)
+            except RuntimeError:
+                self.stop_failures = tuple(sorted(self._groups(target)))
+            else:
+                self.stop_targets = target
+            self.targets.clear()
         finally:
             self.requesting_pause = previous
 
@@ -118,22 +111,20 @@ class PositionSessionDevices:
         node.declare_parameter('vendor_namespace', '/', descriptor=ParameterDescriptor(read_only=True))
         if node.get_parameter('vendor_namespace').value != '/':
             raise ValueError('SNOWBOT_POSITION_SESSION_ROOT_NAMESPACE_REQUIRED')
+        if 'target_stream_brake_lead_s' in node._parameter_overrides:
+            raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s in parameters_config')
         for key in ('arm_receiver_node', 'mid_receiver_node', 'servo_receiver_node'):
             node.declare_parameter(key, '', descriptor=ParameterDescriptor(read_only=True))
         self.receivers = {key: node.get_parameter(parameter).value or default for key, parameter, default in (
             ('arms', 'arm_receiver_node', '/robot_upperMonitor'),
             ('middle', 'mid_receiver_node', '/dual_arm_control_node'),
             ('head', 'servo_receiver_node', '/servo_node'))}
-        self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode,
-                                   reference_mode=getattr(node, 'snowbot_reference_mode', 0))
-        if self.health.reference_mode == 2:
-            self.trajectory_limits = target_stream_limits({
-                key: node.declare_parameter(key, braking_lead(self.runtime_parameters) if key=='target_stream_brake_lead_s' else default,
-                                            descriptor=ParameterDescriptor(read_only=True)).value
-                for key, default in TARGET_STREAM_LIMIT_DEFAULTS.items()})
-            braking_lead(self.runtime_parameters,self.trajectory_limits['target_stream_brake_lead_s'])
-        self.envelopes = SourceEnvelope(new_session_id(node.now()), node.now,
-                                       target_stream=self.health.reference_mode == 2)
+        self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode)
+        self.trajectory_limits = target_stream_limits({
+            key: node.declare_parameter(key, default,
+                                        descriptor=ParameterDescriptor(read_only=True)).value
+            for key, default in TARGET_STREAM_LIMIT_DEFAULTS.items()})
+        self.envelopes = SourceEnvelope(new_session_id(node.now()), node.now)
         self.sent = {}
         self.target_instance = None
         self.source_identity = None
@@ -145,15 +136,14 @@ class PositionSessionDevices:
                             command_enabled=node.get_parameter('command_enabled').value,
                             simulated=False, check_ready=self.check_ready, check_health=self.check_health)
         self.io.source_motion = None
-        self.io.trajectory_reference = bool(self.health.reference_mode)
-        self.io.target_stream = self.health.reference_mode == 2
-        self.io.supports_rigid_reference = self.health.reference_mode == 2
-        self.io.supports_prepared_replay = self.health.reference_mode == 2
-        self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s'] if self.health.reference_mode == 2 else 0.
+        self.io.trajectory_reference = True
+        self.io.target_stream = True
+        self.io.supports_rigid_reference = True
+        self.io.supports_prepared_replay = True
+        self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s']
         self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
-        self.io.stop_requires_arrival = self.health.reference_mode != 2
-        self.startup_hold_state = ('waiting' if self.io.command_enabled and
-                                   self.health.reference_mode == 2 else 'disabled')
+        self.io.stop_requires_arrival = False
+        self.startup_hold_state = ('waiting' if self.io.command_enabled else 'disabled')
         self.io.after_capture = lambda: self.new_session()
         self.io.pause_feedback = self.health.confirmed_hold
         self.arm_type, self.array_type = PositionSessionCommand, Float64MultiArray
@@ -170,11 +160,9 @@ class PositionSessionDevices:
             topic = '/bindu/position/'+layer+'_state'
             node.create_subscription(PositionSessionState, topic,
                 lambda msg, l=layer, t=topic, r=receiver: self.receive_state(l, t, r, msg), 1)
-        if self.health.reference_mode:
-            node.create_subscription(PositionSessionState, '/bindu/position/servo_receipt', self.receive_receipt, 1)
-        if self.health.reference_mode == 2:
-            from std_srvs.srv import Trigger
-            node.create_service(Trigger, 'execution/held_reference', self.read_held_reference)
+        node.create_subscription(PositionSessionState, '/bindu/position/servo_receipt', self.receive_receipt, 1)
+        from std_srvs.srv import Trigger
+        node.create_service(Trigger, 'execution/held_reference', self.read_held_reference)
 
     def read_held_reference(self, request, reply):
         """Read the confirmed PAUSE point without acquiring or sending anything."""
@@ -277,26 +265,25 @@ class PositionSessionDevices:
             self.io.observe(q, v, stamp, self.node.now(), sample=msg.pdo_sample)
             if msg.session_selected and msg.session == self.envelopes.session:
                 self.takeover_previous_hold = None
-            if self.health.reference_mode:
-                self.io.servo_reference = None
-                sample = getattr(msg, 'sample_time_ns', 0)*1e-9
-                arrays = [getattr(msg, field, ()) for field in
-                          ('reference_position','reference_speed','reference_acceleration')]
-                if (msg.session_selected and msg.session == self.envelopes.session and
-                        getattr(msg, 'reference_mode', 0) == 2 and getattr(msg, 'reference_valid', False) and
-                        getattr(msg, 'output_valid', False) and getattr(msg, 'segment_id', 0) == msg.command_sequence and
-                        0 <= self.node.now()-sample <= .02 and
-                        all(all(math.isfinite(x) for x in values) for values in arrays)):
-                    self.io.servo_reference = (sample, *[dict(zip(CONTROL_NAMES, values)) for values in arrays])
-                    source = self.sent.get(msg.command_sequence)
-                    if (source is not None and msg.command_sequence > self.applied_sequence and
-                            getattr(msg, 'trajectory_phase', 0) in (2, 3, 4, 5) and
-                            source[0]['source_stamp_ns'] <= msg.sample_time_ns < source[0]['expires_at_ns']):
-                        self.applied_sequence = msg.command_sequence
-                        self.node.event('TARGET_APPLIED', 'SNOWBOT_TARGET:'+json.dumps(dict(
-                            session=msg.session, sequence=msg.command_sequence,
-                            sample_time_ns=msg.sample_time_ns), separators=(',', ':')),
-                            command_id=source[2])
+            self.io.servo_reference = None
+            sample = getattr(msg, 'sample_time_ns', 0)*1e-9
+            arrays = [getattr(msg, field, ()) for field in
+                      ('reference_position','reference_speed','reference_acceleration')]
+            if (msg.session_selected and msg.session == self.envelopes.session and
+                    getattr(msg, 'reference_mode', 0) == 2 and getattr(msg, 'reference_valid', False) and
+                    getattr(msg, 'output_valid', False) and getattr(msg, 'segment_id', 0) == msg.command_sequence and
+                    0 <= self.node.now()-sample <= .02 and
+                    all(all(math.isfinite(x) for x in values) for values in arrays)):
+                self.io.servo_reference = (sample, *[dict(zip(CONTROL_NAMES, values)) for values in arrays])
+                source = self.sent.get(msg.command_sequence)
+                if (source is not None and msg.command_sequence > self.applied_sequence and
+                        getattr(msg, 'trajectory_phase', 0) in (2, 3, 4, 5) and
+                        source[0]['source_stamp_ns'] <= msg.sample_time_ns < source[0]['expires_at_ns']):
+                    self.applied_sequence = msg.command_sequence
+                    self.node.event('TARGET_APPLIED', 'SNOWBOT_TARGET:'+json.dumps(dict(
+                        session=msg.session, sequence=msg.command_sequence,
+                        sample_time_ns=msg.sample_time_ns), separators=(',', ':')),
+                        command_id=source[2])
         except (ValueError, RuntimeError) as exc:
             self.io.invalid = str(exc)
             detail=str(exc)
@@ -334,17 +321,15 @@ class PositionSessionDevices:
 
     def check_health(self, groups, *, acquiring=False):
         self._check_session_health(groups, acquiring=acquiring)
-        if self.health.reference_mode:
-            if self.target_fault and not (self.io.requesting_pause or self.io.sending_hold):
-                if not (acquiring and self._completed_pause_rejection()):
-                    raise RuntimeError(self.target_fault)
+        if self.target_fault and not (self.io.requesting_pause or self.io.sending_hold):
+            if not (acquiring and self._completed_pause_rejection()):
+                raise RuntimeError(self.target_fault)
 
     def _completed_pause_rejection(self):
         # An expired repeat of a completed PAUSE cannot poison the next capture.
         # Keep the rejection recorded; only a successful capture opens a new session.
         source = self.sent.get(self.envelopes.sequence)
-        if (self.health.reference_mode != 2 or
-                self.target_fault != 'SNOWBOT_TARGET_REJECTED:duplicate_or_expired_frame' or
+        if (self.target_fault != 'SNOWBOT_TARGET_REJECTED:duplicate_or_expired_frame' or
                 source is None or self.io.targets or self.io.stop_targets or self.io.stop_failures):
             return False
         metadata = source[0]
@@ -356,8 +341,7 @@ class PositionSessionDevices:
             self.io.pause_targets and self.io.confirmed_stop_targets() == self.io.pause_targets)
 
     def new_session(self):
-        self.envelopes = SourceEnvelope(new_session_id(self.node.now(), self.envelopes.session), self.node.now,
-                                       target_stream=self.health.reference_mode == 2)
+        self.envelopes = SourceEnvelope(new_session_id(self.node.now(), self.envelopes.session), self.node.now)
         self.io.source_motion = None
         self.sent = {}
         self.target_instance = None
@@ -395,8 +379,6 @@ class PositionSessionDevices:
 
     def advance_session(self):
         """Observe restart/rejection without gating subsequent target production."""
-        if not self.health.reference_mode:
-            return
         _, servo = self.health.states.get('servo', (0., None))
         self._settle_takeover(servo)
         if servo is not None:
@@ -408,7 +390,7 @@ class PositionSessionDevices:
                 self.target_fault = 'SNOWBOT_TARGET_REJECTED:'+servo.reason
 
     def check_ready(self, groups):
-        if self.health.reference_mode == 2 and self.io.sending_hold:
+        if self.io.sending_hold:
             # This is a stop-only request, never a takeover or target refresh.
             # Keep the known boot/instances and all endpoint/authority checks;
             # the servo still validates its local PDO and the stop trajectory.
@@ -495,11 +477,10 @@ class PositionSessionDevices:
 
     def brake_before_source_expiry(self, engine):
         """Request PAUSE before a lost target producer's original TTL expires."""
-        if self.health.reference_mode != 2 or not engine.active or engine.stopping:
+        if not engine.active or engine.stopping:
             return
         sent = self.sent.get(self.envelopes.sequence)
-        lead_ns = round(self.trajectory_limits.get('target_stream_brake_lead_s',
-            TARGET_STREAM_LIMIT_DEFAULTS['target_stream_brake_lead_s'])*1e9)
+        lead_ns = round(self.runtime_parameters['execution']['target_stream_brake_lead_s']*1e9)
         if sent and sent[0]['operation'] != 2:
             # Keep the ordinary execution path to one tick. The extra dispatch
             # is needed only when the preceding packet is about to be fenced.
@@ -535,23 +516,21 @@ class PositionSessionDevices:
 
     def _send_packet(self, groups, target):
         # Validate before minting an envelope, so rejected requests cannot renew.
-        if self.health.reference_mode:
-            self._settle_takeover()
+        self._settle_takeover()
         self.check_ready(groups)
         if set(target) != set(CONTROL_NAMES) or any(not math.isfinite(target[n]) or
                 not self.io.profile.limits[n][0] <= target[n] <= self.io.profile.limits[n][1]
                 for n in CONTROL_NAMES):
             raise RuntimeError('SNOWBOT_TARGET_LAYOUT_OR_LIMIT')
         identity = None
-        if self.health.reference_mode:
-            motion = self.io.source_motion
-            # PAUSE may follow revocation/clearing of the Motion. Retain the last
-            # source identity in this session; stopping never invents ownership.
-            identity = ((motion.command_id, motion.lease_id, motion.epoch, self.io.profile.digest)
-                        if motion is not None else self.source_identity if self.io.sending_hold else None)
-            if identity is None:
-                raise RuntimeError('SNOWBOT_SOURCE_IDENTITY_LAYOUT')
-        if self.health.reference_mode and self.takeover_pending is not None and not self.io.sending_hold:
+        motion = self.io.source_motion
+        # PAUSE may follow revocation/clearing of the Motion. Retain the last
+        # source identity in this session; stopping never invents ownership.
+        identity = ((motion.command_id, motion.lease_id, motion.epoch, self.io.profile.digest)
+                    if motion is not None else self.source_identity if self.io.sending_hold else None)
+        if identity is None:
+            raise RuntimeError('SNOWBOT_SOURCE_IDENTITY_LAYOUT')
+        if self.takeover_pending is not None and not self.io.sending_hold:
             return  # Retain the latest original Motion in IO; no identity/TTL renewal.
         metadata = self.envelopes.command(self.io.source_motion, pause=self.io.sending_hold)
         if metadata is None:
@@ -561,71 +540,65 @@ class PositionSessionDevices:
         msg = self.arm_type()
         for name, value in metadata.items():
             setattr(msg.meta, name, value)
-        if self.health.reference_mode:
-            self.source_identity = identity
-            msg.meta.reference_mode = self.health.reference_mode
-            msg.meta.source_command_id, msg.meta.lease_id, msg.meta.epoch, msg.meta.profile_hash = identity
-            # Version 2 is a target recipe, never a curve. The servo owns its
-            # local switching time; empty curve fields reject legacy packets.
-            msg.trajectory.version = (3 if not self.io.sending_hold and
-                                      getattr(self.io.source_motion,'rigid_reference',False) else 2)
-            msg.trajectory.segment_id = metadata['sequence']
-            prepared = getattr(self.io, 'prepared_replay', None)
-            if prepared is not None and not self.io.sending_hold:
-                msg.trajectory.version = 4 if prepared.inner_reference else 5
-                msg.trajectory.effective_at_ns = round(prepared.effective*1e9)
-                if self.io.source_motion.mode != 'trajectory_heartbeat':
-                    self.replay_segment_id = metadata['sequence']
-                    # Existing Bernstein wire representation; never refit q.
-                    order = [self.io.source_motion.names.index(n) for n in CONTROL_NAMES]
-                    for start, duration, source_duration, elapsed, controls in prepared.description:
-                        msg.trajectory.piece_start.append(start)
-                        msg.trajectory.duration.append(duration)
-                        msg.trajectory.source_duration.append(source_duration)
-                        msg.trajectory.source_elapsed.append(elapsed)
-                        for i in order:
-                            msg.trajectory.control_count.append(len(controls[i]))
-                            msg.trajectory.controls.extend(controls[i])
-                msg.trajectory.segment_id = self.replay_segment_id
-            for field, getter, ceiling in (('max_velocity', self.io.profile.speed, self.trajectory_limits['trajectory_max_velocity']),
-                    ('max_acceleration', self.io.profile.acceleration, self.trajectory_limits['trajectory_max_acceleration']),
-                    ('max_jerk', self.io.profile.jerk, self.trajectory_limits.get('trajectory_max_jerk', 162.))):
-                setattr(msg.trajectory, field, [min(ceiling, getter(n)) for n in CONTROL_NAMES])
+        self.source_identity = identity
+        msg.meta.reference_mode = 2
+        msg.meta.source_command_id, msg.meta.lease_id, msg.meta.epoch, msg.meta.profile_hash = identity
+        # Version 2 is a target recipe, never a curve. The servo owns its
+        # local switching time; empty curve fields reject legacy packets.
+        msg.trajectory.version = (3 if not self.io.sending_hold and
+                                  getattr(self.io.source_motion,'rigid_reference',False) else 2)
+        msg.trajectory.segment_id = metadata['sequence']
+        prepared = getattr(self.io, 'prepared_replay', None)
+        if prepared is not None and not self.io.sending_hold:
+            msg.trajectory.version = 4 if prepared.inner_reference else 5
+            msg.trajectory.effective_at_ns = round(prepared.effective*1e9)
+            if self.io.source_motion.mode != 'trajectory_heartbeat':
+                self.replay_segment_id = metadata['sequence']
+                # Existing Bernstein wire representation; never refit q.
+                order = [self.io.source_motion.names.index(n) for n in CONTROL_NAMES]
+                for start, duration, source_duration, elapsed, controls in prepared.description:
+                    msg.trajectory.piece_start.append(start)
+                    msg.trajectory.duration.append(duration)
+                    msg.trajectory.source_duration.append(source_duration)
+                    msg.trajectory.source_elapsed.append(elapsed)
+                    for i in order:
+                        msg.trajectory.control_count.append(len(controls[i]))
+                        msg.trajectory.controls.extend(controls[i])
+            msg.trajectory.segment_id = self.replay_segment_id
+        for field, getter, ceiling in (('max_velocity', self.io.profile.speed, self.trajectory_limits['trajectory_max_velocity']),
+                ('max_acceleration', self.io.profile.acceleration, self.trajectory_limits['trajectory_max_acceleration']),
+                ('max_jerk', self.io.profile.jerk, self.trajectory_limits.get('trajectory_max_jerk', 162.))):
+            setattr(msg.trajectory, field, [min(ceiling, getter(n)) for n in CONTROL_NAMES])
         msg.command.l_arm_position = [float(target[n]) for n in GROUPS['left_arm']]
         msg.command.r_arm_position = [float(target[n]) for n in GROUPS['right_arm']]
         msg.waist_position = [float(target[n]) for n in GROUPS['waist']]
-        if self.health.reference_mode:
-            instance = self.health.states['servo'][1].instance_id
-            self.target_instance = instance
-            if metadata['operation'] == 1:
-                self.takeover_pending = (dict(metadata), instance)
-                obs = self.health.observation
-                self.takeover_previous_hold = (
-                    (obs.boot_id, obs.session, obs.command_sequence, instance, metadata['expires_at_ns'], obs.session_reason)
-                    if obs.session != metadata['session'] and (obs.session_reason >= 2 or
-                    obs.session_selected and obs.session_reason == 1 and obs.hold_valid and
-                    getattr(obs, 'trajectory_phase', 0) == 4 and
-                    getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False))
-                    else None)
-            elif metadata['operation'] == 2:
-                self.takeover_pending = None
-            self.sent[metadata['sequence']] = (metadata, instance, msg.meta.source_command_id)
-            while len(self.sent) > 32:
-                del self.sent[next(iter(self.sent))]
+        instance = self.health.states['servo'][1].instance_id
+        self.target_instance = instance
+        if metadata['operation'] == 1:
+            self.takeover_pending = (dict(metadata), instance)
+            obs = self.health.observation
+            self.takeover_previous_hold = (
+                (obs.boot_id, obs.session, obs.command_sequence, instance, metadata['expires_at_ns'], obs.session_reason)
+                if obs.session != metadata['session'] and (obs.session_reason >= 2 or
+                obs.session_selected and obs.session_reason == 1 and obs.hold_valid and
+                getattr(obs, 'trajectory_phase', 0) == 4 and
+                getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False))
+                else None)
+        elif metadata['operation'] == 2:
+            self.takeover_pending = None
+        self.sent[metadata['sequence']] = (metadata, instance, msg.meta.source_command_id)
+        while len(self.sent) > 32:
+            del self.sent[next(iter(self.sent))]
         self.publish_attempted = True
         self.publishers['arms'].publish(msg)
-        if self.health.reference_mode:
-            mapping = {k: metadata[k] for k in ('session', 'sequence', 'operation', 'source_stamp_ns', 'expires_at_ns')}
-            mapping.update(lease_id=msg.meta.lease_id, epoch=msg.meta.epoch,
-                           execution_mode=self.health.execution_mode, reference_mode=2,
-                           target_recipe_version=msg.trajectory.version,
-                           rigid_reference=msg.trajectory.version==3)
-            self.node.event('TARGET_SENT', 'SNOWBOT_TARGET:'+json.dumps(mapping, separators=(',', ':')),
-                            command_id=msg.meta.source_command_id)
+        mapping = {k: metadata[k] for k in ('session', 'sequence', 'operation', 'source_stamp_ns', 'expires_at_ns')}
+        mapping.update(lease_id=msg.meta.lease_id, epoch=msg.meta.epoch,
+                       execution_mode=self.health.execution_mode, reference_mode=2,
+                       target_recipe_version=msg.trajectory.version,
+                       rigid_reference=msg.trajectory.version==3)
+        self.node.event('TARGET_SENT', 'SNOWBOT_TARGET:'+json.dumps(mapping, separators=(',', ':')),
+                        command_id=msg.meta.source_command_id)
         if self.io.sending_hold:
             self.io.pause_request = (metadata['session'], metadata['sequence'],
                                      self.health.boot, self.health.sample)
             self.io.pause_targets = None
-
-    def guarded_array(self, values, hold=False):
-        raise RuntimeError('GRIPPER_INDEPENDENT_CALIBRATION_AND_PROTOCOL_REQUIRED')

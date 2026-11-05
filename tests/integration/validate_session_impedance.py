@@ -126,7 +126,7 @@ def main():
         for name in names:
             text=(tests/(name+'.cpp')).read_text()
             if name=='test_session_impedance':
-                text=text.replace(' void start(',TARGET_FIELDS+'\n void start(',1)
+                text=text.replace('\n};\n\n// PRODUCTION_POLL_METHODS',TARGET_FIELDS+'\n};\n\n// PRODUCTION_POLL_METHODS',1)
             poll_fixture='// PRODUCTION_POLL_METHODS' in text
             if name=='test_session_impedance' and args.require_production_poll and not poll_fixture:
                 raise RuntimeError('PRODUCTION_POLL_FIXTURE_REQUIRED')

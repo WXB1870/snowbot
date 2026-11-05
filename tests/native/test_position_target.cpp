@@ -82,24 +82,24 @@ void stale_and_invalid(){
 }
 void target_pause_window(){
  using namespace bindu::execution;
- static_assert(maximum_ttl==200000000&&maximum_target_ttl==400000000&&maximum_target_pause_ttl==2000000000LL);
+ static_assert(maximum_target_ttl==400000000&&maximum_target_pause_ttl==2000000000LL);
  const int64_t now=1000000000;Meta take{44,1,now,now+200000000,1};assert(fresh(take,now));
- auto over=take;++over.expires;assert(!fresh(over,now,maximum_target_pause_ttl));
+ auto over=take;over.expires=over.stamp+maximum_target_ttl+1;assert(!fresh(over,now,maximum_target_pause_ttl));
  auto target=take;target.expires=target.stamp+maximum_target_ttl;
- assert(!fresh(target,now,maximum_target_pause_ttl));
+ assert(fresh(target,now,maximum_target_pause_ttl));
  assert(fresh(target,target.expires-1,maximum_target_pause_ttl,maximum_target_ttl));
  assert(!fresh(target,target.expires,maximum_target_pause_ttl,maximum_target_ttl));
  auto target_over=target;++target_over.expires;assert(!fresh(target_over,now,maximum_target_pause_ttl,maximum_target_ttl));
- Gate target_gate;assert(!target_gate.accepts(target,now,now,maximum_target_pause_ttl));
+ Gate target_gate;
  assert(target_gate.accepts(target,now,now,maximum_target_pause_ttl,maximum_target_ttl));target_gate.commit(target,now,now);
  const auto target_deadline=target_gate.deadline();
  for(unsigned i=0;i<400;++i){assert(target_gate.live(now+i*1000000));assert(target_gate.deadline()==target_deadline);}
  assert(!target_gate.live(target_deadline));assert(!target_gate.accepts(target,now+10000000,now+10000000,maximum_target_pause_ttl,maximum_target_ttl));
  assert(target_gate.deadline()==target_deadline);
- Meta pause{44,2,now+20000000,now+2020000000,2};assert(!fresh(pause,pause.stamp));assert(fresh(pause,pause.stamp,maximum_target_pause_ttl));
+ Meta pause{44,2,now+20000000,now+2020000000,2};assert(fresh(pause,pause.stamp));assert(fresh(pause,pause.stamp,maximum_target_pause_ttl));
  assert(!fresh(pause,pause.expires,maximum_target_pause_ttl));auto too_long=pause;++too_long.expires;assert(!fresh(too_long,too_long.stamp,maximum_target_pause_ttl));
  Gate gate;assert(gate.accepts(take,now,now));gate.commit(take,now,now);
- assert(!gate.accepts(pause,pause.stamp,pause.stamp));assert(gate.accepts(pause,pause.stamp,pause.stamp,maximum_target_pause_ttl));gate.commit(pause,pause.stamp,pause.stamp);
+ assert(gate.accepts(pause,pause.stamp,pause.stamp,maximum_target_pause_ttl));gate.commit(pause,pause.stamp,pause.stamp);
  const auto deadline=gate.deadline();for(unsigned i=0;i<1000;++i){assert(fresh(pause,pause.stamp+i*1000000,maximum_target_pause_ttl));assert(gate.deadline()==deadline);}assert(deadline==pause.expires);
  unsigned feasible=0,impossible=0;double longest=0.;Wire w;w.segment_id=2;
  Limits l;l.lower=lower[0];l.upper=upper[0];l.velocity=.25;l.acceleration=.5;l.jerk=162;
@@ -113,7 +113,7 @@ void target_pause_window(){
  }
  assert(feasible>1000&&impossible>0);
  TargetSnapshot unsafe;unsafe.q=seed();unsafe.q[0]=upper[0]-.0001;unsafe.v[0]=.25;unsafe.valid=true;unsafe.effective_ros=unsafe.effective_steady=pause.stamp+10000000;rejects([&]{TrajectoryQueue::prepare_target(w,pause,unsafe,unsafe.q);});
- std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 400ms, legacy 200ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
+ std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 400ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
 }
 
 void allowed_limit_seeds(){
@@ -391,4 +391,16 @@ void independent_waist_timing(){
  assert(queue.phase(source.stamp+1900000000)==4&&!allocated&&!deleted);
  std::cout<<"PASS independent waist timing: standalone group curves, early waist hold, C2 adoption, limits, original deadline/PAUSE and zero periodic allocation\n";
 }
-int main(int argc,char** argv){if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+void check_prepared_replay_recipes(){
+ const auto measured=seed();Meta source{7,1,1000000000,1400000000,1};TargetSnapshot snapshot;
+ for(unsigned version:{4u,5u}){
+  Wire wire;wire.version=version;wire.segment_id=1;wire.effective_at_ns=1010000000;
+  wire.piece_start={0.};wire.duration=wire.source_duration={1.};wire.source_elapsed={0.};
+  wire.control_count.assign(16,6);for(double q:measured)wire.controls.insert(wire.controls.end(),6,q);
+  auto result=TrajectoryQueue::prepare_replay(wire,source,snapshot,.25,.5,162.);
+  assert(result->replay&&result->inner_reference==(version==4));
+  const auto sample=result->segment->sample(.5);for(unsigned i=0;i<16;++i)assert(std::abs(sample.q[i]-measured[i])<1e-12);
+  wire.version=1;rejects([&]{TrajectoryQueue::prepare(wire,source,.25,.5,162.);});
+ }
+}
+int main(int argc,char** argv){check_prepared_replay_recipes();if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}

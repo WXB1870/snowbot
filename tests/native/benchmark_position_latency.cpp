@@ -8,18 +8,11 @@
 using namespace position_session;
 using namespace bindu::execution;
 struct Wire {
- unsigned version=1;uint64_t segment_id=0;int64_t effective_at_ns=0;
+ unsigned version=2;uint64_t segment_id=0;int64_t effective_at_ns=0;
  std::vector<double> piece_start,duration,source_duration,source_elapsed,controls;
  std::vector<unsigned char> control_count;
  std::array<double,16> max_velocity{},max_acceleration{},max_jerk{};
 };
-Wire wire(const PreparedSegment& segment,uint64_t id,int64_t effective){
- Wire w;w.segment_id=id;w.effective_at_ns=effective;w.max_velocity.fill(.25);w.max_acceleration.fill(.5);w.max_jerk.fill(162);
- for(const auto& d:segment.describe()){
-  w.piece_start.push_back(d.start);w.duration.push_back(d.duration);w.source_duration.push_back(d.source_duration);w.source_elapsed.push_back(d.source_elapsed);
-  for(const auto& axis:d.controls){w.control_count.push_back(axis.size());w.controls.insert(w.controls.end(),axis.begin(),axis.end());}
- }return w;
-}
 int main(int argc,char** argv){
  if(argc!=6)return 2;
  const int period=std::stoi(argv[1]),jitter=std::stoi(argv[2]),budget=std::stoi(argv[3]),delay=std::stoi(argv[4]),ack=std::stoi(argv[5]);
@@ -29,7 +22,7 @@ int main(int argc,char** argv){
  const int64_t origin=1000000000;uint64_t sequence=0,accepted=0,rejected=0,merged=0,inputs=0;
  int next=0,ready=-1,ack_until=0;bool has_pending=false,has_reference=false,pause_sent=false;
  Meta source{},pending_source{};std::unique_ptr<TrajectoryQueue::Prepared> pending;
- std::unique_ptr<const PreparedSegment> upper,pending_upper;[[maybe_unused]] int64_t upper_effective=0,pending_upper_effective=0;uint64_t sampled_id=0;
+ uint64_t sampled_id=0;
  double sum_error=0,max_error=0,axis0_error=0,axis7_error=0,waist_error=0,max_v=0,max_a=0,max_j=0,continuity_q=0,continuity_v=0,continuity_a=0;
  size_t error_count=0,expired_samples=0,constant_samples=0,constant_rest_samples=0,constant_restarts=0;double constant_sum_v=0,constant_sum_v2=0,constant_min_v=1,constant_max_v=-1;bool constant_was_rest=false;int first_nonzero_input=-1;double reverse_ms=-1,first_motion_ms=-1,stop_ms=-1;
  std::cout<<std::setprecision(12);
@@ -48,19 +41,12 @@ int main(int argc,char** argv){
    next+=period+(jitter?((inputs%4==0)?4:(inputs%4==1?-3:inputs%4==2?2:-3)):0);
   }
   if(tick==4000){has_pending=true;pause_sent=true;
-#ifdef TARGET_STREAM
    pending_source={1,++sequence,now,now+2000000000LL,2};
-#else
-   pending_source={1,++sequence,now,now+200000000,2};
-#endif
   }
   if(pending && tick>=ready){
    const char* error=queue.commit(*pending,now,now,measured,speed);
    if(error){++rejected;std::cout<<"REJECT "<<tick<<' '<<error<<'\n';}
    else {++accepted;has_reference=true;
-#ifndef TARGET_STREAM
-    upper=std::move(pending_upper);upper_effective=pending_upper_effective;
-#endif
     std::cout<<"ACCEPT "<<source.sequence<<' '<<(pending->effective-source.stamp)*1e-6<<' '<<(pending->effective-now)*1e-6<<' '<<unsigned(source.operation)<<'\n';}
    pending.reset();queue.reclaim();ack_until=tick+ack;
   }
@@ -68,18 +54,9 @@ int main(int argc,char** argv){
    has_pending=false;source=pending_source;
    const auto began=std::chrono::steady_clock::now();
    try{
-#ifdef TARGET_STREAM
     TargetSnapshot snapshot;if(!queue.snapshot(now,now,source.operation,budget*1000000LL,measured,snapshot))throw std::runtime_error("snapshot");
     Wire w;w.version=2;w.segment_id=source.sequence;w.max_velocity.fill(.25);w.max_acceleration.fill(.5);w.max_jerk.fill(162);
     pending=TrajectoryQueue::prepare_target(w,source,snapshot,goal);
-#else
-    JointState state;state.q.assign(measured.begin(),measured.end());state.v.resize(16);state.a.resize(16);
-    const auto effective=now+budget*1000000LL;
-    if(upper)state=upper->sample((effective-upper_effective)*1e-9);
-    auto segment=source.operation==2?PreparedSegment::stop(limits,state,0.,(source.expires-effective)*1e-9):PreparedSegment::target(limits,state,std::vector<double>(goal.begin(),goal.end()),0.,30.,5.);
-    pending=TrajectoryQueue::prepare(wire(segment,source.sequence,effective),source);
-    pending_upper=std::make_unique<const PreparedSegment>(std::move(segment));pending_upper_effective=effective;
-#endif
     const auto generation=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count();
     std::cout<<"GENERATE "<<generation<<'\n';
     ready=tick+std::max(1,int(std::ceil(generation)))+delay;

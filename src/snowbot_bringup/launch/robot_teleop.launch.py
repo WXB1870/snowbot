@@ -12,16 +12,15 @@ def generate_launch_description():
     share = Path(get_package_share_directory('snowbot_bringup'))
     defaults = {'runtime_mode': 'simulation', 'robot_config': str(share/'config/examples/snowbot/robot_snowbot.json'),
                 'namespace': 'bindu_teleop', 'run_id': uuid.uuid4().hex,
-                'device_backend': 'kinematic', 'side': 'left', 'tool_input_source': 'tool_pose',
+                'device_backend': '', 'side': 'left', 'tool_input_source': 'tool_pose',
                 'output': '/tmp/bindu-runs', 'recording_mode': 'compact',
                 'description_enabled': 'false', 'tool_display_enabled': 'true',
                 'pico_enabled': 'false', 'pico_simulation_demo': 'false', 'pico_config': str(share/'config/examples/snowbot/pico_snowbot_sim.json'),
-                'single_arm_enabled':'true','recorder_enabled':'true','position_contract':'false',
-                'command_enabled':'false','vendor_namespace':'/snowbot','position_protocol':'legacy_guard','execution_mode':'position','parameters_config':'','gripper_config':'','physics_config':'','base_config':'',
+                'single_arm_enabled':'true','recorder_enabled':'true',
+                'command_enabled':'false','vendor_namespace':'/','execution_mode':'position','parameters_config':'','gripper_config':'','physics_config':'','base_config':'',
                 'arm_receiver_node':'','servo_receiver_node':'','mid_receiver_node':'',
                 'vr_enabled': 'false', 'input_timing_enabled':'false', 'host': '127.0.0.1', 'port': '8012',
                 'cert_file': '', 'key_file': ''}
-    defaults.update({key:('' if key=='target_stream_brake_lead_s' else str(value))
-                     for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
+    defaults.update({key:str(value) for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]
                              + [OpaqueFunction(function=assemble)])

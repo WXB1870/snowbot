@@ -380,7 +380,7 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
 def replay_follow_limits(config, mode):
     from bindu_runtime.teleop_deployment import apply_execution_tracking
     from bindu_contracts.teleoperation import joint_reference_limits
-    selected = apply_execution_tracking(config, mode, real=True, position_contract=True)
+    selected = apply_execution_tracking(config, mode)
     default = selected.get('max_reference_error', .15) if mode == 'impedance' else .10
     overrides = selected.get('joint_reference_error_limits', {}) if mode == 'impedance' else {}
     return dict(zip(NAMES, joint_reference_limits(NAMES, default, overrides)))

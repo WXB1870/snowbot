@@ -102,7 +102,7 @@ Tracker ready_tracker(){
  assert(t.fresh(tracker_ros,tracker_steady));return t;
 }
 void check_ros_feedback_budget(){
- static_assert(ros_feedback_timeout_ns==40*ms && maximum_ttl==200*ms);
+ static_assert(ros_feedback_timeout_ns==40*ms && maximum_target_ttl==400*ms);
  for(const auto delay:{21*ms,39*ms,40*ms,41*ms}){
   const bool expected=delay<=40*ms;TrackerObservation m;Tracker receipt,progress;
   receive_tracker(receipt,m,1,tracker_ros-ms,tracker_steady-ms,delay);
@@ -138,9 +138,9 @@ void check_ros_feedback_budget(){
  auto t=ready_tracker();assert(!t.fresh(tracker_ros-1,tracker_steady) && !t.fresh(tracker_ros,tracker_steady-1));
  TrackerObservation m;receive_tracker(t,m,2,tracker_ros+41*ms,tracker_steady+41*ms);
  assert(!t.fresh(tracker_ros+41*ms,tracker_steady+41*ms)); // Duplicate PDO cannot renew progress.
- Meta command{1,1,tracker_ros,tracker_ros+200*ms,1};assert(fresh(command,tracker_ros));
- assert(!fresh(command,tracker_ros+200*ms));++command.expires;assert(!fresh(command,tracker_ros));
- std::cout<<"PASS ROS feedback 40ms boundaries; raw PDO 20ms, WKC/Fault/validity/sequence/clocks and command TTL200ms preserved\n";
+ Meta command{1,1,tracker_ros,tracker_ros+400*ms,1};assert(fresh(command,tracker_ros));
+ assert(!fresh(command,tracker_ros+400*ms));++command.expires;assert(!fresh(command,tracker_ros));
+ std::cout<<"PASS ROS feedback 40ms boundaries; raw PDO 20ms, WKC/Fault/validity/sequence/clocks and command TTL400ms preserved\n";
 }
 } // namespace
 
@@ -159,20 +159,6 @@ int main(){
  Meta restart{2,1,1230000000,1400000000,1};assert(gate.accepts(restart,1230000000,1230000000));gate.commit(restart,1230000000,1230000000);m.operation=1;m.stamp=1410000000;m.expires=1500000000;assert(!gate.accepts(m,1410000000,1410000000));
  gate.interrupt();Meta old_session=restart;old_session.sequence=2;old_session.stamp=1410000000;old_session.expires=1500000000;
  assert(!gate.accepts(old_session,1410000000,1410000000));Meta new_session{3,1,1410000000,1500000000,1};assert(gate.accepts(new_session,1410000000,1410000000));
- Follower f;std::array<double,joint_count> q{};q[0]=.4;q[1]=.2;q[8]=-.2;f.seed(q);q[0]=.8;assert(f.set(q));assert(f.step(.001));assert(f.q[0]==.4);double previous=f.q[0],velocity=0;
- for(int i=0;i<4000;++i){assert(f.step(.001));assert(std::abs(f.v[0])<=f.vmax+1e-9);assert(std::abs(f.v[0]-velocity)<=f.amax*.001+1e-9);assert(std::abs(f.q[0]-previous)<=f.vmax*.001+1e-9);previous=f.q[0];velocity=f.v[0];if(i==100){q[0]=.6;f.set(q);assert(f.q[0]==previous);}}
- // Nonzero waist seeds and continuous retargets retain the same state.
- Follower coupled;std::array<double,joint_count> seed{};seed[14]=.12;seed[15]=-.08;coupled.seed(seed);
- auto goal=seed;goal[0]+=.01;goal[7]+=.10;goal[14]+=.04;assert(coupled.set(goal));
- assert(coupled.step(.001));
- for(unsigned cycle=0;cycle<200;++cycle){assert(coupled.step(.001));
-  assert(std::abs((coupled.q[0]-seed[0])/.01-(coupled.q[7]-seed[7])/.10)<1e-10);
-  assert(std::abs((coupled.q[14]-seed[14])/.04-(coupled.q[7]-seed[7])/.10)<1e-10);
- }
- for(unsigned cycle=0;cycle<3000;++cycle){auto before=coupled.q;auto speed=coupled.v;
-  if(cycle%200==0){goal=seed;goal[0]+=(cycle%400?-.3:.3);goal[7]+=(cycle%400?.1:-.1);goal[15]+=.1;assert(coupled.set(goal));assert(coupled.v==speed&&coupled.q==before);}
-  assert(coupled.step(.001));for(unsigned i=0;i<joint_count;++i){assert(std::abs(coupled.v[i])<=coupled.vmax+1e-10);assert(std::abs(coupled.v[i]-speed[i])<=coupled.amax*.001+1e-10);assert(std::abs(coupled.q[i]-before[i])<=coupled.vmax*.001+1e-10);}
- }
  Output selected;selected.selected=true;selected.policy=2;selected.session=90;selected.sequence=1;selected.operation=1;selected.deadline=1200000000;
  Watchdog isolation;isolation.evaluate(selected,o,1000000000);
  for(unsigned i=0;i<20;++i){assert(isolation.motor_enabled(false,true,i)==bool(controlled_mask&(1u<<i)));assert(!isolation.motor_enabled(false,false,i));}
@@ -182,7 +168,7 @@ int main(){
  assert(csp_speed_counts(6.28318530717958647692)==65536);
  assert(std::abs(csp_radians(262144)-6.28318530717958647692)<1e-12);
  assert(std::abs(csp_radians(csp_counts(.1234))-.1234)<=.5/csp_counts_per_rad);
- assert(!f.step(.1));Interval clock;clock.reset(1000000000);assert(std::abs(clock.tick(1001000000)-.001)<1e-12);assert(clock.tick(1001000000)<0);
+ Interval clock;clock.reset(1000000000);assert(std::abs(clock.tick(1001000000)-.001)<1e-12);assert(clock.tick(1001000000)<0);
  Output p;p.selected=true;p.policy=2;p.operation=1;p.session=1;p.sequence=1;p.admission_generation=1;p.deadline=1100000000;p.q.fill(.3);Watchdog w;w.evaluate(p,o,1000000000);assert(!w.disabled&&w.reason==OK);
  o.sampled_ns=1100000000;w.evaluate(p,o,1100000000);assert(w.reason==EXPIRED&&!w.disabled&&w.output.q[0]==.2f);
  o.position[0]=.6f;o.sampled_ns=1101000000;w.evaluate(p,o,1101000000);assert(w.output.q[0]==.2f); // Capture once, not drifting feedback.

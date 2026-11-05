@@ -7,21 +7,22 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 from bindu_contracts.runtime_mode import resolve_mode
-from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
+from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits, execution_backend
 
 
 def assemble(context):
     value = lambda name, default='': LaunchConfiguration(name, default=default).perform(context)
+    if value('position_protocol'):
+        raise ValueError('SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol')
+    if value('target_stream_brake_lead_s'):
+        raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s in parameters_config')
     legacy = value('simulation')
     if legacy not in ('', 'true', 'false'):
         raise ValueError('RUNTIME_SIMULATION_ALIAS_INVALID')
     mode = resolve_mode(value('runtime_mode'), None if not legacy else legacy == 'true', default='real')
     if value('gripper_config') and mode != 'real':
         raise ValueError('GRIPPER_REQUIRES_REAL_MODE')
-    backend = value('device_backend') or ('snowbot_vendor' if mode == 'real' else 'kinematic')
-    if (mode == 'real' and backend != 'snowbot_vendor') or (
-            mode == 'simulation' and backend not in ('kinematic', 'external_simulation')):
-        raise ValueError('RUNTIME_MODE_BACKEND_CONFLICT')
+    backend = execution_backend(mode,value('device_backend'),value('execution_mode','position'))
     enabled = value('command_enabled', 'false')
     if enabled not in ('true', 'false'):
         raise ValueError('SNOWBOT_COMMAND_ENABLED_INVALID')
@@ -36,15 +37,11 @@ def assemble(context):
     common = {'profile': profile, 'runtime_mode': mode, 'run_id': value('run_id', 'manual')}
     parameters = {**common}
     if mode == 'real':
-        parameters.update(command_enabled=enabled == 'true', vendor_namespace=value('vendor_namespace', '/snowbot'),
-            position_protocol=value('position_protocol', 'legacy_guard'), execution_mode=value('execution_mode', 'position'),
+        parameters.update(command_enabled=enabled == 'true', vendor_namespace=value('vendor_namespace', '/'),
+            execution_mode=value('execution_mode', 'position'),
             **{key: value(key) for key in ('arm_receiver_node', 'servo_receiver_node', 'mid_receiver_node', 'gripper_config', 'parameters_config')})
-        if value('position_protocol') == 'session_v3':
-            from snowbot_hardware.parameters import load_parameters, braking_lead
-            limits={key:value(key,str(default)) for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}
-            limits['target_stream_brake_lead_s']=braking_lead(load_parameters(value('parameters_config') or None),
-                                                            value('target_stream_brake_lead_s'))
-            parameters.update(target_stream_limits(limits))
+        limits={key:value(key,str(default)) for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}
+        parameters.update(target_stream_limits(limits))
     else:
         parameters['device_backend'] = backend
     return [Node(package='snowbot_hardware' if mode == 'real' else 'bindu_runtime', executable='snowbot_adapter' if mode == 'real' else 'execution',
@@ -56,10 +53,9 @@ def assemble(context):
 
 def generate_launch_description():
     defaults = {'runtime_mode': '', 'simulation': '', 'device_backend': '', 'profile': '',
-                'namespace': 'bindu_snowbot', 'run_id': uuid.uuid4().hex, 'vendor_namespace': '/snowbot',
+                'namespace': 'bindu_snowbot', 'run_id': uuid.uuid4().hex, 'vendor_namespace': '/',
                 'arm_receiver_node': '', 'servo_receiver_node': '', 'mid_receiver_node': '',
-                'command_enabled': 'false', 'recording_mode': 'off', 'output': '/tmp/bindu-runs', 'parameters_config': '', 'gripper_config': '', 'position_protocol': 'legacy_guard', 'execution_mode': 'position'}
-    defaults.update({key:('' if key=='target_stream_brake_lead_s' else str(value))
-                     for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
+                'command_enabled': 'false', 'recording_mode': 'off', 'output': '/tmp/bindu-runs', 'parameters_config': '', 'gripper_config': '', 'execution_mode': 'position'}
+    defaults.update({key:str(value) for key,value in TARGET_STREAM_LIMIT_DEFAULTS.items()})
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]
                              + [OpaqueFunction(function=assemble)])

@@ -1,6 +1,5 @@
 /servo_node:
   ros__parameters:
-    position_reference_mode: target_stream
     position_stop_policy: measured_hold
     position_target_prepare_ms: 10.0
     trajectory_max_velocity: 1.25

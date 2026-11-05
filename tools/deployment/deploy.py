@@ -413,7 +413,7 @@ def executor_command(cfg, runs, execution_mode, namespace):
             'runtime_mode:=real', 'device_backend:=snowbot_vendor', 'namespace:='+namespace,
             'vendor_namespace:=/', 'profile:='+str(cfg/'snowbot_real_position.json'),
             'parameters_config:='+str(cfg/'runtime_parameters.json'),
-            'gripper_config:='+str(cfg/'grippers.json'), 'position_protocol:=session_v3',
+            'gripper_config:='+str(cfg/'grippers.json'),
             'execution_mode:='+execution_mode, 'command_enabled:=true',
             'trajectory_max_velocity:=1.25', 'trajectory_max_acceleration:=4.5',
             'trajectory_max_jerk:=259.2',
