@@ -315,7 +315,7 @@ def execute(args, plan):
         if args.action == 'Prepare':
             initial = dict(q)
             record('prepare_start', measured_q_rad=initial)
-            reference = port.nominal_reference() if any(
+            reference = port.nominal_reference() if args.execution_mode == 'impedance' or any(
                 max(robot.profile.limits[n][0]-initial[n], initial[n]-robot.profile.limits[n][1], 0.)
                 > robot.profile.feedback_tolerances['joint_position'] for n in NAMES) else None
             plan = plan_prepare(args.library, robot, initial, args.speed, reference=reference)

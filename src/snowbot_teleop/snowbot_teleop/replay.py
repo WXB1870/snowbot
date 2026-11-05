@@ -292,7 +292,7 @@ def load_prepare_return(path, prepare_log, speed=1.):
 
 
 def plan_prepare(path, robot, measured, speed=1., *, reference=None):
-    """Empty-hand entry from measured joints; validate before acquiring a lease."""
+    """Empty-hand entry from measured joints or an authenticated held reference."""
     import numpy as np
     from bindu_execution.interpolation import Curve, State
     from bindu_kinematics.tool_geometry import make_collision_checker
@@ -317,17 +317,17 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
     recovering = any(not profile.limits[n][0] <= measured[n] <= profile.limits[n][1] for n in NAMES)
     start = measured
     reference_source = 'measured'
-    if recovering:
+    if reference is not None:
+        start = prepare_limit_reference(profile, NAMES, measured, reference, dict(zip(NAMES, after)),
+                                        tolerance, float(config['prepare_position_tolerance_rad']))
+        reference_source = 'confirmed_pause'
+    elif recovering:
         if all(max(profile.limits[n][0]-measured[n], measured[n]-profile.limits[n][1], 0.)
                <= profile.feedback_tolerances['joint_position'] for n in NAMES):
             start = {n: min(profile.limits[n][1], max(profile.limits[n][0], measured[n])) for n in NAMES}
             reference_source = 'boundary_roundoff'
         else:
-            if reference is None:
-                raise ValueError('PREPARE_HELD_REFERENCE_REQUIRED')
-            start = prepare_limit_reference(profile, NAMES, measured, reference, dict(zip(NAMES, after)),
-                                            tolerance, float(config['prepare_position_tolerance_rad']))
-            reference_source = 'confirmed_pause'
+            raise ValueError('PREPARE_HELD_REFERENCE_REQUIRED')
     before = tuple(start[n] for n in NAMES)
     # Preset entry has its own floor; VR retains teleop.prepare_duration.
     duration = float(manifest['preparation'].get('minimum_duration_s', 2.))
@@ -347,7 +347,7 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
     plan = Replay(times, tuple(curve.sample(t).q for t in times), NAMES,
                   home.tool_id, home.kinematics, speed,
                   reference_margin_rad=home.reference_margin_rad, empty_prepare=True,
-                  measured_start=tuple(measured[n] for n in NAMES) if recovering else (),
+                  measured_start=tuple(measured[n] for n in NAMES) if recovering or reference is not None else (),
                   start_reference_source=reference_source,
                   velocities=tuple(curve.sample(t).v for t in times),
                   accelerations=tuple(curve.sample(t).a for t in times),
@@ -360,7 +360,7 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
                                      tool_present=False, validation_only=True)
     # A rest-to-rest quintic shares one scalar progress across every joint.
     samples = []
-    waypoints = ([plan.measured_start] if recovering else [])+[before, after]
+    waypoints = ([plan.measured_start] if plan.measured_start else [])+[before, after]
     for leg, (begin, end) in enumerate(zip(waypoints, waypoints[1:])):
         count = max(1, math.ceil(max(abs(a-b) for a,b in zip(begin,end))/.005))
         for k in range(count+1):
