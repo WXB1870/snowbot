@@ -316,7 +316,7 @@
   },
   "transition_validation_passed": true,
   "transition_start_policy": "certified settled action nodes; unknown coupled starts reject",
-  "transition_hold_s": 3.0,
+  "transition_hold_s": 0.0,
   "automatic_certified_transition": true,
   "preparation": {
     "action": "Prepare",
