@@ -213,6 +213,7 @@ class PicoNode(RuntimeNode):
         self.prepare_hold_client=(self.create_client(Trigger,'execution/held_reference')
                                   if self.position_contract and not self.simulation else None)
         self.ready_client=self.create_client(Trigger,'teleop/tool_ready')
+        self.grasp_reference_reset_client=self.create_client(Trigger,'teleop/tool_reference_reset')
         self.arms_ready_client=self.create_client(Trigger,'teleop/arms_ready') if self.position_contract else None
         self.record_client=self.create_client(SetBool,'recorder/capture') if self.recording_enabled else None
         self.modes=ActionClient(self,SelectTeleopMode,'teleop/select_mode')
@@ -654,9 +655,16 @@ class PicoNode(RuntimeNode):
         await self.move(intent, dict(zip(plan.names, plan.points[-1])), plan.duration, replay=plan)
         return True
 
+    async def reset_grasp_reference(self,intent):
+        self.current(intent)
+        reply=await self.wait(self.grasp_reference_reset_client.call_async(Trigger.Request()))
+        if not reply.success:raise RuntimeError(reply.message)
+
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
+        if intent.operation=='prepare' and self.position_contract:
+            await self.reset_grasp_reference(intent)
         arrival_tolerance=(self.prepare_position_tolerance if intent.operation=='prepare'
                            else self.profile.feedback_tolerances['joint_position'])
         nominal_arrival=self.position_contract and getattr(self,'execution_mode','position')=='impedance'
@@ -1120,6 +1128,7 @@ class PicoNode(RuntimeNode):
                              all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
                         self.event('PICO_PREPARE_ALREADY_REACHED',json.dumps(dict(max_joint_error_rad=error,
                             position_tolerance_rad=self.prepare_position_tolerance)))
+                        await self.reset_grasp_reference(intent)
                     else:
                         read_only=False
                         recovery=self.prepare_recovery

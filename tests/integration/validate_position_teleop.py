@@ -491,6 +491,10 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             assert any(e['state']=='BIMANUAL_CAPTURED' and 'independent:' in e['code'] for e in events)
             return dict(mode=mode,teleop_mode='independent_arms',checks=checks,accepted=len(accepted),vendor_packets=len(packets))
         assert views[-1]['load_state']=='unknown'
+        source['grip']=1.;phase('following');pump(.3)
+        source['grip']=0.;phase('tool_standby')
+        wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+        checks.append('capture at Push then release before A; preparation starts a new measured grasp scope')
         before=len(accepted)
         source['buttons'][1]=1
         wait(lambda:views[-1]['pending'] is None and views[-1]['reason']=='PREPARED',40.)

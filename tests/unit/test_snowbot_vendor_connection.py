@@ -109,9 +109,10 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertIn('TARGET_PREDICTION ',(output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
         self.assertFalse(list((output/'src').rglob('*.orig')))
         self.assertFalse(json.loads((self.release/'position_release.json').read_text())['rigid_prediction']['enabled'])
-        for options in ({'observation_only':True},{'with_impedance':True}):
-            with self.assertRaisesRegex(ValueError,'REQUIRES_TARGET_STREAM'):
-                vendor.prepare(self.baseline,self.work/'bad-rigid',prediction_urdf=urdf,prediction_tool=tool,**options)
+        with self.assertRaisesRegex(ValueError,'REQUIRES_TARGET_STREAM'):
+            vendor.prepare(self.baseline,self.work/'bad-rigid',prediction_urdf=urdf,prediction_tool=tool,observation_only=True)
+        impedance=vendor.prepare(self.baseline,self.work/'rigid-impedance',prediction_urdf=urdf,prediction_tool=tool,with_impedance=True)
+        self.assertTrue(json.loads((impedance/'position_release.json').read_text())['rigid_prediction']['enabled'])
         with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
             vendor.prepare(self.baseline,self.work/'bad-model',prediction_urdf=urdf)
 
