@@ -16,7 +16,7 @@ python3 -m tools.deployment.deploy prepare
 
 完成构建后，按[现场配置](运行与验证.md#首次现场配置)设置设备、标定和 PICO 网络，再按[启动顺序](运行与验证.md#日常启动)运行。开发和仿真见[仿真与浏览器操作台](运行与验证.md#仿真与浏览器操作台)。
 
-远程 PICO 调试可在单独的现场配置中将 `arguments.parameters_config` 指向[远程 VR 参数 JSON](src/snowbot_bringup/config/robots/snowbot/runtime_parameters_remote_vr.json)。`remote_input_timeout_s` 控制手柄输入有效期，`remote_source_timeout_s` 控制旧连接静默多久后允许换源，`controller_fps` 设置目标发送频率。双手时间差和到帧告警分别使用 `pair_max_skew_s` 和 `input_gap_warning_s`。已有现场参数时，将远程字段合入一份独立副本；下次启动时读取。
+本地与远程 PICO 的运行参数集中在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。本地直连使用顶层参数，远程调试在此基础上读取 `remote_vr` 中的输入有效期、换源等待、发送频率、双手时间差和告警间隔。远程现场的 `arguments.parameters_config` 可继续指向[远程入口](src/snowbot_bringup/config/robots/snowbot/runtime_parameters_remote_vr.json)；已有现场参数文件时，在其顶层加 `"vr_connection": "remote"` 即可选择远程模式，需要覆盖的远程值写在该文件的 `remote_vr` 中。下次启动时读取。
 
 ## 功能
 

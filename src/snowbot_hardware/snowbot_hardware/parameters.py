@@ -55,7 +55,7 @@ def default_path():
 @lru_cache(maxsize=1)
 def _defaults():
     result = json.loads(default_path().read_text())
-    if (set(result) != {'schema_version', *_FIELDS} or
+    if (set(result) != {'schema_version', 'remote_vr', *_FIELDS} or
             type(result.get('schema_version')) is not int or result['schema_version'] != 1 or
             any(not isinstance(result[g],dict) or set(result[g]) != set(keys) for g,keys in _FIELDS.items())):
         raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
@@ -64,14 +64,22 @@ def _defaults():
 
 def load_parameters(path=None):
     result = copy.deepcopy(_defaults())
-    if path:
-        raw = json.loads(Path(path).read_text())
-        if (not isinstance(raw, dict) or set(raw)-set(result) or
-                type(raw.get('schema_version', 1)) is not int or raw.get('schema_version', 1) != 1):
+    remote_defaults = result.pop('remote_vr')
+    raw = json.loads(Path(path).read_text()) if path else {}
+    if (not isinstance(raw, dict) or type(raw.get('schema_version', 1)) is not int
+            or raw.get('schema_version', 1) != 1):
+        raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
+    raw.pop('schema_version', None)
+    connection = raw.pop('vr_connection', 'local')
+    if connection not in ('local', 'remote'):
+        raise ValueError('SNOWBOT_VR_CONNECTION')
+    site_remote = raw.pop('remote_vr', {})
+    # Shared/site values first, then the selected connection's overrides.
+    layers = (raw, remote_defaults, site_remote) if connection == 'remote' else (raw,)
+    for layer in layers:
+        if not isinstance(layer, dict) or set(layer)-set(_FIELDS):
             raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
-        for group, values in raw.items():
-            if group == 'schema_version':
-                continue
+        for group, values in layer.items():
             allowed = set(result[group])
             if group == 'pico':
                 allowed.update(('remote_input_timeout_s', 'remote_source_timeout_s', 'controller_fps'))
