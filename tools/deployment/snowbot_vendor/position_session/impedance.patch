@@ -2,7 +2,7 @@
 +++ b/servo_control/include/ros_controller/rosLoop.h
 @@ -226,0 +227,10 @@
 +        std::string session_execution_mode_="position";
-+        bool session_calibration_confirmed_=false,session_impedance_active_=false;
++        bool session_impedance_active_=false;
 +        uint64_t session_impedance_session_=0;
 +        snowbot_impedance::VectorXd session_q_,session_dq_,session_efforts_,session_nominal_,session_velocity_;
 +        void session_impedance_workspace();
@@ -13,22 +13,22 @@
 +        double impedance_following_error_rad_=.25;
 --- a/servo_control/include/servo_control/position_watchdog.h
 +++ b/servo_control/include/servo_control/position_watchdog.h
-@@ -11 +11,2 @@
+@@ -11,1 +11,2 @@
 - bool selected=false;
 + bool selected=false,impedance=false;
 + std::array<float,joint_count> hold_kp{},hold_kd{},hold_torque{};
-@@ -20 +21 @@
+@@ -20,1 +21,1 @@
 -enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5,CONTROL_SOURCE_CONFLICT=6,CYCLE_OR_TRACKING_ERROR=7};
 +enum Reason:uint8_t {OK=0,PAUSED=1,EXPIRED=2,FEEDBACK_INVALID=3,DRIVE_FAULT=4,UNCONFIRMED_POLICY=5,CONTROL_SOURCE_CONFLICT=6,CYCLE_OR_TRACKING_ERROR=7,IMPEDANCE_INVALID=8};
-@@ -43 +44 @@
+@@ -43,1 +44,1 @@
 -  obs.hold_position=hold;obs.hold_sample=hold_sample;obs.hold_basis=0;
 +  obs.hold_position=hold;obs.hold_sample=hold_sample;obs.hold_basis=output.trajectory&&output.impedance&&output.reference_mode!=2&&reason==PAUSED?1:0;
-@@ -51 +52 @@
+@@ -51,1 +52,1 @@
 -  const bool healthy=measured(obs,now) && !(fault_mask(obs)&controlled_mask);
 +  const bool healthy=measured(obs,now) && !(fault_mask(obs)&controlled_mask) && (!input.impedance || sensor_measured(obs,now));
-@@ -72,0 +74 @@
+@@ -72,0 +74,1 @@
 +  else if(input.impedance && !sensor_measured(obs,now))failure=IMPEDANCE_INVALID;
-@@ -99 +101,2 @@
+@@ -99,1 +101,2 @@
 -   output.q=hold;output.v.fill(0);
 +   if(!(input.trajectory&&input.impedance&&reason==PAUSED)){output.q=hold;output.v.fill(0);}
 +   if(input.impedance && !(input.trajectory&&reason==PAUSED)){output.kp=input.hold_kp;output.kd=input.hold_kd;output.torque=input.hold_torque;output.impedance=false;output.impedance_mode=false;}
@@ -46,31 +46,30 @@
 +}
 --- a/servo_control/include/impedance/cartesian_impedance_controller.h
 +++ b/servo_control/include/impedance/cartesian_impedance_controller.h
-@@ -106,0 +107 @@
+@@ -106,0 +107,1 @@
 +  bool session_reference_only{false};
 @@ -421,0 +423,2 @@
 +  // One named joint reference, FK and full-body twist in this controller's model/TCP.
 +  bool setNominalReference(const VectorXd& q, const VectorXd& dq);
-@@ -430,0 +434 @@
+@@ -430,0 +434,1 @@
 +  std::unique_ptr<pinocchio::Data> nominal_data_;
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
 @@ -119,0 +120,2 @@
 +        m.wrench=s.wrench;m.sensor_valid_mask=s.sensor_valid_mask;m.sensor_data_no=s.sensor_data_no;
 +        for(unsigned a=0;a<2;++a)m.sensor_age[a]=s.sensor_sampled_ns[a]>0 && now>=s.sensor_sampled_ns[a] ? (now-s.sensor_sampled_ns[a])*1e-9 : -1.;
-@@ -139,0 +142,6 @@
+@@ -139,0 +142,5 @@
 +    rcl_interfaces::msg::ParameterDescriptor session_descriptor;session_descriptor.read_only=true;
 +    session_execution_mode_=declare_parameter<std::string>("execution_mode","position",session_descriptor);
 +    if(session_execution_mode_!="position" && session_execution_mode_!="impedance")throw std::invalid_argument("execution_mode");
-+    session_calibration_confirmed_=declare_parameter<bool>("impedance_calibration_confirmed",false,session_descriptor);
 +    impedance_following_error_rad_=declare_parameter<double>("impedance_following_error_rad",.25,session_descriptor);
 +    if(!std::isfinite(impedance_following_error_rad_) || impedance_following_error_rad_<=0 || impedance_following_error_rad_>.5)throw std::invalid_argument("impedance_following_error_rad");
-@@ -160,0 +169 @@
+@@ -160,0 +169,1 @@
 +      tuning.separate_waist=session_execution_mode_=="impedance";
-@@ -175 +184 @@
+@@ -175,1 +184,1 @@
 -        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=5;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"impedance":"position";
 +        snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=5;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"legacy_impedance":session_execution_mode_;
-@@ -184 +193,16 @@
+@@ -184,1 +193,16 @@
 -            if(!report.empty())RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
 +            if(!report.empty()){
 +                if(!ready && session_execution_mode_=="impedance" && report.find("impedance_")==0){
@@ -80,15 +79,15 @@
 +                    int nonfinite=-1;for(unsigned i=0;i<12;++i)if(!std::isfinite(obs.wrench[i])){nonfinite=i;break;}
 +                    const char* axes[]={"Fx","Fy","Fz","Mx","My","Mz"};
 +                    RCLCPP_WARN(this->get_logger(),
-+                        "Position session: %s; calibration_confirmed=%d controller_initialized=%d pdo_sample=%llu WKC=%d/%d pdo_age_ms=%.3f joint_valid_mask=0x%05x ft_valid=0x%x ft_initialized=0x%x ft_advancing=0x%x left_ft{DataNo=%u age_ms=%.3f} right_ft{DataNo=%u age_ms=%.3f} nonfinite_wrench=%s.%s",
-+                        report.c_str(),int(session_calibration_confirmed_),int(impedance_inited_),
++                        "Position session: %s; controller_initialized=%d pdo_sample=%llu WKC=%d/%d pdo_age_ms=%.3f joint_valid_mask=0x%05x ft_valid=0x%x ft_initialized=0x%x ft_advancing=0x%x left_ft{DataNo=%u age_ms=%.3f} right_ft{DataNo=%u age_ms=%.3f} nonfinite_wrench=%s.%s",
++                        report.c_str(),int(impedance_inited_),
 +                        static_cast<unsigned long long>(obs.sample),int(obs.wkc),int(obs.expected_wkc),age_ms(obs.sampled_ns),
 +                        unsigned(obs.valid_mask),unsigned(obs.sensor_valid_mask),unsigned(obs.sensor_initialized_mask),unsigned(obs.sensor_advancing_mask),
 +                        unsigned(obs.sensor_data_no[0]),age_ms(obs.sensor_sampled_ns[0]),unsigned(obs.sensor_data_no[1]),age_ms(obs.sensor_sampled_ns[1]),
 +                        nonfinite<0?"-":nonfinite<6?"left":"right",nonfinite<0?"-":axes[nonfinite%6]);
 +                }else RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
 +            }
-@@ -372 +396 @@
+@@ -372,1 +396,1 @@
 -        "/home/cc/snowbot_ws/src/ctl_msgs/config/impedance_params.yaml",
 +        session_execution_mode_=="impedance" ? "" : "/home/cc/snowbot_ws/src/ctl_msgs/config/impedance_params.yaml",
 @@ -393,2 +417,8 @@
@@ -118,26 +117,26 @@
 +    }
 +
 +    if(impedance_inited_ && session_execution_mode_=="impedance")session_impedance_workspace();
-@@ -554,0 +600 @@
+@@ -554,0 +600,1 @@
 +    if(session_execution_mode_!="impedance") {
-@@ -557,0 +604 @@
+@@ -557,0 +604,1 @@
 +            if(position_gate_.selected())return;
-@@ -601,0 +649 @@
+@@ -601,0 +649,1 @@
 +            if(position_gate_.selected())return;
-@@ -662,0 +711 @@
+@@ -662,0 +711,1 @@
 +    }
-@@ -703,0 +753 @@
+@@ -703,0 +753,1 @@
 +    if(session_execution_mode_=="impedance" && position_gate_.selected())return;
-@@ -2512 +2562 @@
+@@ -2512,1 +2562,1 @@
 -   position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load(),!impedance_enable_,position_policy_,
 +   position_instance_id_,position_initialized_&&position_startup_complete_&&!shutdown_mode_&&!sigInterrupt.load()&&(session_execution_mode_!="impedance"||session_impedance_ready()),!impedance_enable_,position_policy_,
-@@ -2531 +2581 @@
+@@ -2531,1 +2581,1 @@
 -
 +  position_output_.hold_kp=position_output_.kp;position_output_.hold_kd=position_output_.kd;position_output_.hold_torque=position_output_.torque;
-@@ -2541 +2591 @@
+@@ -2541,1 +2591,1 @@
 - const bool local_hold=position_local_hold_ &&
 + const bool local_hold=position_local_hold_ && position_reference_mode_ &&
-@@ -2567 +2617 @@
+@@ -2567,1 +2617,1 @@
 -   if(std::abs(reference[i]-position_feedback_.q[i])>.5)axis_checks|=16;
 +   if((i<14 || session_execution_mode_!="impedance") && std::abs(reference[i]-position_feedback_.q[i])>(session_execution_mode_=="impedance"?impedance_following_error_rad_:.5))axis_checks|=16;
 @@ -2576,0 +2627,7 @@
@@ -148,14 +147,13 @@
 +   position_cycle_reason_="impedance_sensor_or_output_invalid";
 +  }
 + }
-@@ -2579,0 +2637 @@
+@@ -2579,0 +2637,1 @@
 + position_output_.impedance_mode=position_output_.impedance;
-@@ -2584,0 +2643,27 @@
+@@ -2584,0 +2643,26 @@
 + if(session_execution_mode_=="impedance"){
 +  const auto obs=EtherCAT_positionObservation();const auto steady=position_session::steady_ns();
-+  if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,steady)){
-+   if(!session_calibration_confirmed_)position_wait_reason_="impedance_calibration_unconfirmed";
-+   else if(!impedance_inited_)position_wait_reason_="impedance_controller_not_initialized";
++  if(!impedance_inited_ || !position_session::sensor_measured(obs,steady)){
++   if(!impedance_inited_)position_wait_reason_="impedance_controller_not_initialized";
 +   else if(!obs.sample)position_wait_reason_="impedance_pdo_not_started";
 +   else if(obs.expected_wkc<=0 || obs.wkc!=obs.expected_wkc)position_wait_reason_="impedance_pdo_wkc_mismatch";
 +   else if(obs.sampled_ns<=0)position_wait_reason_="impedance_pdo_timestamp_missing";
@@ -182,7 +180,7 @@
 +
 +bool ServoNode::session_impedance_ready() const {
 + const auto obs=EtherCAT_positionObservation();
-+ if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
++ if(!impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
 + return true;
 +}
 +
@@ -207,7 +205,7 @@
 +
 +bool ServoNode::session_impedance_step(double dt){
 + const auto obs=EtherCAT_positionObservation();
-+ if(!session_calibration_confirmed_ || !impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
++ if(!impedance_inited_ || !position_session::sensor_measured(obs,position_session::steady_ns()))return false;
 + if(!session_impedance_inputs(obs))return false;
 + auto& q=session_q_;auto& dq=session_dq_;auto& efforts=session_efforts_;
 + auto& nominal=session_nominal_;auto& velocity=session_velocity_;
@@ -268,11 +266,11 @@
 +    }
 --- a/servo_control/src/impedance/cartesian_impedance_controller.cpp
 +++ b/servo_control/src/impedance/cartesian_impedance_controller.cpp
-@@ -644 +644,2 @@
+@@ -644,1 +644,2 @@
 -  reference_sub_ = node_->create_subscription<ReferenceType>(
 +  nominal_data_ = std::make_unique<pinocchio::Data>(robot_model_);
 +  if(!config_.session_reference_only)reference_sub_ = node_->create_subscription<ReferenceType>(
-@@ -1068 +1069,3 @@
+@@ -1068,1 +1069,3 @@
 -  actual_twist_.noalias() = jacobian_ * robot_dq_;
 +  // Measured TCP velocity includes waist and other ancestor joints.
 +  applyTcpOffsetToJacobian(jacobian_full_);

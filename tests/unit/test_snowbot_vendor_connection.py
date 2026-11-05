@@ -79,7 +79,9 @@ class PositionReleaseTests(unittest.TestCase):
                          identity['files']['ctl_msgs/config/impedance_params.yaml']['source_sha256'])
         self.assertEqual(manifest['execution_mode'],'position')
         self.assertTrue(manifest['impedance_available'])
-        self.assertFalse(manifest['impedance_calibration_confirmed'])
+        self.assertNotIn('impedance_calibration_confirmed',manifest)
+        servo=(output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
+        self.assertNotIn('impedance_calibration_confirmed',servo)
         self.assertEqual(manifest['stop_policy'],'unconfirmed')
         default=json.loads((self.release/'position_release.json').read_text())
         self.assertFalse(default['impedance_available'])
@@ -278,6 +280,49 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_vendor_build_uses_selected_ros_without_starting_nodes(self):
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp); vendor = workspace/'vendor'
+            for package, executable in zip(deploy.TARGETS, ('servo_node', 'dual_arm_control_node', 'robot_control_node')):
+                binary = vendor/'install'/package/'lib'/package/executable
+                binary.parent.mkdir(parents=True); binary.touch()
+            with patch.object(deploy.subprocess, 'run') as run:
+                deploy.vendor_build(vendor, workspace, 'humble')
+                command = run.call_args.args[0]
+                self.assertIn('source /opt/ros/humble/setup.bash', command[4])
+                self.assertIn('build', command)
+                self.assertNotIn('ros2', command)
+
+
+    def test_native_platforms_select_matching_ros_and_pinocchio(self):
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        for machine, release, distro, pinocchio in (
+                ('x86_64', '24.04', 'jazzy', '4.1.0'),
+                ('aarch64', '22.04', 'humble', '3.9.0')):
+            with self.subTest(machine=machine), \
+                    patch('platform.system', return_value='Linux'), \
+                    patch('platform.machine', return_value=machine), \
+                    patch('platform.freedesktop_os_release', return_value=dict(ID='ubuntu', VERSION_ID=release), create=True), \
+                    patch.object(Path, 'is_file', autospec=True, return_value=True) as exists:
+                self.assertEqual(deploy.require_platform(), distro)
+                checked = [str(call.args[0]) for call in exists.call_args_list]
+                self.assertIn(f'/opt/ros/{distro}/setup.bash', checked)
+                self.assertIn(f'/opt/openrobots/lib/libpinocchio_default.so.{pinocchio}', checked)
+                for missing in ('/usr/include/nlohmann/json.hpp',
+                                '/usr/lib/python3/dist-packages/colcon_ros/task/ament_python/build.py'):
+                    exists.side_effect = lambda path: str(path) != missing
+                    with self.assertRaisesRegex(ValueError, 'prerequisites'):
+                        deploy.require_platform()
+        with patch('platform.system', return_value='Linux'), \
+                patch('platform.machine', return_value='aarch64'), \
+                patch('platform.freedesktop_os_release', return_value=dict(ID='ubuntu', VERSION_ID='24.04'), create=True):
+            with self.assertRaisesRegex(ValueError, 'requires'):
+                deploy.require_platform()
+
+
     def primitive_menu(self, choices, replay):
         from unittest.mock import patch
         from contextlib import redirect_stdout

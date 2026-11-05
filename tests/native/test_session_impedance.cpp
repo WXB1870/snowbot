@@ -54,7 +54,7 @@ void EtherCAT_setSingleMotorEnable(unsigned slot,bool value){enabled[slot]=value
 struct ServoNode {
  std::string session_execution_mode_="position",position_rejection_;
  double impedance_following_error_rad_=.25;
- bool impedance_enable_=false,session_calibration_confirmed_=false,impedance_inited_=true,session_impedance_active_=false;
+ bool impedance_enable_=false,impedance_inited_=true,session_impedance_active_=false;
  uint64_t session_impedance_session_=0;
  std::shared_ptr<snowbot_impedance::CartesianImpedanceController> impedance_left_,impedance_right_;
  std::array<int,20> session_q_index_{},session_v_index_{};
@@ -108,7 +108,7 @@ void check_target_impedance(ServoNode& previous){
  using namespace position_session;
  ServoNode node;node.impedance_left_=previous.impedance_left_;node.impedance_right_=previous.impedance_right_;
  node.session_q_index_=previous.session_q_index_;node.session_v_index_=previous.session_v_index_;node.session_impedance_workspace();
- node.session_execution_mode_="impedance";node.session_calibration_confirmed_=true;node.position_reference_mode_=2;
+ node.session_execution_mode_="impedance";node.position_reference_mode_=2;
  snapshot.wrench.fill(0);snapshot.sensor_valid_mask=3;snapshot.status.fill(0x27);
  node.position_admission_=std::make_unique<TrajectoryAdmission<Packet>>(node.position_trajectory_,[](auto& result){
   if(auto error=inspect_servo_command(*result.packet,result.origin.get(),result.context,result.command))throw std::invalid_argument(error);
@@ -172,12 +172,11 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  for(const std::string side:{"left","right"}){auto cfg=snowbot_impedance::ImpedanceConfig::makeDefault(side,argv[1]);cfg.session_reference_only=true;cfg.mode=snowbot_impedance::ImpedanceMode::JOINT;cfg.joint_stiffness.assign(7,20.);cfg.joint_damping.assign(7,2.);cfg.filter_params_pose=cfg.filter_params_nullspace=1.;cfg.tcp_to_ee={0,0,.192,0,0,0,1};auto ctl=std::make_shared<snowbot_impedance::CartesianImpedanceController>();assert(ctl->init(ros,cfg));if(side=="left")node.impedance_left_=ctl;else node.impedance_right_=ctl;}
  for(unsigned i=0;i<20;++i){const std::string name=i<8?"arm_l_joint_"+std::to_string(i+1):i<16?"arm_r_joint_"+std::to_string(i-7):i<18?"head_joint_"+std::to_string(i-15):"body_joint_"+std::to_string(i-17);node.session_q_index_[i]=node.impedance_left_->getJointQIdx(name);node.session_v_index_[i]=node.impedance_left_->getJointVIdx(name);}
  node.session_impedance_workspace();check_adapter_memory(node);
- node.session_execution_mode_="impedance";node.feedback();assert(!node.session_impedance_ready());
- node.session_calibration_confirmed_=true;assert(node.session_impedance_ready());
+ node.session_execution_mode_="impedance";node.feedback();assert(node.session_impedance_ready());
  snapshot.sensor_valid_mask=1;assert(!node.session_impedance_ready());
  snapshot.sensor_valid_mask=3;snapshot.wrench[0]=NAN;assert(!node.session_impedance_ready());
  snapshot.wrench[0]=0;node.feedback();snapshot.sampled_ns-=21000000;assert(!node.session_impedance_ready());
  node.feedback();
  check_target_impedance(node);
- std::cout<<"PASS actual session_v3 impedance inputs, sensor/calibration feedback, waist position, nominal PAUSE and source expiry\n";
+ std::cout<<"PASS actual session_v3 impedance inputs, sensor feedback, waist position, nominal PAUSE and source expiry\n";
 }
