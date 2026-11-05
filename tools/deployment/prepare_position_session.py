@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
-COMPONENTS=('observation','takeover','timing','session','receipt','target')
+COMPONENTS=('observation','takeover','timing','session')
 NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp','rigid_prediction.hpp')
 
 def contract_ttl_ms(name):
@@ -98,7 +98,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
     stage=Path(tempfile.mkdtemp(prefix='.position-',dir=output.parent))
     try:
         shutil.copytree(source,stage/'src')
-        patches=COMPONENTS[:1] if observation_only else COMPONENTS[:4]
+        patches=COMPONENTS[:1] if observation_only else COMPONENTS
         for name in patches:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/(name+'.patch'))],cwd=stage/'src',check=True,capture_output=True,text=True)
         if not observation_only:
@@ -115,14 +115,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
                 destination.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copy2(native/name,destination)
         if not observation_only:
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'receipt.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             shutil.copy2(ASSETS/'position_receipt.h',stage/'src/servo_control/include/position_receipt.h')
-            patches=(*patches,'receipt')
-            # Both execution modes consume the same authenticated target stream.
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'target.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'target')
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'pause_hold.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'pause_hold')
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'drive_maintenance')
             if prediction_urdf:
@@ -156,8 +149,6 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
         if not observation_only:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'deployed_vendor.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'deployed_vendor')
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'session_v3_only.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'session_v3_only')
         if with_impedance:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'joint_impedance_118.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)

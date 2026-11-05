@@ -342,55 +342,14 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.feedback=lambda:PicoFeedback(0.,True,healthy=False)
             with self.assertRaisesRegex(RuntimeError,'FEEDBACK_UNAVAILABLE'):await node.confirm_tool(intent)
 
-    async def test_auto_close_must_finish_before_operator_grasp_and_preflight(self):
-        from types import SimpleNamespace as S
-        from unittest.mock import Mock,AsyncMock
-        for outcome in ('success','timeout','superseded'):
-            with self.subTest(outcome=outcome):
-                r=Rig('unknown',guided=True,dual=True);r.click(1,1);intent=r.core.pending
-                node=self.production('confirm_tool','current');node.unheld_test=False
-                node.operator_grasp=True;node.automatic_close_grippers=True;node.control=r.core
-                node.now=lambda:r.now;node.feedback=lambda:PicoFeedback(r.now,True,('unknown','unknown'))
-                closed=[]
-                async def close(value,**kw):
-                    self.assertIs(value,intent);self.assertEqual(kw,dict(allow_command=True))
-                    if outcome=='timeout':raise RuntimeError('PICO_GRIPPER_OPERATION_FAILED:left:POSITION_TIMEOUT')
-                    if outcome=='superseded':r.core.pending=None
-                    closed.append(True)
-                def reading(_):
-                    self.assertTrue(closed);return S(measured_position=0.)
-                node.position_ops=S(close_grippers=AsyncMock(side_effect=close),reading=reading)
-                node.ready_client=S(service_is_ready=lambda:True,call_async=Mock(return_value=S(success=True)))
-                node.wait=AsyncMock(side_effect=lambda value:value);node.event=Mock();node.tool_cfg={}
-                if outcome=='success':
-                    await node.confirm_tool(intent)
-                    self.assertEqual((r.core.load,r.core.load_source),('held','operator_tool_confirmation'))
-                    node.ready_client.call_async.assert_called_once()
-                else:
-                    with self.assertRaises(RuntimeError):await node.confirm_tool(intent)
-                    self.assertEqual(r.core.load,'unknown')
-                    node.ready_client.call_async.assert_not_called()
-
-    async def test_follow_never_starts_a_new_auto_close(self):
-        from types import SimpleNamespace as S
-        from unittest.mock import AsyncMock,Mock
-        node=self.production('confirm_tool');node.unheld_test=False;node.operator_grasp=True
-        node.automatic_close_grippers=True;node.feedback=lambda:PicoFeedback(1.,True)
-        node.position_ops=S(close_grippers=AsyncMock(side_effect=RuntimeError('PICO_GRIPPERS_CLOSE_BEFORE_TOOL_MODE')))
-        node.ready_client=Mock()
-        intent=S(operation='follow')
-        with self.assertRaisesRegex(RuntimeError,'CLOSE_BEFORE_TOOL_MODE'):await node.confirm_tool(intent)
-        node.position_ops.close_grippers.assert_awaited_once_with(intent,allow_command=False)
-        node.ready_client.assert_not_called()
-
-    async def test_position_mode_preflight_refusal_stays_read_only_with_legacy_auto_close(self):
+    async def test_preflight_refusal_stays_read_only_for_supported_gripper_modes(self):
         from types import SimpleNamespace as S
         from unittest.mock import AsyncMock,Mock
         for position_contract in (False,True):
             for operation in ('confirm_tool','select_mode'):
                 with self.subTest(position_contract=position_contract,operation=operation):
                     node=self.production('perform');node.position_contract=position_contract
-                    node.automatic_close_grippers=True;node.independent_grippers=False;node.unheld_test=False
+                    node.automatic_close_grippers=position_contract;node.independent_grippers=False;node.unheld_test=False
                     node.cancel_tool=AsyncMock();node.current=Mock();node.event=Mock();node.now=lambda:1.
                     node.simulation=True;node.feedback=Mock(return_value=PicoFeedback(1.,True))
                     node.control=S(complete=Mock(),update_feedback=Mock(),teleop_mode='independent_arms',source='pico',seq=1)
@@ -400,7 +359,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     result=node.control.complete.call_args
                     self.assertFalse(result.args[1])
                     self.assertEqual(result.args[2],'RuntimeError:BIMANUAL_GRASP_POSE')
-                    self.assertIs(result.kwargs['rejected'],position_contract)
+                    self.assertTrue(result.kwargs['rejected'])
 
     async def test_read_only_refusal_rechecks_feedback_after_stop_barrier(self):
         from unittest.mock import AsyncMock,Mock

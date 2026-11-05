@@ -1,6 +1,49 @@
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -25,6 +25,7 @@
+ #include <thread>
+ #include <chrono>
+ #include "rclcpp/rclcpp.hpp"
++#include "rclcpp/executors/single_threaded_executor.hpp"
+ #include "std_msgs/msg/float64_multi_array.hpp"
+ #include "geometry_msgs/msg/wrench_stamped.hpp"
+ #include "geometry_msgs/msg/pose_stamped.hpp"
+@@ -137,6 +138,8 @@
+
+         //析构函数
+         ~ServoNode(){
++            feedback_publish_stop_.store(true);
++            if(feedback_publish_thread_.joinable())feedback_publish_thread_.join();
+             if (performance_test) {
+                 delete performance_test;
+             }
+@@ -147,6 +150,7 @@
+
+         //ros消息参量发送模块 -- 反馈值发送函数
+         void msg_publish();
++        void feedback_send();
+
+         //ros消息回调函数 -- 上位机控制消息接收模块
+         void ctlmsg_get();
+@@ -203,6 +207,15 @@
+         void position_target_dispatch();void position_interrupt();
+         position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
+         double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
++        // One executor owns the callback groups throughout run(); both original
++        // callback pumps remain on the main thread, in their original order.
++        rclcpp::executors::SingleThreadedExecutor ros_executor_;
++        bool ros_executor_added_=false;
++        struct FeedbackSample {snowbot_ctl_msgs::msg::RetInformation message;int64_t sampled_ns=0;};
++        position_session::LatestTelemetry<FeedbackSample> feedback_mailbox_;
++        std::atomic<bool> feedback_publish_stop_{false};std::thread feedback_publish_thread_;
++        bool feedback_first_sent_=false; // publishing thread only
++        position_session::LoopTiming position_loop_timing_,position_feedback_timing_;
+         position_session::Interval position_interval_;
+         position_session::Output position_output_;
+         uint64_t position_frame_=0;
 --- a/servo_control/include/servo_control/position_clock.h
 +++ b/servo_control/include/servo_control/position_clock.h
-@@ -1,6 +1,8 @@
+@@ -1,5 +1,7 @@
  #pragma once
  #include <cstdint>
 +#include <array>
@@ -8,9 +51,7 @@
  namespace position_session {
  // New position session only. Startup/exit and legacy timing remain untouched.
  class Interval {
-  int64_t last_=0;
-@@ -9,5 +11,40 @@
-  // A retarget must not erase a preceding sampling gap.
+@@ -10,4 +12,39 @@
   void admit(int64_t now,bool takeover){if(takeover)reset(now);}
   double tick(int64_t now){const auto old=last_;last_=now;return old>0 && now>old ? (now-old)*1e-9 : -1.;}
  };
@@ -50,61 +91,29 @@
 + }
 +};
  } // namespace position_session
---- a/servo_control/include/ros_controller/rosLoop.h
-+++ b/servo_control/include/ros_controller/rosLoop.h
-@@ -24,8 +24,9 @@
- #include <fstream>
- #include <thread>
- #include <chrono>
- #include "rclcpp/rclcpp.hpp"
-+#include "rclcpp/executors/single_threaded_executor.hpp"
- #include "std_msgs/msg/float64_multi_array.hpp"
- #include "geometry_msgs/msg/wrench_stamped.hpp"
- #include "geometry_msgs/msg/pose_stamped.hpp"
+--- a/servo_control/src/main.cpp
++++ b/servo_control/src/main.cpp
+@@ -1,5 +1,6 @@
+ #include <iostream>
+ #include <cstdio>
++#include <cstdlib>
+ #include <csignal>
+ #include <atomic>
+ #include <pthread.h>
+@@ -18,6 +19,10 @@
+ }
 
-@@ -136,8 +137,10 @@
-         ServoNode();
+ int main(int argc, char ** argv){
++    // Configure Fast DDS before init and preserve explicit site overrides.
++    if(::setenv("RMW_FASTRTPS_PUBLICATION_MODE","ASYNCHRONOUS",0)!=0){
++        std::perror("RMW_FASTRTPS_PUBLICATION_MODE");return 1;
++    }
+     (void) argc;
+     (void) argv;
 
-         //析构函数
-         ~ServoNode(){
-+            feedback_publish_stop_.store(true);
-+            if(feedback_publish_thread_.joinable())feedback_publish_thread_.join();
-             if (performance_test) {
-                 delete performance_test;
-             }
-         }
-@@ -146,8 +149,9 @@
-         void rosLoopVar_Init();
-
-         //ros消息参量发送模块 -- 反馈值发送函数
-         void msg_publish();
-+        void feedback_send();
-
-         //ros消息回调函数 -- 上位机控制消息接收模块
-         void ctlmsg_get();
-
-@@ -203,8 +207,17 @@
-         int64_t position_target_prepare_ns_=10000000;
-         void position_target_dispatch();void position_interrupt();
-         position_session::ServoCommand position_target_takeover_{};bool position_target_takeover_valid_=false;
-         double trajectory_max_velocity_=.25,trajectory_max_acceleration_=.5,trajectory_max_jerk_=162.;
-+        // One executor owns the callback groups throughout run(); both original
-+        // callback pumps remain on the main thread, in their original order.
-+        rclcpp::executors::SingleThreadedExecutor ros_executor_;
-+        bool ros_executor_added_=false;
-+        struct FeedbackSample {snowbot_ctl_msgs::msg::RetInformation message;int64_t sampled_ns=0;};
-+        position_session::LatestTelemetry<FeedbackSample> feedback_mailbox_;
-+        std::atomic<bool> feedback_publish_stop_{false};std::thread feedback_publish_thread_;
-+        bool feedback_first_sent_=false; // publishing thread only
-+        position_session::LoopTiming position_loop_timing_,position_feedback_timing_;
-         position_session::Interval position_interval_;
-         position_session::Output position_output_;
-         uint64_t position_frame_=0;
-         bool position_startup_complete_=false;
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -182,8 +182,31 @@
-         if(fault.detected_ns && fault.detected_ns!=position_last_rt_cycle_fault_ns_){
+@@ -197,6 +197,29 @@
              RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_FIRST_FAULT steady_ns=%lld session=%llu seq=%llu pdo=%llu origin=%s deadline_late_ms=%.6f checks=0x%x dt_ms=%.6f",
                  (long long)fault.detected_ns,(unsigned long long)fault.session,(unsigned long long)fault.sequence,(unsigned long long)fault.pdo_sample,
                  fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
@@ -134,9 +143,7 @@
              position_last_rt_cycle_fault_ns_=fault.detected_ns;
          }
          m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
-     });
-@@ -291,8 +314,19 @@
-     performance_test = new performanceTestSeal(this);  // 传入当前节点指针
+@@ -306,6 +329,17 @@
 
      //----------阻抗控制器初始化----------
      initImpedanceControllers();
@@ -154,9 +161,7 @@
  }
 
  //==================== 阻抗控制实现 ====================
-
-@@ -956,8 +990,11 @@
- }
+@@ -971,6 +1005,9 @@
 
  //ros消息参量发送模块 -- 反馈值发送函数
  void ServoNode::msg_publish(){
@@ -166,9 +171,7 @@
      auto tempRetData_pub = snowbot_ctl_msgs::msg::RetInformation();
      tempRetData_pub.header.stamp = this->now();  // 添加当前时间戳
 
-     //获取并发送反馈值
-@@ -973,10 +1010,13 @@
-
+@@ -988,8 +1025,11 @@
      float left_gripper_pos = 0.0f, left_gripper_spd = 0.0f, left_gripper_cur = 0.0f;
      float right_gripper_pos = 0.0f, right_gripper_spd = 0.0f, right_gripper_cur = 0.0f;
      uint16_t left_gripper_status = 0, right_gripper_status = 0;
@@ -180,9 +183,7 @@
      tempRetData_pub.l_position[7] = left_gripper_pos;
      tempRetData_pub.l_speed[7] = left_gripper_spd;
      tempRetData_pub.l_iq[7] = left_gripper_cur;
-     tempRetData_pub.r_position[7] = right_gripper_pos;
-@@ -989,14 +1029,32 @@
-     }else{
+@@ -1004,12 +1044,30 @@
          tempRetData_pub.if_first_time = 0;
      }
 
@@ -215,9 +216,7 @@
  }
 
  //消息传输辅助函数 -- 仅仅进行一次消息的接收(与底层关节的通讯)
- void ServoNode::EtherCATmsg_Get(){
-@@ -1357,8 +1415,10 @@
-     position_startup_complete_=arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load();
+@@ -1372,6 +1430,8 @@
      drive_startup_finished_=!sigInterrupt.load();
      //开启ros2循环
      while (rclcpp::ok()){
@@ -226,9 +225,7 @@
          //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
          if (sigInterrupt.load() && !shutdown_mode_) {
              shutdown_mode_ = true;
-             shutdown_start_time = std::chrono::steady_clock::now();
-@@ -1454,12 +1514,15 @@
-             ifShallInit = false;
+@@ -1469,10 +1529,13 @@
          }
 
          //发送一轮反馈值
@@ -242,9 +239,7 @@
 
          //----- 关机回零: 覆盖上位机目标, 走同一套插补链路 (像上位机下发一样) -----
          if (shutdown_mode_) {
-             const auto shutdown_now = std::chrono::steady_clock::now();
-@@ -1749,9 +1812,15 @@
-         applyImpedanceControl();
+@@ -1764,7 +1827,13 @@
 
          //----------------------
          //进行一轮EtherCAT发送
@@ -259,9 +254,7 @@
          EtherCATrun();
          if(shutdown_mode_)EtherCAT_positionBypass(); // Hand back only after original exit target cache is written.
          if (arm_shutdown_handoff_pending && shutdown_mode_) {
-             EtherCAT_EndArmShutdownHandoff();
-@@ -1759,12 +1828,15 @@
-             std::cout << "关机回零目标已写入，双臂控制权完成切换。" << std::endl;
+@@ -1774,10 +1843,13 @@
          }
 
          //发布六维力传感器数据
@@ -276,32 +269,12 @@
          loop_rate.sleep();
      }
 
-     //-----------------------------------------------
---- a/servo_control/src/main.cpp
-+++ b/servo_control/src/main.cpp
-@@ -1,6 +1,7 @@
- #include <iostream>
- #include <cstdio>
-+#include <cstdlib>
- #include <csignal>
- #include <atomic>
- #include <pthread.h>
- #include "rclcpp/rclcpp.hpp"
-@@ -17,8 +18,12 @@
-     sigInterrupt.store(true, std::memory_order_release);
- }
+@@ -2097,7 +2169,7 @@
+         }
+     }
 
- int main(int argc, char ** argv){
-+    // Configure Fast DDS before init and preserve explicit site overrides.
-+    if(::setenv("RMW_FASTRTPS_PUBLICATION_MODE","ASYNCHRONOUS",0)!=0){
-+        std::perror("RMW_FASTRTPS_PUBLICATION_MODE");return 1;
-+    }
-     (void) argc;
-     (void) argv;
-
-     std::cout << "机器人控制程序开启" << std::endl;
---- a/servo_control/src/ros_controller/rosLoop.cpp
-+++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -2177 +2177 @@
 -    double time_now = this->now().seconds() + this->now().nanoseconds() * 1e-9;
 +    double time_now = this->now().seconds();
+
+     if(is_left){
+         g_left_pos_target = pos;

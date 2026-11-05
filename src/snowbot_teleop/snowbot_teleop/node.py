@@ -934,9 +934,6 @@ class PicoNode(RuntimeNode):
         f=self.feedback()
         if not f.healthy:raise RuntimeError('PICO_FEEDBACK_UNAVAILABLE')
         if not f.stopped:raise RuntimeError('PICO_MODE_REQUIRES_STOPPED')
-        if mode=='bimanual_tool' and not self.position_contract and not self.unheld_test and not getattr(self,'independent_grippers',False) and getattr(self,'automatic_close_grippers',False):
-            await self.position_ops.close_grippers(intent,allow_command=intent.operation in ('select_mode','confirm_tool'))
-            self.current(intent)
         if mode=='bimanual_tool' and self.position_contract and self.operator_grasp:
             self.operator_grasp_positions={}
             self.control.virtual=False
@@ -1096,10 +1093,6 @@ class PicoNode(RuntimeNode):
             else:await self.cancel_tool()
             self.current(intent)
             read_only=intent.operation in ('prepare','confirm_tool','follow','select_mode')
-            if (not self.position_contract and getattr(self,'automatic_close_grippers',False) and
-                    not getattr(self,'independent_grippers',False) and not self.unheld_test and
-                    (intent.operation=='confirm_tool' or intent.operation=='select_mode' and intent.value=='bimanual_tool')):
-                read_only=False
             if intent.operation=='prepare':
                 # A targets the configured ready pose; held-node returns use the certified graph.
                 if not self.position_contract and self.control.load!='empty':raise RuntimeError('PICO_PREPARE_REQUIRES_EMPTY')
@@ -1249,22 +1242,6 @@ class PicoNode(RuntimeNode):
         feedback=self.feedback()
         if self.state and not self.state.lease_active and feedback.healthy and feedback.stopped:
             self.handoff_complete=True
-        if self.position_ops and not self.position_contract and not getattr(self,'independent_grippers',False) and not self.unheld_test and self.control.teleop_mode=='bimanual_tool' and feedback.healthy:
-            if (not self.operator_grasp and not self.control.pending and feedback.stopped and
-                    self.control.phase in ('checking','standby','tool_standby') and
-                    feedback.modes[1] in ('closed','virtual')):
-                self.control.virtual=feedback.modes[1]=='virtual'
-            if self.operator_grasp and self.control.phase in ('engaging','following') and self.operator_grasp_positions:
-                try:
-                    for side,position in self.operator_grasp_positions.items():
-                        s=self.position_ops.reading(side)
-                        if (s.state in ('MOVING','STOPPING') or
-                                abs(s.measured_position-position)>self.position_ops.config['position_tolerance']):
-                            raise RuntimeError('PICO_GRASP_POSITION_CHANGED')
-                except RuntimeError as exc:self.control.lock(str(exc),self.now())
-            if (not self.operator_grasp and self.control.phase in ('engaging','following') and
-                    feedback.modes!=('closed','virtual' if self.control.virtual else 'closed')):
-                self.control.lock('PICO_GRASP_POSITION_CHANGED',self.now())
         self.control.update_feedback(feedback,self.now());self.control.tick(self.now())
         if self.control.context_at!=self.last_context_at:
             self.last_context_at=self.control.context_at

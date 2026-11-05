@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','session_v3_only'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -95,7 +95,7 @@ class PositionReleaseTests(unittest.TestCase):
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
         manifest=json.loads((output/'position_release.json').read_text())
-        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','session_v3_only','joint_impedance_118','impedance'})
+        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance'})
         self.assertTrue(manifest['target_stream_available'])
         self.assertTrue(manifest['feedback_publication']['isolated'])
         self.assertEqual(manifest['feedback_publication']['mode'],'latest_only_worker')
