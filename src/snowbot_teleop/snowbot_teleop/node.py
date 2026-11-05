@@ -20,7 +20,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger, SetBool
 from trajectory_msgs.msg import JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
-from bindu_contracts.teleoperation import VRFrame
+from bindu_contracts.teleoperation import VRFrame, load_tool_config
 from snowbot_teleop.control import PicoControl, PicoFeedback, PICO_MAPPING, temporary_capture_refusal
 from bindu_kinematics.bimanual_worker import BimanualWorker
 from bindu_interfaces.msg import VRInput, ExecutionState, MotionCommand, TeleopModeState, RecorderHealth, RuntimeEvent
@@ -70,13 +70,15 @@ class PicoNode(RuntimeNode):
         self.declare_parameter('gripper_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('base_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('command_enabled',False,descriptor=ParameterDescriptor(read_only=True))
+        from snowbot_hardware.parameters import load_parameters, apply_tool_timing, load_mode_config
+        self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         self.base = None
         if self.get_parameter('base_config').value:
             from bindu_runtime.teleop_base import TeleopBase
+            pico = self.runtime_parameters['pico']
             self.base = TeleopBase(self, self.get_parameter('base_config').value,
-                                  self.get_parameter('command_enabled').value)
-        from snowbot_hardware.parameters import load_parameters, apply_tool_timing, load_mode_config
-        self.runtime_parameters=load_parameters(self.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
+                                  self.get_parameter('command_enabled').value,
+                                  pair_max_skew_s=(pico['pair_max_skew_s'] if 'remote_input_timeout_s' in pico else 0.))
         self.cfg=load_mode_config(self.get_parameter('pico_config').value,self.runtime_mode)
         self.position_contract = self.cfg.get('schema_version') == 2
         if self.cfg.get('schema_version') not in (1,2):
@@ -88,7 +90,7 @@ class PicoNode(RuntimeNode):
                 self.backend not in (('kinematic','external_simulation') if self.simulation and self.position_contract else
                                      ('kinematic',) if self.simulation else ('snowbot_vendor',))):
             raise ValueError('PICO_ACTUATOR_BACKEND_UNAVAILABLE:'+self.backend)
-        self.tool_cfg=json.loads(Path(self.get_parameter('tool_config').value).read_text())
+        self.tool_cfg=load_tool_config(self.get_parameter('tool_config').value)
         if self.position_contract:
             self.tool_cfg=apply_tool_timing(self.tool_cfg,self.runtime_parameters)
         self.automatic_close_grippers=self.cfg.get('automatic_close_grippers',False)
@@ -166,7 +168,8 @@ class PicoNode(RuntimeNode):
         if self.simulation or self.get_parameter('position_protocol').value!='session_v3':
             self.prepare_limit_max=0.
         self.control=PicoControl(initial_load=initial_load,simulation_demo=self.simulation_demo,
-                                 max_age=float(self.tool_cfg['input_max_age']),guided_loading=self.position_contract,
+                                 max_age=(self.runtime_parameters['teleop']['input_max_age_s'] if self.position_contract
+                                          else float(self.tool_cfg['input_max_age'])),guided_loading=self.position_contract,
                                  dual_modes=self.position_contract,direct_grippers=self.position_contract,
                                  initial_mode=self.cfg.get('initial_teleop_mode','independent_arms'),
                                  pose_jump_translation_m=self.cfg.get('pose_jump_translation_m',.35),
@@ -330,6 +333,8 @@ class PicoNode(RuntimeNode):
 
     def on_frame(self,msg):
         if not self.matches_mode(msg) or msg.side not in ('left','right'):return
+        if self.control.superseded_remote_input(msg.source_id, msg.seq):
+            return
         self.frames[msg.side]=msg
         if set(self.frames)!= {'left','right'}:return
         a,b=self.frames['left'],self.frames['right']
@@ -338,8 +343,9 @@ class PicoNode(RuntimeNode):
         received_monotonic=time.monotonic()
         previous_monotonic=getattr(self,'last_pair_monotonic',None)
         monotonic_gap=None if previous_monotonic is None else received_monotonic-previous_monotonic
-        if self.last_pair_at is not None and (now-self.last_pair_at>.1 or
-                monotonic_gap is not None and monotonic_gap>.1):
+        warning_s = self.runtime_parameters['diagnostics']['input_gap_warning_s']
+        if self.last_pair_at is not None and (now-self.last_pair_at>warning_s or
+                monotonic_gap is not None and monotonic_gap>warning_s):
             self.event('PICO_INPUT_DELIVERY_GAP',json.dumps(dict(
                 interval_s=now-self.last_pair_at,interval_clock='ros_callback',
                 monotonic_interval_s=monotonic_gap,
@@ -354,6 +360,8 @@ class PicoNode(RuntimeNode):
                           head_age_s=getattr(m,'head_age_s',0.),head_source_id=getattr(m,'head_source_id',''),
                           head_seq=int(getattr(m,'head_seq',0)))
                    for m in (a,b))
+        if self.control.expired_remote_pair(pair, now):
+            return
         if self.base:
             self.base.ingest(pair, now)
         self.control.update_feedback(self.feedback(),self.now())

@@ -31,9 +31,7 @@
     0.35,
     0.4
   ],
-  "input_max_age": 0.25,
-  "feedback_max_age": 0.2,
-  "command_max_age": 0.4,
+  "timing_defaults": "runtime_parameters.json",
   "engage_seconds": 1.0,
   "pico_grasp_resume_seconds": 0.08,
   "position_scale": 1.0,
@@ -61,13 +59,10 @@
       "arm_r_joint_7": 0.25
     }
   },
-  "worker_timeout": 0.23,
-  "worker_startup_timeout": 30.0,
   "relative_gain": 12.0,
   "max_relative_error": 0.08,
   "max_linear_speed": 1.2,
   "max_angular_speed": 2.4,
-  "solve_timeout_us": 80000,
   "demo": {
     "description": "Virtual tool proxy: 0.34 m grip spacing with 0.10 m overhang at each end; shared display and collision geometry. Physical tool geometry requires onsite calibration.",
     "display_urdf": "snowbot_display.urdf",

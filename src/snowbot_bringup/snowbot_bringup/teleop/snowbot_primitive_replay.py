@@ -516,8 +516,8 @@ def execute(args, plan):
     settle_time = settings['execution']['stop_confirmation_window_s']
     settle_timeout = settings['pico']['motion_completion_grace_s']
     prepare_tolerance = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')['prepare_position_tolerance_rad']
-    tool_config = json.loads(robot.tool_config.read_text())
-    from snowbot_hardware.parameters import load_mode_config
+    from bindu_contracts.teleoperation import load_tool_config
+    tool_config = load_tool_config(robot.tool_config)
     gripper_config = load_mode_config(robot.tool_config.with_name('grippers.json'), 'real')
     configured_margin = tool_config.get('posture_reference_margin_rad', 0.)
     if abs(configured_margin-plan.reference_margin_rad) > 1e-10:

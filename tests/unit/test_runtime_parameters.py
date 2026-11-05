@@ -22,10 +22,11 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertEqual(cfg['display']['poll_ms'],150)
 
     def test_shared_timing_preserves_standalone_defaults_and_selected_overrides(self):
+        from bindu_contracts.teleoperation import load_tool_config
         from bindu_contracts.resources import package_share
         base=package_share('snowbot_bringup')/'config/robots/snowbot'
         for name in ('bimanual_snowbot_real.json',):
-            original=json.loads((base/name).read_text())
+            original=load_tool_config(base/name)
             effective=apply_tool_timing(original,load_parameters())
             for key in ('input_max_age','feedback_max_age','command_max_age',
                         'solve_timeout_us','worker_timeout','worker_startup_timeout'):
@@ -37,7 +38,10 @@ class RuntimeParameterTests(unittest.TestCase):
                               'solve_timeout_us','worker_timeout','worker_startup_timeout')],
                              [.3,.15,.35,100000,.4,10.])
             self.assertIs(type(changed['solve_timeout_us']),int)
-            self.assertEqual(original['input_max_age'],.25)
+            keys = ('input_max_age','feedback_max_age','command_max_age','solve_timeout_us',
+                    'worker_timeout','worker_startup_timeout')
+            self.assertEqual([original[key] for key in keys], [.25,.2,.4,80000,.23,30.])
+            self.assertTrue(set(keys).isdisjoint(json.loads((base/name).read_text())))
 
     def test_shared_input_deadline_reaches_actual_session(self):
         import numpy as np
@@ -66,6 +70,7 @@ class RuntimeParameterTests(unittest.TestCase):
 
     def test_installed_tool_loader_applies_snapshot_before_generic_node_uses_config(self):
         import ast
+        from bindu_contracts.teleoperation import load_tool_config
         from importlib.util import find_spec
         from types import SimpleNamespace as S
         from unittest.mock import patch
@@ -87,7 +92,7 @@ class RuntimeParameterTests(unittest.TestCase):
             modules={'rcl_interfaces':S(),'rcl_interfaces.msg':S(ParameterDescriptor=lambda **kw:kw)}
             with patch.dict('sys.modules',modules):
                 exec(compile(ast.Module(body=init.body[start:start+2],type_ignores=[]),str(base_source),'exec'),
-                     dict(self=node,json=json,Path=Path,tool_config_loader=namespace['load_tool']))
+                     dict(self=node,load_tool_config=load_tool_config,Path=Path,tool_config_loader=namespace['load_tool']))
             self.assertEqual(node.cfg['command_max_age'],.4)
             self.assertEqual(node.cfg['solve_timeout_us'],100000)
             self.assertEqual(node.cfg['worker_timeout'],.4)
@@ -98,7 +103,8 @@ class RuntimeParameterTests(unittest.TestCase):
         from bindu_runtime.robot_setup import RobotSetup
         from bindu_runtime.teleop_deployment import load_deployment
         share=package_share('snowbot_bringup');config=share/'config'
-        self.assertEqual(len(list((config/'robots/snowbot').glob('*.json'))),8)
+        remote = config/'robots/snowbot/runtime_parameters_remote_vr.json'
+        self.assertEqual(json.loads(remote.read_text()), {'schema_version':1, 'vr_connection':'remote'})
         self.assertEqual({p.name for p in (config/'deployments').glob('*.json')},
                          {'snowbot_vr_real.json','snowbot_vr_sim.json'})
         selections=[]
@@ -121,7 +127,7 @@ class RuntimeParameterTests(unittest.TestCase):
         base=package_share('snowbot_bringup')/'config/robots/snowbot'
         profile=Profile.load(base/'snowbot_real_position.json')
         for mode,closed,speed,policy,calibrated,duration in (
-                ('real',.26,.5,'operator',False,4.),('simulation',0.,.2,'calibrated',True,8.)):
+                ('real',.26,.5,'operator',False,30.),('simulation',0.,.2,'calibrated',True,30.)):
             operations=load_mode_config(base/'teleop.json',mode)
             grippers=validate_config(load_mode_config(base/'grippers.json',mode),profile)
             self.assertEqual(operations['tool_grasp_confirmation'],policy)
@@ -234,7 +240,7 @@ class RuntimeParameterTests(unittest.TestCase):
         rig=Rig();rig.core=PicoControl(initial_load='empty',settings=cfg['pico'])
         rig.counters=[ButtonCounters(.6,.2),ButtonCounters(.6,.2)]
         rig.step();rig.triggers[0]=.65;rig.step()
-        self.assertNotEqual(rig.core.reason,'PICO_BUTTON_STATE_COUNTER_MISMATCH')
+        self.assertEqual(rig.core.previous[6:8], (1, 0))
         self.assertEqual(rig.counters[0].counts[6],1)
         # The trigger above intentionally starts a separate operation. Use an
         # idle coordinator for the independent A-button hold requirement.

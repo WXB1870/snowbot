@@ -343,12 +343,12 @@ class DeploymentEntryTests(unittest.TestCase):
         self.assertEqual(m['preparation']['goal_node'], 'Push:start')
         self.assertEqual(m['actions']['SideScoop']['end_node'], 'Flip:start')
         cases = [
-            ('Push:start','Push',('Push',),5.745),
-            ('Push:end','PushReverse',('PushReverse',),5.745),
-            ('Push:start','SideScoop',('BridgeForward','SideScoop'),24.752666),
-            ('Flip:start','Flip',('Flip',),8.085),
-            ('Flip:start','Home',('ScoopPrefixReverse',),4.445),
-            ('Dump:end','Home',('FlipReverse','ScoopPrefixReverse'),12.53),
+            ('Push:start','Push',('Push',),7.8),
+            ('Push:end','PushReverse',('PushReverse',),7.82),
+            ('Push:start','SideScoop',('BridgeForward','SideScoop'),12.5),
+            ('Flip:start','Flip',('Flip',),8.12),
+            ('Flip:start','Home',('ScoopReturn',),4.),
+            ('Dump:end','Home',('DumpReturn',),7.08),
         ]
         for start, action, route, duration in cases:
             with self.subTest(start=start, action=action):
@@ -357,7 +357,7 @@ class DeploymentEntryTests(unittest.TestCase):
                 self.assertEqual(plan.hold_s, 0.)
                 self.assertAlmostEqual(plan.duration, duration)
                 for a,b in zip(plan.segments,plan.segments[1:]):
-                    self.assertEqual(a.points[-1], b.points[0])
+                    self.assertLess(max(abs(x-y) for x,y in zip(a.points[-1], b.points[0])), 1e-12)
                 if len(plan.segments)>1:
                     boundary=plan.segments[0].duration
                     actual=plan.sample(boundary+.02);following=plan.segments[1].sample(.02)

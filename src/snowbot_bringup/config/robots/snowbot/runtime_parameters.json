@@ -62,5 +62,16 @@
     "stale_ms": 1500,
     "reconnect_ms": 1500,
     "report_ms": 3000
+  },
+  "remote_vr": {
+    "pico": {
+      "remote_input_timeout_s": 1.0,
+      "remote_source_timeout_s": 1.0,
+      "controller_fps": 60,
+      "pair_max_skew_s": 0.05
+    },
+    "diagnostics": {
+      "input_gap_warning_s": 1.0
+    }
   }
 }
