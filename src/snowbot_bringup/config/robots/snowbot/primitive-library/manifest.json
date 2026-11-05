@@ -13,218 +13,226 @@
   "actions": {
     "Push": {
       "targets": "Push.json.gz",
-      "sha256": "4a299d92f7dad2c70744aee8bbe5dd89c61d4406e7ff6b6b81af0dcf81e265e3",
+      "sha256": "023e482c9e80aa99d0c11e2f33fdf6e25aa6c4aecc9f2b07ac534c4665a213b6",
       "nominal_duration_s": 11.5,
       "duration_s": 11.5,
       "start_node": "Push:start",
       "end_node": "Push:end",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     },
     "SideScoop": {
       "targets": "SideScoop.json.gz",
-      "sha256": "276f9c0afdd4aaf758c374cf4ca721d93e332dd5c8963610cab39f0a6be51078",
+      "sha256": "6d035d81dcc2e666e4fc305ac4921b908a04da22ce98a2b3ab0d91b73e88f74b",
       "nominal_duration_s": 8.9,
       "duration_s": 8.9,
       "start_node": "SideScoop:start",
       "end_node": "Flip:start",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     },
     "Flip": {
       "targets": "Flip.json.gz",
-      "sha256": "858e206c75e7dc5424098ad10e21dbbeda59e525025ab02408a0ac24f3ba4708",
+      "sha256": "ba4d9917927649c6553cc9e0dcf0d657cf715059e61e6076e182cd443669c569",
       "nominal_duration_s": 16.18,
       "duration_s": 16.18,
       "start_node": "Flip:start",
       "end_node": "Dump:end",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     }
   },
   "replay_code_sha256": "cf18baaffc33dbd5ec90e0ad0ced7c4caa35c05902f0a26f4aa8d593e793b00f",
   "source_commits": {
-    "snowbot_base": "8c9f167",
-    "bindu": "28e828b",
+    "snowbot_base": "eab4164",
+    "bindu": "8f9b543",
     "branch": "xavier/impedance-control",
     "reference_validation_framework_base": "14b58b686e989e14cde6f23e95123396d965f2a0",
     "reference_validation_application_base": "7693ce938494467b59c9ad1d377102180a628a68"
   },
-  "validation_kind": "fixed-waist IK retarget; native continuous dynamics and reserved limits; dense grasp/collision; 116 PhysX full reference replay; no hardware acceptance",
+  "validation_kind": "moving-waist IK; native continuous dynamics and reserved limits; dense nominal and 0.1s predicted grasp/collision; 116 PhysX full equivalent-delay response replay; no hardware acceptance",
   "transfers": {
     "PushReverse": {
       "targets": "PushReverse.json.gz",
-      "sha256": "c419bc309a5da700e61c4a78854fe41896f7f62396f739f9009a92b49b92105c",
+      "sha256": "8f95a5c019446453570a913d5402dd60fb1aa7906fdce1deb30bf4c12efe19b4",
       "nominal_duration_s": 11.5,
       "duration_s": 11.5,
       "start_node": "Push:end",
       "end_node": "Push:start",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     },
     "BridgeForward": {
       "targets": "BridgeForward.json.gz",
-      "sha256": "7f11eceeaf9e8d52f8cd1a1ecaeaa98b0f031608056245f3a534e7e35455e0cb",
-      "nominal_duration_s": 12.0,
-      "duration_s": 12.0,
+      "sha256": "027d97738a14f73c5bd1e7bcc07f975fa5a7ab892c8b76d444328e4e25c9bd03",
+      "nominal_duration_s": 12,
+      "duration_s": 12,
       "start_node": "Push:start",
       "end_node": "SideScoop:start",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     },
     "BridgeReverse": {
       "targets": "BridgeReverse.json.gz",
-      "sha256": "3f275dd9f4719415bb8e280f6f20adb485204bcf116251cb91c449da8c6ff01f",
-      "nominal_duration_s": 12.0,
-      "duration_s": 12.0,
+      "sha256": "cd12b81ad51502ef1c4b3267c7b04c669f4daa3c272b10f9ef98dd8dceb204fe",
+      "nominal_duration_s": 12,
+      "duration_s": 12,
       "start_node": "SideScoop:start",
       "end_node": "Push:start",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     },
     "ScoopReturn": {
       "targets": "ScoopReturn.json.gz",
-      "sha256": "3cb49da0041f470bc573fdd8c74672ec952a15d818a822f2702ec3989e82f7d4",
-      "nominal_duration_s": 8.0,
-      "duration_s": 8.0,
+      "sha256": "796cd7d8e30b7aad2ea6e226ee234a45da700b94a1d59cf2563297b33ffdc4b7",
+      "nominal_duration_s": 8,
+      "duration_s": 8,
       "start_node": "Flip:start",
       "end_node": "SideScoop:start",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     },
     "DumpReturn": {
       "targets": "DumpReturn.json.gz",
-      "sha256": "1328e0ce44fb27eb19e05d814bb6706f9d9c9a3fa3346dd6d36a930e17e1a548",
-      "nominal_duration_s": 14.0,
-      "duration_s": 14.0,
+      "sha256": "5cf98632de3deb665d564ab3e134464333c39b9abf6ec2d5a0b0b742f6d29948",
+      "nominal_duration_s": 14,
+      "duration_s": 14,
       "start_node": "Dump:end",
       "end_node": "SideScoop:start",
-      "source": "20261105 fixed-waist retarget of accepted half-speed tool path",
+      "source": "20261105 moving-waist retarget with user-reported 0.1s equivalent-delay assumption",
       "validation": {
         "dynamic_grasp_collision_passed": true,
         "full_reference_hz": 50,
-        "stage": "accepted_fixed_waist_ik_spline_dynamic_grasp_collision_checks"
+        "stage": "accepted_moving_waist_ik_spline_dynamic_nominal_and_010s_predicted_geometry_checks",
+        "predicted_010s_geometry_passed": true
       }
     }
   },
   "nodes": {
     "Push:start": [
-      0.17,
-      0.08,
-      -0.43989532300826684,
-      0.05590658503988659,
-      0.9073340421750661,
-      -0.9511160231344962,
-      -0.9853968233586756,
-      0.5067876195806802,
-      1.2364848808523192,
-      0.17106885321591425,
-      -0.3510767478170303,
-      -0.45055478677895244,
-      0.0694898297268099,
-      0.21786149108859795,
-      -0.19312895778346664,
-      0.7911060166915542
+      0.17000000000000004,
+      -0.12000000000000002,
+      -0.36737445879355457,
+      0.078482615790611,
+      0.8333918183329833,
+      -0.8359646017820676,
+      -1.1353628467972399,
+      0.5622505598530047,
+      1.2667008302543854,
+      0.08941909818420155,
+      -0.3059267234893525,
+      -0.4652311619240725,
+      -0.08311205224211315,
+      0.23307820975131033,
+      -0.2192135043709192,
+      0.7599980111291668
     ],
     "Push:end": [
-      0.17,
-      0.08,
-      -0.9895412036930198,
-      0.05590658503988659,
-      0.8214991224661586,
-      -0.170737283922384,
-      -1.6732452772152504,
-      0.7300454784096522,
-      1.0003253696562044,
-      0.8492082958087341,
-      -0.0559065865728073,
-      -0.8833893739046881,
-      -1.1360933255291923,
-      0.5525544688288223,
-      -0.7013562959225135,
-      0.03573490430893518
+      0.19802406288047505,
+      0.2152063573790837,
+      -1.0659782415718135,
+      0.030540808945532245,
+      0.8518837017345021,
+      -0.2585143485866757,
+      -1.5789964699584866,
+      0.7376371360776482,
+      0.9815918315432113,
+      0.8838229996429091,
+      -0.3140263336765135,
+      -0.9170896761197854,
+      -0.7206327461713072,
+      0.5985750483686691,
+      -0.5515919051317796,
+      0.21243420550446848
     ],
     "SideScoop:start": [
-      0.17,
-      0.08,
-      -0.5213709717771637,
-      0.12797073865234618,
-      0.5815354066231716,
-      -0.9851048500722759,
-      -1.9424110119875178,
-      0.23446900159626416,
-      1.2528518371195523,
-      0.1277490016909385,
-      -0.5389841817109068,
-      -0.36512700125751124,
-      0.16976688712622803,
-      0.3014276499494115,
-      -0.08058799009561424,
-      0.8743214893793723
+      0.1590062517727717,
+      -0.022689240152708828,
+      -0.47983889002220975,
+      0.15420932300336757,
+      0.5509201358119508,
+      -0.9172582530786112,
+      -2.0045669497312044,
+      0.24644415494938537,
+      1.2641405138410446,
+      0.0949995906102245,
+      -0.5025641221274832,
+      -0.39036521974350213,
+      0.09061121357640331,
+      0.2934177109087776,
+      -0.08865573484051158,
+      0.855856615694226
     ],
     "Flip:start": [
-      0.17,
-      0.08,
-      -0.5383410119612481,
-      0.3043087665680188,
-      1.0773784547135183,
-      -1.0014925590484423,
-      -1.591846039588881,
-      0.6224751006910535,
-      1.085297252336527,
-      0.14560414458491117,
-      -0.5627226583526274,
-      -0.2805849298552384,
-      -0.13183558851781185,
-      0.09641449611711156,
-      -0.523701446822844,
-      0.6902801462306611
+      0.21651799463241553,
+      -0.08923279095043174,
+      -0.5035012295247648,
+      0.29141845257148613,
+      1.0399034550936708,
+      -0.8907389124573719,
+      -1.7946897827508133,
+      0.6338879744589717,
+      1.0831291322914618,
+      0.06424793464175449,
+      -0.5536526003261097,
+      -0.2844298694654331,
+      -0.26615434145165634,
+      0.11538324567304165,
+      -0.5581208280603986,
+      0.6844749140770571
     ],
     "Dump:end": [
-      0.17,
-      0.08,
-      -1.4942010228534741,
-      0.8866967782889085,
-      0.7360052932139101,
-      -1.035246842538277,
-      -1.5775920316579057,
-      -1.0895748799081901,
-      1.3010696119423069,
-      0.35456041767772356,
-      -0.3779596818089751,
-      -0.1919477536926372,
-      0.8872341860380488,
-      -0.816623270555623,
-      0.6355865214281957,
-      0.674395140269295
+      0.07984915876754729,
+      -0.13230188537269735,
+      -1.2847557540278727,
+      0.9808117368302491,
+      0.8563732505233158,
+      -0.9596534635244925,
+      -1.3707334251845331,
+      -1.0038043452737444,
+      1.2753644391272418,
+      0.351254162935296,
+      -0.33364855518746916,
+      -0.30252174771890045,
+      0.6418757101235261,
+      -0.7313410440773559,
+      0.5713603237775867,
+      0.693951558007685
     ]
   },
   "home_node": "SideScoop:start",
@@ -311,7 +319,7 @@
     "minimum_duration_s": 2.0
   },
   "reference_validation_execution_mode": "position",
-  "validation_reference": "artifacts/experiments/preset-optimization-20261105/fixed-waist/reference-validation.json",
+  "validation_reference": "artifacts/experiments/preset-optimization-20261105/waist-010s/reference-validation.json",
   "runtime_validation": {
     "prepared_trajectory_version": 4,
     "source_ttl_s": 0.25,
@@ -325,7 +333,7 @@
   },
   "planning_speed_vs_original": 0.5,
   "playback_speed": 1.0,
-  "physics_validation_reference": "artifacts/experiments/preset-optimization-20261105/fixed-waist/final-result/result.json",
+  "physics_validation_reference": "artifacts/experiments/preset-optimization-20261105/waist-010s/final-result/result.json",
   "previous_vendor_source_sha256": "5a827e74df7d10157f3fce74fb7af9021176080c7743a2d2576cce62dcf49e68",
   "required_source_sha256": {
     "src/snowbot_bringup/snowbot_bringup/teleop/snowbot_primitive_replay.py": "cf18baaffc33dbd5ec90e0ad0ced7c4caa35c05902f0a26f4aa8d593e793b00f",
@@ -333,8 +341,29 @@
     "tools/deployment/snowbot_vendor/position_session/session.patch": "6ef6f83a20033bcebbccff2e9206ffda6f7fd93bd5ba1fe9017030be1391a2b8",
     "tools/deployment/snowbot_vendor/position_session/target.patch": "b4ff3ded5703d245431f4e3c34e40cfd23d8ed3a0ab0faff7893dd17b87d06c6"
   },
-  "fixed_waist_rad": {
-    "body_joint_1": 0.17,
-    "body_joint_2": 0.08
+  "waist_response_assumption": {
+    "kind": "equivalent_pure_delay",
+    "delay_s": 0.1,
+    "source": "user_reported_2026-11-05",
+    "axes": [
+      "body_joint_1",
+      "body_joint_2"
+    ],
+    "separate_axis_identification": false,
+    "unidentified": [
+      "axis-specific delay/time-constant/gain",
+      "loaded response",
+      "arm response"
+    ]
+  },
+  "waist_joint_ranges_rad": {
+    "body_joint_1": [
+      0.07984915876754729,
+      0.21651799463241553
+    ],
+    "body_joint_2": [
+      -0.13230188537269735,
+      0.2152063573790837
+    ]
   }
 }
