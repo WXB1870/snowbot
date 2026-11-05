@@ -103,10 +103,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/(name+'.patch'))],cwd=stage/'src',check=True,capture_output=True,text=True)
         if not observation_only:
             for package in ('robot_control','dual_arm_control','servo_control'):
-                for name in ('position_session_contract.h','position_connection_diagnostics.h'):
+                for name in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h'):
                     shutil.copy2(ASSETS/name,stage/'src'/package/'include'/name)
-            for package in ('robot_control','dual_arm_control'):
-                shutil.copy2(ASSETS/'position_session_ros.h',stage/'src'/package/'include/position_session_ros.h')
         if not observation_only:
             shutil.copy2(ASSETS/'position_trajectory.h',stage/'src/servo_control/include/position_trajectory.h')
             for name in NATIVE_FILES:

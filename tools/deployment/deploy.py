@@ -450,6 +450,7 @@ def operator(bindu, workspace, frontend):
     from rclpy.signals import SignalHandlerOptions
     from snowbot_ctl_msgs.msg import PositionSessionState
     from bindu_interfaces.msg import RuntimeEvent
+    from bindu_interfaces.srv import Lease
     from ament_index_python.packages import get_package_share_directory
     from snowbot_bringup.runtime.run_vr import startup_lock
     from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
@@ -461,7 +462,7 @@ def operator(bindu, workspace, frontend):
     handlers = {s:signal.signal(s, interrupt) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
     node = rclpy.create_node('snowbot_upper_launcher')
-    states, hold = {}, {}
+    states = {}
     for layer in ('servo', 'middle', 'upper'):
         node.create_subscription(PositionSessionState, '/bindu/position/'+layer+'_state',
                                  lambda msg, layer=layer: states.update({layer:msg}), 1)
@@ -483,8 +484,6 @@ def operator(bindu, workspace, frontend):
             print(f'LOGS {logdir}', flush=True)
             writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
             def event(msg):
-                if msg.state in ('STARTUP_HOLD_READY', 'STARTUP_HOLD_FAILED'):
-                    hold.update(state=msg.state, code=msg.code)
                 if msg.state in ('FAILED', 'TARGET_REJECTED', 'STARTUP_HOLD_FAILED', 'DEVICE_FEEDBACK_DETAIL'):
                     writer.record_log('executor-events', dict(name=msg.component, level=40,
                         message=msg.state+':'+msg.code, text=f'[executor] {msg.state}: {msg.code}\n'), text=True)
@@ -495,10 +494,21 @@ def operator(bindu, workspace, frontend):
             children.append(('executor', child))
             reader = threading.Thread(target=copy_service_output, args=('executor', child, writer), daemon=True)
             reader.start(); readers.append(reader)
+            readiness = node.create_client(Lease, '/'+namespace+'/execution/lease')
+            pending = None
             def executor_ready():
-                if hold.get('state') == 'STARTUP_HOLD_FAILED':
-                    raise RuntimeError('STARTUP_HOLD_FAILED:'+hold['code'])
-                return hold.get('state') == 'STARTUP_HOLD_READY'
+                nonlocal pending
+                if not readiness.service_is_ready():
+                    return False
+                if pending is None:
+                    pending = readiness.call_async(Lease.Request(operation='ready',
+                        resources=['waist', 'left_arm', 'right_arm']))
+                if not pending.done():
+                    return False
+                reply, pending = pending.result(), None
+                if reply.code in ('STARTUP_HOLD_FAILED', 'STOP_UNCONFIRMED'):
+                    raise RuntimeError(reply.code)
+                return reply.ok
             if not wait_service(children, executor_ready,
                                 lambda:rclpy.spin_once(node, timeout_sec=.05), stopped):
                 return 0

@@ -27,6 +27,7 @@ struct ArmCtlOptInterface {
 // PRODUCTION_FUNCTION
 #ifdef TARGET_AUXILIARY
 #include "position_session_contract.h"
+#include "position_session_ros.h"
 #include <memory>
 #include <string>
 namespace snowbot_ctl_msgs { namespace msg {
@@ -42,6 +43,15 @@ struct PositionSessionUpper {
 };
 }}
 struct ArmCtlNode {
+ struct Endpoint {
+  std::string node_name()const{return "robot_upperMonitor";}
+  std::string node_namespace()const{return "/";}
+  std::string topic_type()const{return "snowbot_ctl_msgs/msg/PositionSessionUpper";}
+ };
+ bool source_known=true;
+ position_session::CommandGraph position_command_graph_;
+ std::vector<Endpoint> get_publishers_info_by_topic(const char*)const{return source_known?std::vector<Endpoint>{{}}:std::vector<Endpoint>{};}
+ unsigned count_publishers(const char*)const{return 0;}
  position_session::Gate position_gate_;
  std::string position_rejection_,position_wait_reason_;
  bool position_dispatch_=false,ifInitTemp=false,checkTemp=false,ifReInit_get=true;
@@ -67,6 +77,9 @@ struct ArmCtlNode {
 // PRODUCTION_MIDDLE_CALLBACK
 void check_middle_session(){
  using Packet=snowbot_ctl_msgs::msg::PositionSessionUpper;
+ ArmCtlNode discovering;discovering.source_known=false;
+ discovering.position_callback(std::make_shared<Packet>());
+ assert(discovering.position_rejection_.empty()&&!discovering.position_gate_.selected()&&discovering.native_dispatches==0);
  for(uint8_t mode:{0,1}){
   ArmCtlNode node;auto packet=std::make_shared<Packet>();packet->meta.reference_mode=mode;
   node.position_callback(packet);

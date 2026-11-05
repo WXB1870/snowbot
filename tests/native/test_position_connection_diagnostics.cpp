@@ -1,4 +1,5 @@
 #include "position_connection_diagnostics.h"
+#include "position_session_ros.h"
 #include <array>
 #include <iostream>
 #include <memory>
@@ -17,9 +18,11 @@ struct Endpoint {
 struct Sub {const char* get_topic_name(){return "/bindu/position/observation";}rclcpp::QoS get_actual_qos(){return {};}};
 struct Node {
  std::vector<Endpoint> writers,readers;unsigned graph_reads=0;
+ unsigned legacy_writers=0;
  const char* get_name(){return "upper";}const char* get_namespace(){return "/";}
  auto get_publishers_info_by_topic(const char*){++graph_reads;return writers;}
  auto get_subscriptions_info_by_topic(const char*){++graph_reads;return readers;}
+ unsigned count_publishers(const char*){return legacy_writers;}
 };
 int main(){try{
  Node node;auto sub=std::make_shared<Sub>();
@@ -36,5 +39,17 @@ int main(){try{
  node.writers[0].qos.result=rclcpp::QoSCompatibility::Error;CHECK(check().reason.find("qos_incompatible:")==0);
  node.writers[0].qos.result=rclcpp::QoSCompatibility::Warning;CHECK(check().reason.find("qos_compatibility_unknown:")==0);
  node.writers[0].qos.result=rclcpp::QoSCompatibility::Ok;CHECK(check().ready());CHECK(node.graph_reads>20);
+ position_session::CommandGraph graph;int64_t now=0;
+ const auto command=[&](){now+=100000001;return graph.check(node,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo",now);};
+ node.writers.clear();CHECK(std::string(command())=="command_source_discovering");
+ node.writers.push_back({});node.writers[0].node="_NODE_NAME_UNKNOWN_";CHECK(std::string(command())=="command_source_discovering");
+ node.writers[0].node="dual_arm_control_node";CHECK(std::string(command())=="command_source_conflict");
+ node.writers[0].type="snowbot_ctl_msgs/msg/PositionSessionServo";CHECK(command()==nullptr);
+ node.writers[0].ns="/other";CHECK(std::string(command())=="command_source_conflict");node.writers[0].ns="/";
+ node.writers.push_back(node.writers[0]);CHECK(std::string(command())=="command_source_conflict");node.writers.pop_back();
+ node.legacy_writers=1;CHECK(std::string(command())=="legacy_source_conflict");
+ const auto reads=node.graph_reads;
+ CHECK(std::string(graph.check(node,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo",now+1))=="legacy_source_conflict");
+ CHECK(node.graph_reads==reads);
  std::cout<<checks<<" endpoint diagnostic assertions passed\n";
  }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}

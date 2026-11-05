@@ -37,7 +37,6 @@ class Replay:
     empty_prepare: bool = False
     measured_start: tuple = ()
     start_reference_source: str = 'measured'
-    reverse_prepare: bool = False
     velocities: tuple = ()
     accelerations: tuple = ()
     curves: tuple = ()
@@ -49,12 +48,12 @@ class Replay:
     def _at(self, elapsed):
         t = min(max(0., elapsed * self.speed), self.times[-1])
         if self.curves:
-            return self.state(elapsed)[0]
+            return self._state(elapsed)[0]
         i = min(bisect.bisect_right(self.times, t)-1, len(self.times)-2)
         u = (t-self.times[i])/(self.times[i+1]-self.times[i])
         return tuple(a+(b-a)*u for a, b in zip(self.points[i], self.points[i+1]))
 
-    def state(self, elapsed):
+    def _state(self, elapsed):
         """q/v/a from the same accepted Bernstein polynomial."""
         if not self.curves:
             return self._at(elapsed), (), ()
@@ -75,24 +74,27 @@ class Replay:
             q.append(value(controls)); v.append(value(first)*self.speed); a.append(value(second)*self.speed**2)
         return tuple(q), tuple(v), tuple(a)
 
+    def state(self, elapsed):
+        if not self.waist_lead_s:
+            return self._state(elapsed)
+        waist, arms = self._state(elapsed), self._state(elapsed-self.waist_lead_s)
+        return tuple(w[:2]+a[2:] for w,a in zip(waist, arms))
+
     def trajectory_knots(self):
-        if not self.curves or self.waist_lead_s:
+        if not self.curves:
             raise ValueError('REPLAY_PREPARED_CURVE_REQUIRED')
-        times = [p[0]/self.speed for p in self.curves]+[self.duration]
+        boundaries = [p[0]/self.speed for p in self.curves]+[self.times[-1]/self.speed]
+        times = sorted(set([0., *boundaries, *(t+self.waist_lead_s for t in boundaries)]))
         return tuple((t, *self.state(t)) for t in times)
 
     def sample(self, elapsed):
+        if not self.waist_lead_s:
+            return self._at(elapsed)
         waist = self._at(elapsed)
         arms = self._at(elapsed-self.waist_lead_s)
         return waist[:2]+arms[2:]
 
     def validate_profile(self, profile):
-        if self.reverse_prepare:
-            # Apply the same hard limits and margin rule in the original direction.
-            replace(self, times=tuple(self.times[-1]-t for t in reversed(self.times)),
-                    points=tuple(reversed(self.points)), empty_prepare=True,
-                    reverse_prepare=False).validate_profile(profile)
-            return
         if tuple(n for g in GROUPS for n in profile.groups.get(g, ())) != self.names:
             raise ValueError('REPLAY_GROUP_LAYOUT')
         for row in self.points:
@@ -229,6 +231,8 @@ def replay_graph(path, speed, waist_lead_s, hold_s):
 def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01, *, hold_s=None):
     """Select a route from current measurements over the cached certified graph."""
     import heapq
+    if not math.isfinite(tolerance) or tolerance <= 0:
+        raise ValueError('REPLAY_START_TOLERANCE')
     manifest = load_library(Path(path).resolve())
     hold = float(manifest.get('transition_hold_s', 3.) if hold_s is None else hold_s)
     manifest, edges, plans = replay_graph(path, speed, waist_lead_s, hold)
@@ -275,20 +279,6 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
 
 
 
-
-
-def load_prepare_return(path, prepare_log, speed=1.):
-    """One-time empty-hand reversal of the old zero-to-Prepare target stream."""
-    home = load_replay(path, 'SideScoop', speed, waist_lead_s=0.)
-    rows = [json.loads(line) for line in Path(prepare_log).read_text().splitlines()]
-    metadata = next(r for r in rows if r['kind'] == 'plan')
-    targets = [r for r in rows if r['kind'] == 'target']
-    if (metadata['action'] != 'Prepare' or metadata['tool_present'] or not targets or
-            targets[-1]['source_stamp']-targets[0]['source_stamp'] < metadata['duration_s']-1e-6):
-        raise ValueError('RETURN_ZERO_REQUIRES_COMPLETE_PREPARE')
-    end = targets[-1]['source_stamp']
-    return replace(home, times=tuple(end-r['source_stamp'] for r in reversed(targets)),
-                   points=tuple(tuple(r['q']) for r in reversed(targets)), reverse_prepare=True)
 
 
 def plan_prepare(path, robot, measured, speed=1., *, reference=None):
@@ -388,92 +378,56 @@ def replay_follow_limits(config, mode):
 
 
 
-def run_replay(plan, port, *, settle_timeout=5., execution_mode='position', velocity_tolerance=.005, settle_time=.2, command_ttl=.25):
-    """Port owns ROS/feedback; this loop owns source time and playback progress."""
-    nominal = execution_mode == 'impedance'
-    attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
+def run_replay(plan, port, *, timing):
+    """Thin source-clock heartbeat client; the executor owns all motion results."""
+    failure, result, attempted, sent = None, None, False, 0
     try:
-        # Startup READY is historical: a later settling swing can still fail
-        # the servo's takeover gate. Wait without owning or commanding joints.
-        print(f'WAIT_REST 连续停稳 {settle_time:g} 秒后接管；速度门限 {velocity_tolerance:g} rad/s，最多等待 {settle_timeout:g} 秒', flush=True)
-        deadline = port.steady()+settle_timeout
-        rest_since = previous_sample = None
-        while True:
-            _, velocity = port.check(False)
-            sample, now = port.feedback_stamp(), port.steady()
-            worst_speed, worst_joint = max((abs(velocity[n]), n) for n in plan.names)
-            if worst_speed > velocity_tolerance:
-                rest_since = None
-            if previous_sample is None or sample > previous_sample:
-                previous_sample = sample
-                if worst_speed <= velocity_tolerance:
-                    if rest_since is None:
-                        rest_since = now
-                    elif now-rest_since >= settle_time:
-                        break
-            if now >= deadline:
-                raise RuntimeError(f'REPLAY_NOT_SETTLED:axis={worst_joint};speed={worst_speed:g};limit={velocity_tolerance:g}')
-            port.wait_until(now+.02)
-        print('REST_CONFIRMED 开始接管', flush=True)
+        port.prepare(plan)
         attempted = True
         port.acquire()
-        acquired = True
         start = due = renewed = port.steady()
         ros_start = port.ros()
-        if getattr(port, 'prepared', None) is not None:
-            # One dated trajectory, followed by TTL heartbeats. The lead covers
-            # admission, never changes the trajectory's recorded timing.
-            port.begin(plan, ros_start+.12)
-            start += .12
-            due = start
-            ros_start += .12
-        rest_since = None
-        measured_at_goal = False
         while True:
             port.wait_until(due)
+            if port.outcome() is not None:
+                break
             now = port.steady()
-            if now-due >= command_ttl:
+            if now-due >= timing['command_ttl_s']:
                 raise RuntimeError('REPLAY_STREAM_LATE')
-            if abs(port.ros()-(ros_start+now-start)) > command_ttl:
+            if abs(port.ros()-(ros_start+now-start)) > timing['command_ttl_s']:
                 raise RuntimeError('REPLAY_CLOCK_CHANGED')
-            q, v = port.check(True)
-            elapsed = due-start
-            goal = plan.sample(elapsed)
-            if now-renewed >= .5:
+            if now-renewed >= timing['renewal_period_s']:
                 port.renew()
                 renewed = port.steady()
-            if port.steady()-due >= command_ttl:
+            if port.steady()-due >= timing['command_ttl_s']:
                 raise RuntimeError('REPLAY_STREAM_LATE')
-            # The source date is the scheduled tick, never the later service time.
-            port.send(goal, ros_start+elapsed)
+            port.send(ros_start+due-start)
             sent += 1
-            if elapsed >= plan.duration:
-                arrival = port.nominal_reference() if nominal else q
-                measured_at_goal = all(abs(q[n]-x) <= port.arrival_tolerance(n)
-                                       for n,x in zip(plan.names,plan.points[-1]))
-                resting = (arrival is not None and all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
-                               for n,x in zip(plan.names,plan.points[-1])) and
-                           all(abs(v[n]) <= velocity_tolerance for n in plan.names))
-                rest_since = now if resting and rest_since is None else rest_since if resting else None
-                if rest_since is not None and now-rest_since >= settle_time:
-                    arrived = True
-                    break
-                if elapsed-plan.duration >= settle_timeout:
-                    raise RuntimeError('REPLAY_ARRIVAL_UNCONFIRMED')
-            due += .02
+            due += timing['period_s']
     except (Exception, KeyboardInterrupt) as exc:
         failure = str(exc) or type(exc).__name__
     finally:
         if attempted:
             try:
-                stopped = port.release_and_confirm_stop() is True
+                result = port.finish()
             except (Exception, KeyboardInterrupt) as exc:
                 failure = (failure+'; ' if failure else '')+'STOP_UNCONFIRMED:'+str(exc)
-    result = dict(targets_sent=sent, measured_arrival_confirmed=arrived and measured_at_goal,
-                  nominal_arrival_confirmed=arrived and nominal,
-                  measured_end_error_rad={n:q[n]-x for n,x in zip(plan.names,plan.points[-1])} if arrived else None,
-                  stop_confirmed=stopped, completed=arrived and failure is None,
-                  error=failure, driver_started=False, snow_removal_verified=False)
-    if failure:
+    if result is None:
+        result = dict(completed=False, stop_confirmed=False, measured_arrival_confirmed=False,
+                      nominal_arrival_confirmed=False, measured_end_error_rad=None, error=failure, details=[])
+    elif failure:
+        if result['completed'] and failure in ('INVALID_LEASE', 'STOPPING'):
+            result['details'].append(failure)
+        elif result['error'] == 'CANCELED' and failure not in ('INVALID_LEASE', 'STOPPING'):
+            result['details'].append('CANCELED')
+            result['error'] = failure
+        elif result['error']:
+            result['details'].append(failure)
+        else:
+            result['error'] = failure
+        if result['error']:
+            result['completed'] = False
+    result.update(targets_sent=sent, driver_started=False, snow_removal_verified=False)
+    if result['error'] or not result['completed']:
         raise RuntimeError(json.dumps(result))
     return result

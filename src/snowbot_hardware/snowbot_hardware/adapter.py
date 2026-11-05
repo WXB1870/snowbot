@@ -39,10 +39,10 @@ class SnowbotAdapter(ExecutionNode):
 
     def lease(self, request, reply):
         startup = getattr(self.snowbot_devices, 'startup_hold_state', 'disabled')
-        if request.operation == 'acquire' and startup not in ('ready', 'disabled'):
+        if request.operation in ('ready', 'acquire', 'acquire_replay') and startup not in ('ready', 'disabled'):
             reply.ok, reply.code, reply.profile_hash = False, 'STARTUP_HOLD_'+startup.upper(), self.profile.digest
             return reply
-        if request.operation == 'acquire' and getattr(self, 'grippers', None) and self.grippers.core and self.grippers.core.busy and (
+        if request.operation in ('acquire', 'acquire_replay') and getattr(self, 'grippers', None) and self.grippers.core and self.grippers.core.busy and (
                 self.grippers.core.fault or not self.grippers.core.cfg.get('independent_trigger_control',False)):
             reply.ok, reply.code, reply.profile_hash = False, 'GRIPPERS_BUSY_OR_FAULT', self.profile.digest
             return reply

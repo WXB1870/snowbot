@@ -149,9 +149,10 @@
 +#include "snowbot_ctl_msgs/msg/position_session_state.hpp"
 +#include "snowbot_ctl_msgs/msg/position_session_upper.hpp"
 +#include "snowbot_ctl_msgs/msg/position_session_servo.hpp"
-@@ -330,0 +338,28 @@
+@@ -330,0 +338,29 @@
 +        bool native_feedback_seen_=false;
 +        bool position_initialized_=false,position_was_ready_=false;
++        position_session::CommandGraph position_command_graph_;
 +        uint64_t position_instance_id_=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 +        std::string position_init_error_="initializing",position_last_report_,position_wait_reason_;
 +        int64_t position_last_report_ns_=0;
@@ -214,7 +215,7 @@
 +    }else if(this->outpMod == 2 || this->outpMod == 4){
 --- a/dual_arm_control/src/controller/ik_solver_wrapper.cpp
 +++ b/dual_arm_control/src/controller/ik_solver_wrapper.cpp
-@@ -0,0 +1 @@
+@@ -0,0 +1,1 @@
 +#include <stdexcept>
 @@ -15,2 +16,3 @@
 -        // ignore and fallback
@@ -227,7 +228,7 @@
 @@ -0,0 +1,2 @@
 +#include <kdl/chainfksolverpos_recursive.hpp>
 +#include <thread>
-@@ -144,0 +147,58 @@
+@@ -144,0 +147,60 @@
 +    //初始化发布与接受的消息类型
 +
 +    position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionUpper>("/bindu/position/upper",1,std::bind(&ArmCtlNode::position_callback,this,std::placeholders::_1));
@@ -254,7 +255,9 @@
 +            if(!report.empty())RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
 +            position_last_report_=report;position_last_report_ns_=now;
 +        }
-+        m.reason=ready?position_rejection_:position_wait_reason_;m.stop_policy="servo_owned";m.physical_stop_confirmed=false;position_state_pub_->publish(m);
++        m.reason=ready?position_rejection_:position_wait_reason_;m.stop_policy="servo_owned";m.physical_stop_confirmed=false;
++        if(m.feedback_ready)if(const char* reason=position_command_graph_.check(*this,"/bindu/position/upper","robot_upperMonitor","snowbot_ctl_msgs/msg/PositionSessionUpper"))m.reason=reason;
++        position_state_pub_->publish(m);
 +    });
 +    mCtlData_pub = this->create_publisher<snowbot_ctl_msgs::msg::CtlInformation>(
 +        "ctl_data_pub",
@@ -442,9 +445,10 @@
 @@ -1200 +1276 @@
 -    std::cout << "upper monitor data get success" << std::endl;
 +    if(!position_dispatch_)std::cout << "upper monitor data get success" << std::endl;
-@@ -1434,0 +1511,48 @@
+@@ -1434,0 +1511,49 @@
 +
 +void ArmCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr packet){
++ if(const char* reason=position_command_graph_.check(*this,"/bindu/position/upper","robot_upperMonitor","snowbot_ctl_msgs/msg/PositionSessionUpper")){if(std::string(reason)!="command_source_discovering")position_rejection_=reason;return;}
 + if(packet->meta.reference_mode!=2){position_rejection_="reference_mode_conflict";return;}
 + const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();const auto m=position_session::meta(packet->meta);
 + if(!position_ready()){position_gate_.interrupt();position_rejection_=position_wait_reason_;return;}
@@ -501,8 +505,9 @@
 +#include "snowbot_ctl_msgs/msg/position_session_state.hpp"
 +#include "snowbot_ctl_msgs/msg/position_session_command.hpp"
 +#include "snowbot_ctl_msgs/msg/position_session_upper.hpp"
-@@ -168,0 +176,25 @@
+@@ -168,0 +176,26 @@
 +        bool position_initialized_=false,position_was_ready_=false;
++        position_session::CommandGraph position_command_graph_;
 +        uint64_t position_instance_id_=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 +        std::string position_init_error_="initializing",position_last_report_,position_wait_reason_;
 +        int64_t position_last_report_ns_=0;
@@ -529,12 +534,12 @@
 +
 --- a/robot_control/src/robot_control/msgPublisher.cpp
 +++ b/robot_control/src/robot_control/msgPublisher.cpp
-@@ -0,0 +1 @@
+@@ -0,0 +1,1 @@
 +#include <thread>
-@@ -71 +72 @@
+@@ -71,1 +72,1 @@
 -        10,
 +        1,
-@@ -85,0 +87,33 @@
+@@ -85,0 +87,35 @@
 +    position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionCommand>("/bindu/position/command",1,std::bind(&RobotCtlNode::position_callback,this,std::placeholders::_1));
 +    position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/upper_state",1);
 +    position_peer_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1,[this](const snowbot_ctl_msgs::msg::PositionSessionState::SharedPtr m){
@@ -563,7 +568,9 @@
 +            if(!report.empty())RCLCPP_WARN(this->get_logger(),"Position session: %s",report.c_str());
 +            position_last_report_=report;position_last_report_ns_=now;
 +        }
-+        m.reason=ready?position_rejection_:position_wait_reason_;m.stop_policy="servo_owned";m.physical_stop_confirmed=false;position_state_pub_->publish(m);
++        m.reason=ready?position_rejection_:position_wait_reason_;m.stop_policy="servo_owned";m.physical_stop_confirmed=false;
++        if(m.feedback_ready)if(const char* reason=position_command_graph_.check(*this,"/bindu/position/command","execution","snowbot_ctl_msgs/msg/PositionSessionCommand"))m.reason=reason;
++        position_state_pub_->publish(m);
 +    });
 +    position_init_error_=position_session::initialize(*this,[this]{
 +        std::string load_error;
@@ -625,9 +632,10 @@
 @@ -844,0 +893,2 @@
 +    if(!position_initialized_){position_rejection_="initialization_incomplete";return;}
 +
-@@ -881,0 +932,47 @@
+@@ -881,0 +932,48 @@
 +
 +void RobotCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionCommand::SharedPtr packet){
++ if(const char* reason=position_command_graph_.check(*this,"/bindu/position/command","execution","snowbot_ctl_msgs/msg/PositionSessionCommand")){if(std::string(reason)!="command_source_discovering")position_rejection_=reason;return;}
 + if(packet->meta.reference_mode!=2){position_rejection_="reference_mode_conflict";return;}
 + const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 + const auto m=position_session::meta(packet->meta);
@@ -691,7 +699,7 @@
 -  kinematic_pose_msgs
 --- a/servo_control/include/ros_controller/rosLoop.h
 +++ b/servo_control/include/ros_controller/rosLoop.h
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,11 @@
 +#include "position_connection_diagnostics.h"
 +#include "position_session_contract.h"
 +#include "position_trajectory.h"
@@ -702,10 +710,12 @@
 +#include "snowbot_ctl_msgs/msg/position_session_servo.hpp"
 +#include "servo_control/position_follower.h"
 +#include "servo_control/position_clock.h"
++#include "position_session_ros.h"
 @@ -44 +53,0 @@
 -#include "kinematic_pose_msgs/msg/kinematic_pose.hpp"
-@@ -153,0 +163,49 @@
+@@ -153,0 +163,50 @@
 +        bool position_initialized_=false;
++        position_session::CommandGraph position_command_graph_;
 +        uint64_t position_instance_id_=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 +        std::string position_init_error_="initializing",position_last_report_,position_wait_reason_;
 +        int64_t position_last_report_ns_=0;
@@ -803,7 +813,7 @@
 -};
 --- a/servo_control/include/servo_control/position_observation.h
 +++ b/servo_control/include/servo_control/position_observation.h
-@@ -2,0 +3 @@
+@@ -2,0 +3,1 @@
 +#include "position_session_contract.h"
 @@ -20,0 +22,9 @@
 +// Fixed-size diagnostic copy only; never participates in a control decision.
@@ -957,7 +967,7 @@
 +        m.reference_position=s.reference_position;m.reference_speed=s.reference_speed;m.reference_acceleration=s.reference_acceleration;
 +        m.output_position=s.output_position;m.output_speed=s.output_speed;m.output_torque=s.output_torque;m.output_kp=s.output_kp;m.output_kd=s.output_kd;
 +        for(unsigned i=0;i<position_session::joint_count;++i)m.hold_position[i]=s.hold_position[i];
-@@ -107,0 +116,88 @@
+@@ -107,0 +116,90 @@
 +    position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
 +    position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
 +    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if((position_gate_.selected()||position_target_takeover_valid_)&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_interrupt();position_pending_=false;}});
@@ -1023,7 +1033,9 @@
 +                fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
 +            position_last_rt_cycle_fault_ns_=fault.detected_ns;
 +        }
-+        m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
++        m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;
++        if(m.feedback_ready)if(const char* reason=position_command_graph_.check(*this,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo"))m.reason=reason;
++        position_state_pub_->publish(m);
 +    });
 +    const auto receipt_ms=declare_parameter<double>("position_receipt_poll_ms",2.,reference_descriptor);
 +    if(!std::isfinite(receipt_ms) || (receipt_ms!=0. && (receipt_ms<1. || receipt_ms>50.)))throw std::invalid_argument("position_receipt_poll_ms");
@@ -1070,9 +1082,10 @@
 +        // Grippers keep their independent enable state.
 @@ -2070,0 +2180 @@
 +    if(position_gate_.selected()){position_rejection_="legacy_waist_source_conflict";return;}
-@@ -2219,0 +2330,166 @@
+@@ -2219,0 +2330,167 @@
 +
 +void ServoNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
++ if(const char* reason=position_command_graph_.check(*this,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo")){if(std::string(reason)!="command_source_discovering")position_rejection_=reason;return;}
 + position_submit(packet);
 +}
 +void ServoNode::position_interrupt(){

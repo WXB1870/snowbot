@@ -21,6 +21,16 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertEqual(cfg['diagnostics']['pdo_capacity'],1200)
         self.assertEqual(cfg['display']['poll_ms'],150)
 
+    def test_replay_heartbeat_budget_preserves_250ms_ttl_and_120ms_braking_reserve(self):
+        cfg = load_parameters()
+        self.assertEqual(cfg['replay']['period_s'], .02)
+        self.assertEqual(cfg['replay']['command_ttl_s'], .25)
+        self.assertEqual(cfg['replay']['renewal_period_s'], .5)
+        self.assertAlmostEqual(cfg['replay']['command_ttl_s']-cfg['execution']['target_stream_brake_lead_s'], .13)
+        for replay in ({'period_s': .14}, {'command_ttl_s': .1}, {'renewal_period_s': 2.}):
+            with self.assertRaisesRegex(ValueError, 'REPLAY_TIMING'):
+                self.load({'replay': replay})
+
     def test_comments_do_not_change_defaults_or_local_and_remote_overrides(self):
         self.assertNotIn('_comment', load_parameters()['pico'])
         for connection in ('local', 'remote'):

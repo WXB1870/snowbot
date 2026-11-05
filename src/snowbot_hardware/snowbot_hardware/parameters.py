@@ -26,6 +26,7 @@ _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
           'motion_completion_grace_s',
           'validation_worker_timeout_s'),
  'gripper': ('vr_input_max_age_s', 'max_tick_gap_s', 'lease_ttl_s', 'request_ttl_s'),
+ 'replay': ('period_s', 'command_ttl_s', 'renewal_period_s', 'start_lead_s', 'state_max_age_s'),
  'execution': ('target_stream_brake_lead_s', 'stop_confirmation_window_s',
                'held_reference_velocity_tolerance_rad_s',
                'startup_hold_ttl_s',
@@ -112,6 +113,11 @@ def load_parameters(path=None):
     lead = result['execution']['target_stream_brake_lead_s']
     if lead >= .4 or not 0 < round(lead*1e9) < 400_000_000:
         raise ValueError('SNOWBOT_TARGET_BRAKE_LEAD')
+    replay = result['replay']
+    if (replay['period_s']+lead >= replay['command_ttl_s'] or
+            replay['command_ttl_s'] > .4 or replay['start_lead_s'] >= replay['command_ttl_s'] or
+            replay['start_lead_s'] > .15 or replay['renewal_period_s'] >= 2.):
+        raise ValueError('SNOWBOT_REPLAY_TIMING')
     p, g, d = (result[name] for name in ('pico', 'gripper', 'diagnostics'))
     for name in ('grip', 'trigger'):
         if not 0 < p[name+'_release_threshold'] < p[name+'_press_threshold'] < 1:

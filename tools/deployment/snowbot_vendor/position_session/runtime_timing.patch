@@ -113,7 +113,7 @@
 
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -197,6 +197,29 @@
+@@ -197,8 +197,31 @@
              RCLCPP_WARN(this->get_logger(),"POSITION_CYCLE_FIRST_FAULT steady_ns=%lld session=%llu seq=%llu pdo=%llu origin=%s deadline_late_ms=%.6f checks=0x%x dt_ms=%.6f",
                  (long long)fault.detected_ns,(unsigned long long)fault.session,(unsigned long long)fault.sequence,(unsigned long long)fault.pdo_sample,
                  fault.origin==1?"main_check":"rt_reference_deadline",(fault.detected_ns-fault.rt_deadline_ns)*1e-6,unsigned(fault.checks),fault.dt_s*1000.);
@@ -142,7 +142,9 @@
 +            }
              position_last_rt_cycle_fault_ns_=fault.detected_ns;
          }
-         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;position_state_pub_->publish(m);
+         m.reason=report;m.stop_policy=position_stop_policy_;m.physical_stop_confirmed=false;
+         if(m.feedback_ready)if(const char* reason=position_command_graph_.check(*this,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo"))m.reason=reason;
+         position_state_pub_->publish(m);
 @@ -306,6 +329,17 @@
 
      //----------阻抗控制器初始化----------
