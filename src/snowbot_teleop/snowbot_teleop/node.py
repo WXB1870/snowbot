@@ -25,7 +25,7 @@ from snowbot_teleop.control import PicoControl, PicoFeedback, PICO_MAPPING, temp
 from bindu_kinematics.bimanual_worker import BimanualWorker
 from bindu_interfaces.msg import VRInput, ExecutionState, MotionCommand, TeleopModeState, RecorderHealth, RuntimeEvent
 from bindu_execution.interpolation import Curve, State
-from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, PicoContext
+from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, PicoContext, ResetToolReference
 from bindu_interfaces.action import SelectTeleopMode, TeleopSession
 from bindu_runtime.common import RuntimeNode, seconds, stamp, spin, joints_at_rest
 from bindu_runtime.stop_evidence import stop_feedback_matches, sampled_nominal_reference
@@ -213,7 +213,7 @@ class PicoNode(RuntimeNode):
         self.prepare_hold_client=(self.create_client(Trigger,'execution/held_reference')
                                   if self.position_contract and not self.simulation else None)
         self.ready_client=self.create_client(Trigger,'teleop/tool_ready')
-        self.grasp_reference_reset_client=self.create_client(Trigger,'teleop/tool_reference_reset')
+        self.grasp_reference_reset_client=self.create_client(ResetToolReference,'teleop/tool_reference_reset')
         self.arms_ready_client=self.create_client(Trigger,'teleop/arms_ready') if self.position_contract else None
         self.record_client=self.create_client(SetBool,'recorder/capture') if self.recording_enabled else None
         self.modes=ActionClient(self,SelectTeleopMode,'teleop/select_mode')
@@ -657,8 +657,16 @@ class PicoNode(RuntimeNode):
 
     async def reset_grasp_reference(self,intent):
         self.current(intent)
-        reply=await self.wait(self.grasp_reference_reset_client.call_async(Trigger.Request()))
-        if not reply.success:raise RuntimeError(reply.message)
+        request=ResetToolReference.Request(execution_instance_id=self.state.instance_id,epoch=self.state.lease_epoch)
+        deadline=time.monotonic()+parameters_for(self,'pico')['rpc_timeout_s']
+        while True:
+            self.current(intent)
+            reply=await self.wait(self.grasp_reference_reset_client.call_async(request),max(0.,deadline-time.monotonic()))
+            self.current(intent)
+            if reply.ok:return
+            if reply.code!='BIMANUAL_REFERENCE_STATE_PENDING':raise RuntimeError(reply.code)
+            if time.monotonic()>=deadline:raise RuntimeError('PICO_RPC_TIMEOUT')
+            await self.pause()
 
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
