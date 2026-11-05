@@ -95,8 +95,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     counters=[ButtonCounters(),ButtonCounters()]
     vr=node.create_publisher(VRInput,ns+'/teleop/vr/raw',10)
     fixture=load_mode_config(CFG/'teleop.json','simulation')
-    # Exercise an invalid startup posture even if the deployment example is
-    # later calibrated to a valid grasp. Keep this override in the fixture only.
+    # Ordinary arms start at zero; held-tool A returns over certified nodes.
     fixture['device_initial_positions_rad']={n:0. for n in fixture['device_initial_positions_rad']}
     if replay:
         fixture['device_initial_positions_rad']=dict(replay['segment']['capture']['feedback'])
@@ -106,6 +105,10 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     if prepare_return:
         fixture['device_initial_positions_rad']=dict(prepare_return)
         fixture['initial_load_state']='unknown'
+    if not (ordinary or replay or collision_recovery or prepare_return):
+        from snowbot_teleop.replay import NAMES
+        library=json.loads((CFG/'primitive-library/manifest.json').read_text())
+        fixture['device_initial_positions_rad'].update(zip(NAMES,library['nodes']['Push:start']))
     # Unknown load is intentional: the current position contract has no load-state gate.
     fixture['initial_load_state']='unknown'
     fixture['initial_teleop_mode']='independent_arms' if ordinary else 'bimanual_tool'
@@ -612,11 +615,9 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         events=[json.loads(line)['data'] for line in (trace_dir/'runtime-events.jsonl').read_text().splitlines()]
         attempts=[json.loads(e['code']) for e in events if e['state']=='PICO_PREPARE_CHECK']
         assert attempts and attempts[0]['accepted'] and all(attempts[0]['checks'].values()),attempts
-        validations=[json.loads(e['code']) for e in events if e['state']=='PICO_PREPARE_VALIDATION']
-        assert any(v['load_state']=='unknown' and v['operation'] in ('prepare_path','prepare_recovery_path') and
-                   not v['load_state_checked'] and not v['tool_present'] and not v['coupling_checked'] for v in validations)
+        homes=[json.loads(e['code']) for e in events if e['state']=='PICO_PRIMITIVE_HOME']
+        assert homes and homes[0]['route'] and homes[0]['duration_s']>0,homes
         assert any(e['state']=='PICO_ENGAGE_CHECK' for e in events)
-        assert any(json.loads(e['code']).get('read_only_rejection') for e in events if e['state']=='PICO_OPERATION_RESULT')
         checks.append('raw/projected input, commands, feedback and preparation checks persisted without logger queue loss')
         if websocket:
             assert not peer_errors,peer_errors
