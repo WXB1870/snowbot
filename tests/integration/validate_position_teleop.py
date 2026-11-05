@@ -489,11 +489,14 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             return dict(mode=mode,teleop_mode='independent_arms',checks=checks,accepted=len(accepted),vendor_packets=len(packets))
         assert views[-1]['load_state']=='unknown'
         source['grip']=1.
-        wait(lambda:views[-1]['phase']=='standby' and views[-1]['pending'] is None and
-             'BIMANUAL_GRASP_POSE' in views[-1]['reason'])
-        pump(.3);assert not accepted and not packets
-        checks.append('direct engagement from invalid zero posture is refused with geometric reason and no actuation')
-        source['grip']=0.;phase('standby')
+        phase('following');pump(.3)
+        measured=dict(zip(states[-1].joints.name,states[-1].joints.position))
+        assert max(abs(measured[n]-initial[n]) for n in initial)<.003
+        assert views[-1]['tool_phase']=='follow:right_axial'
+        checks.append('measured axial engagement captures the current geometry; stationary hands preserve the initial pose')
+        source['grip']=0.;phase('tool_standby')
+        wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+        assert not states[-1].stop_failures
         before=len(accepted)
         source['buttons'][1]=1
         wait(lambda:views[-1]['pending'] is None and views[-1]['reason']=='PREPARED',40.)
