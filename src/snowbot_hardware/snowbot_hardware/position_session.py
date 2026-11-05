@@ -308,27 +308,29 @@ class PositionSessionDevices:
             self.node.get_logger().warn(detail, throttle_duration_sec=1.)
 
     def _check_session_health(self, groups, *, acquiring=False):
-        self.health.require(groups, acquiring=(acquiring or self.io.requesting_pause or bool(self.io.stop_targets)))
         obs = self.health.observation
+        waiting = obs is not None and self._waiting_for_takeover_pdo(obs)
+        self.health.require(groups, acquiring=(acquiring or waiting or self.io.requesting_pause or bool(self.io.stop_targets)))
         if obs.session_selected and obs.session != self.envelopes.session:
             # A paused/expired session can be explicitly replaced after capture.
             # During a pending stop, ignore its delayed observation and wait for
             # the exact new PAUSE identity; it cannot confirm this stop.
             if not (acquiring or self.io.requesting_pause or self.io.stop_targets or
-                    self._waiting_for_takeover_pdo(obs)) or obs.session_reason < 1:
+                    waiting) or obs.session_reason < 1:
                 raise RuntimeError('SNOWBOT_SESSION_OWNER_CONFLICT')
 
     def _waiting_for_takeover_pdo(self, obs):
-        # ACK may arrive before PDO changes owner. Allow only the captured old
-        # hold, until actual adoption or the original TAKEOVER deadline.
+        # ACK may precede PDO adoption. Only the captured old hold/stop may
+        # remain until adoption or the original TAKEOVER deadline.
         previous = self.takeover_previous_hold
         return bool(previous is not None and
             (obs.boot_id, obs.session, obs.command_sequence,
              self.health.states['servo'][1].instance_id) == previous[:4] and
             round(self.node.now()*1e9) < previous[4] and
-            obs.session_reason == 1 and obs.hold_valid and
-            getattr(obs, 'trajectory_phase', 0) == 4 and
-            getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False))
+            obs.session_reason == previous[5] and
+            (obs.session_reason >= 2 or obs.hold_valid and
+             getattr(obs, 'trajectory_phase', 0) == 4 and
+             getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False)))
 
     def check_health(self, groups, *, acquiring=False):
         self._check_session_health(groups, acquiring=acquiring)
@@ -599,11 +601,11 @@ class PositionSessionDevices:
                 self.takeover_pending = (dict(metadata), instance)
                 obs = self.health.observation
                 self.takeover_previous_hold = (
-                    (obs.boot_id, obs.session, obs.command_sequence, instance, metadata['expires_at_ns'])
-                    if obs.session_selected and obs.session != metadata['session'] and
-                    obs.session_reason == 1 and obs.hold_valid and
+                    (obs.boot_id, obs.session, obs.command_sequence, instance, metadata['expires_at_ns'], obs.session_reason)
+                    if obs.session != metadata['session'] and (obs.session_reason >= 2 or
+                    obs.session_selected and obs.session_reason == 1 and obs.hold_valid and
                     getattr(obs, 'trajectory_phase', 0) == 4 and
-                    getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False)
+                    getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False))
                     else None)
             elif metadata['operation'] == 2:
                 self.takeover_pending = None

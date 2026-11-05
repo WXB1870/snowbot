@@ -13,7 +13,7 @@
 +  // Completed PAUSE owns a local fixed hold; expired relay copies cannot renew it.
 +  if(position_local_hold_ && source==position_gate_.last() && !position_gate_.live(steady))return;
    auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
-   const bool cancel_takeover=source.operation==2&&position_target_takeover_valid_&&
+   const bool cancel_takeover=source.operation==2&&(position_target_takeover_valid_||position_v2_.rejected.matches(position_target_takeover_.source))&&
 @@ -2456,6 +2458,11 @@
   const auto now=position_session::steady_ns();const auto dt=position_interval_.tick(now);
   if(impedance_enable_){position_interrupt();position_output_.deadline=now;position_output_.failure_reason=position_session::CONTROL_SOURCE_CONFLICT;if(position_reference_mode_)position_cycle_reason_="control_source_conflict";else position_rejection_="control_source_conflict";EtherCAT_positionOutput(position_output_);return;}

@@ -107,10 +107,10 @@
 
 -    std::vector<outpWrap> mRes;
 +    std::vector<outpWrap> mRes,reference_only;
-+    const bool target_stream=position_gate_.selected()&&position_meta_.reference_mode==2;
++    const bool target_stream=position_gate_.selected()&&position_meta_.reference_mode==2;if(target_stream&&!position_gate_.live(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))return;
 +    if(target_stream){
 +        reference_only.resize(2);const auto now=this->now().nanoseconds();
-+        const bool nominal=position_nominal_session_==position_meta_.session&&position_nominal_stamp_>0&&now>=position_nominal_stamp_&&now-position_nominal_stamp_<=20000000;
++        const bool nominal=(position_nominal_session_==position_meta_.session||now<position_nominal_bootstrap_expires_)&&position_nominal_stamp_>0&&now>=position_nominal_stamp_&&now-position_nominal_stamp_<=20000000;
 +        if(!nominal&&!(position_nominal_session_!=position_meta_.session&&now<position_nominal_bootstrap_expires_&&position_feedback_.fresh(now,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))){
 +            position_gate_.interrupt();position_rejection_="nominal_reference_unavailable";return;
 +        }
@@ -288,7 +288,7 @@
 +     (position_target_pending_&&source==position_session::meta(position_target_pending_->meta)))return;
 +  const auto ros=this->now().nanoseconds(),steady=position_session::steady_ns();
 +  auto context=position_v2_.context(position_gate_,position_instance_id_,position_feedback_gid_);
-+  const bool cancel_takeover=source.operation==2&&position_target_takeover_valid_&&
++  const bool cancel_takeover=source.operation==2&&(position_target_takeover_valid_||position_v2_.rejected.matches(position_target_takeover_.source))&&
 +   source.session==position_target_takeover_.source.session&&source.sequence>position_target_takeover_.source.sequence&&source.stamp>=position_target_takeover_.source.stamp;
 +  if(cancel_takeover)context.identity=position_target_takeover_.identity;
 +  position_session::ServoCommand checked;
@@ -304,7 +304,7 @@
 +   // activation; this is not a braking trajectory or physical-stop confirmation.
 +   ++position_target_barrier_;position_interrupt();
 +   position_target_error_.reason("takeover_canceled_before_activation");position_cycle_reason_=position_target_error_.c_str();
-+   position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
++   position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;position_v2_.rejected.reject(source,position_cycle_reason_);
 +   if(position_receipts_enabled_)position_receipts_.push(source.session,source.sequence,position_feedback_.boot,position_feedback_.sample,ros,false,position_cycle_reason_);
 +   return;
 +  }
