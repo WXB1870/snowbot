@@ -663,8 +663,6 @@ class PicoNode(RuntimeNode):
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
-        if intent.operation=='prepare' and self.position_contract:
-            await self.reset_grasp_reference(intent)
         arrival_tolerance=(self.prepare_position_tolerance if intent.operation=='prepare'
                            else self.profile.feedback_tolerances['joint_position'])
         nominal_arrival=self.position_contract and getattr(self,'execution_mode','position')=='impedance'
@@ -750,6 +748,8 @@ class PicoNode(RuntimeNode):
                     candidate=Curve.between(0.,duration*.75,before,after)
                     if not candidate.valid(self.profile,self.names):break
                     duration*=.75;curve=candidate
+            if intent.operation=='prepare' and self.position_contract:
+                await self.reset_grasp_reference(intent)
             self.event('PICO_ACTUATOR_STARTED',json.dumps(dict(operation=intent.operation,
                 duration_s=duration,position_tolerance_rad=arrival_tolerance,
                 fit_duration=fit_duration,simulated_actuator=self.simulation)))

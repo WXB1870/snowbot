@@ -873,6 +873,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         async def wait(value):return value
         renewal=S(done=lambda:True,result=lambda:lease)
         node=S(current=Mock(),feedback=lambda:S(stopped=True),prepare_position_tolerance=.035,
+            reset_grasp_reference=AsyncMock(),
             leases=S(call_async=lambda r:lease if r.operation=='acquire' else renewal),wait=wait,instance_id='test',groups=('left_arm',),
             state=state,reading=reading,names=(joint,),position_contract=position_contract,profile=profile,
             event=Mock(),simulation=False,now=lambda:clock[0],runtime_mode='real',pause=pause,
