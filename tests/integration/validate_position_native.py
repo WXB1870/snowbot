@@ -186,6 +186,39 @@ def write_position_cycle_check(source, work, root):
     checks=(root/'test_position_cycle.inc').read_text()
     path=work/'test_production_position_cycle.cpp';path.write_text(preamble+clock+body+methods+checks);return path
 
+def write_shutdown_check(source, work, root):
+    """Actual servo shutdown methods with the existing memory controller fixture."""
+    fixture=(root/'test_session_impedance.cpp').read_text()
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
+    preamble='\n'.join(line for line in preamble.splitlines() if
+        'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
+    body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
+    body='\n'.join(line for line in body.splitlines() if
+        'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
+    header=(source/'servo_control/include/ros_controller/rosLoop.h').read_text()
+    fields=header[header.index('        // Local shutdown'):header.index('        uint64_t position_frame_')]
+    body=body[:body.rindex('\n};')]+TARGET_FIELDS+fields+'''
+ bool drive_startup_finished_=false;std::string position_init_error_;
+ std::vector<double> lArm_pos_receive=std::vector<double>(7),rArm_pos_receive=std::vector<double>(7);
+ struct StartupCommand {double joint_pos=0;};StartupCommand servo_desMsg_orig[14]{};
+ double h_pos_curr[2]{},t_pos_curr[2]{};
+ void EtherCATmsg_Get(){};
+};
+bool control_allowed=true;unsigned shutdown_controls=0;
+bool ServoNode::session_impedance_step(double){++shutdown_controls;return control_allowed;}
+double g_left_pos_curr=0,g_right_pos_curr=0;
+'''
+    if 'sensor_valid_mask' not in (source/'servo_control/include/servo_control/position_observation.h').read_text():
+        body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
+    constants='\n'.join(line for line in text.splitlines() if line.startswith('constexpr auto kShutdownTimeout'))+'\n'
+    methods=text[text.index('void ServoNode::position_startup'):text.index('//目标值包装协议')]
+    if 'session_impedance_step(dt)' in methods:
+        preamble='#define POSITION_SHUTDOWN_IMPEDANCE 1\n'+preamble
+    path=work/'test_position_shutdown.cpp'
+    path.write_text(preamble+constants+body+methods+(root/'test_position_shutdown.inc').read_text())
+    return path
+
 def write_loop_runtime_check(source, work, root):
     text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
     begin=text.index('void ServoNode::ctlmsg_get()')
@@ -268,6 +301,7 @@ def main():
                     for name in ('interpolation.cpp','adaptive_stream.cpp')]
     trajectory=args.source/'servo_control/include/position_trajectory.h'
     if trajectory.is_file():
+        names.append('test_position_shutdown')
         # Compile the exact common implementation copied and hashed by the preparer.
         sources += [trajectory,*(native_include/name for name in
                     ('interpolation.hpp','adaptive_stream.hpp','curve_math.hpp')),*native_sources]
@@ -313,7 +347,9 @@ def main():
         (work/'rclcpp/rclcpp.hpp').write_text(NODE_SHIM)
         for name in names:
             binary=work/name
-            if name=='test_position_loop_runtime':
+            if name=='test_position_shutdown':
+                copied=write_shutdown_check(args.source,work,root)
+            elif name=='test_position_loop_runtime':
                 copied=write_loop_runtime_check(args.source,work,root)
             elif name=='test_drive_cycle':
                 copied=write_drive_cycle_check(args.source,work,root)
@@ -338,7 +374,7 @@ def main():
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
-            elif name in ('test_position_target','test_production_target','test_production_position_cycle'):
+            elif name in ('test_position_shutdown','test_position_target','test_production_target','test_production_position_cycle'):
                 command.extend(map(str,native_sources))
             compiled=subprocess.run(command,capture_output=True,text=True)
             if compiled.returncode:failed(compiled.stdout+compiled.stderr)

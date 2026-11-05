@@ -278,9 +278,11 @@ def wait_service(children, ready, spin, stopped, timeout=120.):
 
 
 def stop_services(children):
-    # Keep the lower chain alive until the higher layer finishes its normal exit.
+    # Base shutdown is a servo action: keep upper/middle alive until its final
+    # stop/disable acknowledgement. Operator-only children still reverse.
     success = True
-    for name, child in reversed(children):
+    ordered = sorted(reversed(children), key=lambda item: item[0] != 'servo')
+    for name, child in ordered:
         if child.poll() is not None:
             continue
         print(f'STOP {name}', flush=True)
