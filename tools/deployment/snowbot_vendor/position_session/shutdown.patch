@@ -1,16 +1,64 @@
+--- a/servo_control/include/position_trajectory.h
++++ b/servo_control/include/position_trajectory.h
+@@ -416,3 +416,3 @@
+ public:
+- struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;double prepare_us=0.;};
++ struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;double prepare_us=0.;bool shutdown=false;int64_t completed_ns=0;std::unique_ptr<const bindu::execution::PreparedSegment> shutdown_home;};
+ private:
+@@ -423,2 +423,3 @@
+  std::array<typename Packet::SharedPtr,64> deferred_{};std::atomic<unsigned> deferred_read_{0},deferred_write_{0};
++ bool shutdown_=false;std::array<double,joint_count> shutdown_goal_{};double shutdown_timeout_=0.;
+  std::thread worker_;
+@@ -436,9 +437,19 @@
+    }
+-   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
++   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;result->shutdown=shutdown_;
+    const auto began=std::chrono::steady_clock::now();
+-   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
++   try{if(result->shutdown){
++    using namespace bindu::execution;
++    JointLimits limits;for(unsigned i=0;i<joint_count;++i)limits.push_back({lower[i],upper[i],limits_[0],limits_[1],limits_[2]});
++    JointState seed;seed.q.assign(snapshot_.q.begin(),snapshot_.q.end());seed.v.assign(snapshot_.v.begin(),snapshot_.v.end());seed.a.assign(snapshot_.a.begin(),snapshot_.a.end());seed.j.assign(joint_count,0.);
++    result->prepared=std::make_unique<TrajectoryQueue::Prepared>();
++    result->prepared->segment=std::make_unique<const PreparedSegment>(PreparedSegment::stop(limits,seed,0.,shutdown_timeout_));
++    const auto rest=result->prepared->segment->sample(result->prepared->segment->end());
++    result->shutdown_home=std::make_unique<const PreparedSegment>(PreparedSegment::target(limits,rest,
++      std::vector<double>(shutdown_goal_.begin(),shutdown_goal_.end()),0.,shutdown_timeout_,shutdown_timeout_));
++   }else{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}}
+    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
++   result->completed_ns=steady_ns();
+    result->prepare_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-began).count();
+    // Observation-only callback; its failure cannot alter control acceptance.
+-   if(report_)try{report_(*result);}catch(...){}
++   if(report_ && !result->shutdown)try{report_(*result);}catch(...){}
+    completed_.store(result,std::memory_order_release);
+@@ -452,3 +463,9 @@
+   if(busy_.exchange(true,std::memory_order_acq_rel))return false;
+-  input_=std::move(packet);origin_=std::move(origin);context_=context;snapshot_=snapshot;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
++  shutdown_=false;input_=std::move(packet);origin_=std::move(origin);context_=context;snapshot_=snapshot;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
++ }
++ bool submit_shutdown(const TargetSnapshot& seed,const std::array<double,joint_count>& goal,
++   double velocity,double acceleration,double jerk,double timeout)noexcept{
++  if(busy_.exchange(true,std::memory_order_acq_rel))return false;
++  shutdown_=true;snapshot_=seed;shutdown_goal_=goal;shutdown_timeout_=timeout;limits_={velocity,acceleration,jerk};
++  ready_.store(true,std::memory_order_release);return true;
+  }
 --- a/servo_control/include/ros_controller/rosLoop.h
 +++ b/servo_control/include/ros_controller/rosLoop.h
-@@ -4,2 +4,3 @@
- #include "position_trajectory.h"
-+#include "position_shutdown.h"
- #include "position_receipt.h"
-@@ -165,2 +166,3 @@
+@@ -165,2 +165,3 @@
          void run();
 +        int exit_code() const { return shutdown_exit_code_; }
 
-@@ -221,2 +223,6 @@
+@@ -221,2 +222,13 @@
          position_session::Output position_output_;
-+        position_session::Shutdown position_shutdown_;
++        // Local shutdown reuses the existing admission worker.
++        enum ShutdownPhase { ShutdownIdle,ShutdownPlanning,ShutdownBraking,ShutdownReturning,ShutdownDisabling,ShutdownDone };
++        ShutdownPhase shutdown_phase_=ShutdownIdle;
++        position_session::TargetSnapshot shutdown_seed_;
++        bool shutdown_requested_=false;
++        int64_t shutdown_start_=0,shutdown_deadline_=0,shutdown_settled_=0;
++        std::unique_ptr<const bindu::execution::PreparedSegment> shutdown_brake_,shutdown_home_;
++        std::string shutdown_error_;
 +        int shutdown_exit_code_=0;
 +        bool position_shutdown_tick();
 +        bool position_shutdown_control(double dt);
@@ -36,11 +84,19 @@
    }
 +  if(input.shutdown && !output.shutdown && !latched_failure)nominal_pause=false;
    const bool new_pause=input.operation==2 && (input.session!=session || input.sequence>sequence);
-@@ -69,2 +71,3 @@
+@@ -67,4 +69,7 @@
+   const bool local=nominal_matches(input);
++  bool lost_enable=false;
++  if(input.shutdown && !input.shutdown_disable)for(unsigned i=0;i<joint_count;++i)lost_enable|=(obs.status[position_slot(i)]&0x6f)!=0x27;
+   uint8_t failure=OK;
    if(input.policy==0)failure=UNCONFIRMED_POLICY;
 +  else if(input.shutdown && now>=input.shutdown_deadline)failure=CYCLE_OR_TRACKING_ERROR;
    else if(input.failure_reason>=CONTROL_SOURCE_CONFLICT)failure=input.failure_reason;
-@@ -90,3 +93,4 @@
+@@ -72,2 +77,3 @@
+   else if(!measured(obs,now))failure=FEEDBACK_INVALID;
++  else if(lost_enable)failure=DRIVE_FAULT;
+   else if(fault_mask(obs)&controlled_mask)failure=DRIVE_FAULT;
+@@ -90,3 +96,4 @@
    }
 -  if(nominal_matches(input))reason=PAUSED;
 +  if(input.shutdown)reason=OK;
@@ -261,7 +317,7 @@
 -        }
 -
          //发布六维力传感器数据
-@@ -1913,4 +1757,71 @@
+@@ -1913,4 +1757,107 @@
      EtherCAT_setMotorEnable(false);
 -    std::cout << "机械臂电机已失能，EtherCAT驱动安全停机。" << std::endl;
 -    RCLCPP_INFO(this->get_logger(), "程序已安全退出");
@@ -277,69 +333,105 @@
 +bool ServoNode::position_shutdown_tick(){
 +    using namespace position_session;
 +    const auto now=steady_ns();const auto obs=EtherCAT_positionObservation();
-+    if(position_shutdown_.phase==Shutdown::Phase::Idle){
++    const bool fresh=now-obs.sampled_ns<=20000000;
++    const int64_t timeout=std::chrono::duration_cast<std::chrono::nanoseconds>(kShutdownTimeout).count();
++    const auto disable=[&](const std::string& reason){
++        if(!reason.empty())shutdown_error_=reason;
++        if(shutdown_phase_!=ShutdownDisabling){shutdown_phase_=ShutdownDisabling;shutdown_deadline_=now+timeout;}
++    };
++    if(shutdown_phase_==ShutdownIdle){
 +        std::cout << "收到退出请求：保留当前控制模式，停止后回位。" << std::endl;
-+        bool enabled=obs.output_valid && obs.reference_valid && measured(obs,now);
-+        for(unsigned i=0;i<joint_count;++i)if((obs.status[position_slot(i)]&0x6f)!=0x27)enabled=false;
-+        if(!position_startup_complete_ || !position_output_.selected || !enabled || obs.session_reason>PAUSED){
-+            position_shutdown_.disable(now,position_output_.selected?"shutdown_not_ready_or_faulted":nullptr);
-+        }else{
-+            TargetSnapshot seed;
-+            const auto ros=this->now().nanoseconds();
-+            bool seeded=position_trajectory_.snapshot(ros,now,2,position_target_prepare_ns_,position_feedback_.q,seed);
-+            // A completed local PAUSE remains valid after the original relay TTL.
-+            if(!seeded && position_local_hold_ && obs.trajectory_phase==4){
-+                seed.q=obs.reference_position;seed.v=obs.reference_speed;seed.a=obs.reference_acceleration;
-+                seed.effective_steady=now+position_target_prepare_ns_;seed.valid=true;seeded=true;
++        shutdown_deadline_=now+timeout;shutdown_phase_=ShutdownPlanning;
++        if(!position_startup_complete_ || !position_output_.selected || !obs.reference_valid)
++            disable(position_output_.selected?"shutdown_not_ready_or_faulted":"");
++    }
++    // Consume the RT watchdog result and cached observation age, without
++    // repeating drive/fault scans or clearing its latch.
++    if(shutdown_phase_<ShutdownDisabling && (!obs.output_valid || !fresh))
++        disable("shutdown_feedback_or_latched_fault");
++    if(shutdown_phase_==ShutdownPlanning){
++        if(auto result=position_admission_->poll()){
++            if(result->shutdown){
++                if(!result->error.empty())disable(result->error);
++                else if(result->completed_ns>shutdown_seed_.effective_steady)disable("shutdown_plan_late");
++                else{
++                    shutdown_brake_=std::move(result->prepared->segment);shutdown_home_=std::move(result->shutdown_home);
++                    shutdown_start_=shutdown_seed_.effective_steady;shutdown_phase_=ShutdownBraking;
++                    shutdown_deadline_=shutdown_start_+int64_t(shutdown_brake_->end()*1e9)+timeout;
++                }
++            }
++            position_admission_->release(result);
++        }
++        if(shutdown_phase_==ShutdownPlanning && !shutdown_requested_ && !position_admission_->busy()){
++            bool seeded=position_trajectory_.snapshot(this->now().nanoseconds(),now,2,position_target_prepare_ns_,position_feedback_.q,shutdown_seed_);
++            if(!seeded && position_local_hold_){
++                shutdown_seed_.q=obs.reference_position;shutdown_seed_.v=obs.reference_speed;shutdown_seed_.a=obs.reference_acceleration;
++                shutdown_seed_.effective_steady=now+position_target_prepare_ns_;seeded=true;
 +            }
 +            std::array<double,joint_count> goal{};
 +            for(unsigned i=0;i<7;++i){goal[i]=lArm_shutdownPos[i];goal[i+7]=rArm_shutdownPos[i];}
-+            if(!seeded)position_shutdown_.disable(now,"shutdown_reference_unavailable");
-+            else position_shutdown_.begin(seed,goal,trajectory_max_velocity_,trajectory_max_acceleration_,
-+                trajectory_max_jerk_,now,std::chrono::duration<double>(kShutdownTimeout).count());
++            if(!seeded)disable("shutdown_reference_unavailable");
++            else shutdown_requested_=position_admission_->submit_shutdown(shutdown_seed_,goal,
++                trajectory_max_velocity_,trajectory_max_acceleration_,trajectory_max_jerk_,timeout*1e-9);
 +        }
++        if(shutdown_phase_==ShutdownPlanning && shutdown_requested_ && now>=shutdown_seed_.effective_steady)
++            disable("shutdown_plan_late");
 +    }
-+    const bool prepared=position_shutdown_.poll(now);
-+    if(!prepared){
-+        // Follow the original dated timeline until the prepared brake starts.
-+        // Its finite local shutdown deadline is separate from the client TTL.
-+        if(!position_local_hold_ && !position_trajectory_.sample(now))position_shutdown_.disable(now,"shutdown_reference_expired");
-+        else if(!position_local_hold_){
-+            position_output_.reference_position=position_trajectory_.q;
-+            position_output_.reference_speed=position_trajectory_.v;
-+            position_output_.reference_acceleration=position_trajectory_.a;
++    if(shutdown_phase_<ShutdownDisabling && now>=shutdown_deadline_)disable("shutdown_timeout");
++    auto& output=position_output_;
++    output.shutdown=true;output.nominal_hold=false;
++    if(shutdown_phase_<ShutdownDisabling){
++        if(shutdown_phase_==ShutdownPlanning || now<shutdown_start_){
++            if(!position_local_hold_){
++                position_trajectory_.sample(now);
++                output.reference_position=position_trajectory_.q;output.reference_speed=position_trajectory_.v;output.reference_acceleration=position_trajectory_.a;
++            }
++        }else{
++            const auto& curve=shutdown_phase_==ShutdownBraking?shutdown_brake_:shutdown_home_;
++            const auto elapsed=std::min((now-shutdown_start_)*1e-9,curve->end());
++            std::array<double,joint_count> jerk{};
++            curve->sample_into(elapsed,output.reference_position.data(),output.reference_speed.data(),output.reference_acceleration.data(),jerk.data(),joint_count);
++            output.operation=0;output.trajectory=true;output.trajectory_phase=elapsed<curve->end()?(shutdown_phase_==ShutdownBraking?3:2):4;
++            bool resting=elapsed>=curve->end();
++            for(unsigned i=0;i<joint_count;++i){const auto slot=position_slot(i);
++                resting=resting && std::abs(obs.position[slot]-output.reference_position[i])<=(i<14?.02:.01) &&
++                    std::abs(obs.speed[slot])<=position_trajectory_.tuning().takeover_velocity_tolerance_rad_s;
++            }
++            if(!resting)shutdown_settled_=0;
++            else if(!shutdown_settled_)shutdown_settled_=now;
++            else if(now-shutdown_settled_>=500000000LL){
++                if(shutdown_phase_==ShutdownBraking){shutdown_phase_=ShutdownReturning;shutdown_start_=now;shutdown_settled_=0;shutdown_deadline_=now+int64_t(shutdown_home_->end()*1e9)+timeout;}
++                else disable("");
++            }
 +        }
-+        position_output_.shutdown=true;position_output_.nominal_hold=false;
-+        position_output_.shutdown_deadline=position_shutdown_.deadline();
-+    }
-+    position_shutdown_.tick(now,obs,position_output_,position_trajectory_.tuning().takeover_velocity_tolerance_rad_s);
-+    if(position_shutdown_.sampling() || (!prepared && position_shutdown_.phase==Shutdown::Phase::Planning)){
-+        bool valid=measured(obs,now) && obs.output_valid && obs.session_reason<=PAUSED;
++        // Curves are already certified. Only following error and the actual
++        // control-loop interval need checking again during execution.
++        bool tracking=true;
 +        for(unsigned i=0;i<joint_count;++i){
-+            const auto q=position_output_.reference_position[i];
-+            if(!std::isfinite(q) || q<lower[i] || q>upper[i] || std::abs(q-obs.position[position_slot(i)])>.5)valid=false;
-+            position_output_.q[i]=float(q);position_output_.v[i]=float(position_output_.reference_speed[i]);
++            if(std::abs(output.reference_position[i]-obs.position[position_slot(i)])>.5)tracking=false;
++            output.q[i]=float(output.reference_position[i]);output.v[i]=float(output.reference_speed[i]);
 +        }
 +        const auto dt=position_interval_.tick(now);
-+        if(!valid || !std::isfinite(dt) || dt<=0 || dt>.01 || !position_shutdown_control(dt)){
-+            position_output_.failure_reason=CYCLE_OR_TRACKING_ERROR;
-+            position_shutdown_.disable(now,"shutdown_tracking_or_control_failed");
-+            position_shutdown_.tick(now,obs,position_output_,.01);
++        if(!tracking || dt<=0 || dt>.01 || !position_shutdown_control(dt)){
++            output.failure_reason=CYCLE_OR_TRACKING_ERROR;disable("shutdown_tracking_or_control_failed");
 +        }
 +    }
-+    position_output_.rt_deadline=now+20000000;
-+    EtherCAT_positionOutput(position_output_);
-+    if(position_shutdown_.phase!=Shutdown::Phase::Done)return false;
-+    shutdown_exit_code_=position_shutdown_.failed()?1:0;
-+    std::cout << "关机结果: " << position_shutdown_.reason() << "; disable="
-+              << (obs.shutdown_disabled?"confirmed":"unconfirmed") << "; brake=unverified" << std::endl;
++    output.shutdown_disable=shutdown_phase_==ShutdownDisabling;output.shutdown_deadline=shutdown_deadline_;output.rt_deadline=now+20000000;
++    EtherCAT_positionOutput(output);
++    if(shutdown_phase_!=ShutdownDisabling)return false;
++    if(obs.shutdown_disabled && fresh)shutdown_phase_=ShutdownDone;
++    else if(now>=shutdown_deadline_){shutdown_error_="shutdown_disable_unconfirmed";shutdown_phase_=ShutdownDone;}
++    if(shutdown_phase_!=ShutdownDone)return false;
++    shutdown_exit_code_=!shutdown_error_.empty();
++    std::cout << "关机结果: " << (shutdown_error_.empty()?"shutdown_complete":shutdown_error_)
++              << "; disable=" << (obs.shutdown_disabled?"confirmed":"unconfirmed") << "; brake=unverified" << std::endl;
 +    return true;
  }
-@@ -2546,2 +2457,3 @@
+@@ -2546,2 +2493,3 @@
  void ServoNode::position_submit(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
 + if(shutdown_mode_ || sigInterrupt.load()){position_rejection_="shutdown_in_progress";return;}
   const auto source=position_session::meta(packet->meta);
-@@ -2621,2 +2533,3 @@
+@@ -2621,2 +2569,3 @@
  void ServoNode::position_poll(){
 + if(shutdown_mode_ || sigInterrupt.load())return;
   if(!position_admission_)return;

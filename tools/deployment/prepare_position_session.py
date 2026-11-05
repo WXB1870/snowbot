@@ -161,7 +161,6 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'joint_impedance_118','impedance')
         if not observation_only:
-            shutil.copy2(ASSETS/'position_shutdown.h',stage/'src/servo_control/include/position_shutdown.h')
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'shutdown.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'shutdown')
             if with_impedance:

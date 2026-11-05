@@ -233,13 +233,12 @@ def write_shutdown_check(source, work, root):
     preamble=fixture[:fixture.index('constexpr double TEMPTIME')]
     preamble='\n'.join(line for line in preamble.splitlines() if
         'impedance/cartesian_impedance_controller.h' not in line and 'EIGEN_RUNTIME_NO_MALLOC' not in line)+'\n'
-    preamble+='#include "position_shutdown.h"\n'
     body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
     body='\n'.join(line for line in body.splitlines() if
         'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.index(' void start(')]+TARGET_FIELDS+'''
- position_session::Shutdown position_shutdown_;int shutdown_exit_code_=0;
- bool position_shutdown_tick();bool position_shutdown_control(double);
+    header=(source/'servo_control/include/ros_controller/rosLoop.h').read_text()
+    fields=header[header.index('        // Local shutdown'):header.index('        uint64_t position_frame_')]
+    body=body[:body.index(' void start(')]+TARGET_FIELDS+fields+'''
 };
 bool control_allowed=true;unsigned shutdown_controls=0;
 bool ServoNode::session_impedance_step(double){++shutdown_controls;return control_allowed;}
@@ -332,8 +331,7 @@ def main():
                     for name in ('interpolation.cpp','adaptive_stream.cpp')]
     trajectory=args.source/'servo_control/include/position_trajectory.h'
     if trajectory.is_file():
-        if (args.source/'servo_control/include/position_shutdown.h').is_file():
-            names.append('test_position_shutdown')
+        names.append('test_position_shutdown')
         # Compile the exact common implementation copied and hashed by the preparer.
         sources += [trajectory,*(native_include/name for name in
                     ('interpolation.hpp','adaptive_stream.hpp','curve_math.hpp')),*native_sources]

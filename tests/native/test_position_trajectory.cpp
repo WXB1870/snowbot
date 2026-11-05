@@ -1,5 +1,4 @@
 #include "position_trajectory.h"
-#include "position_shutdown.h"
 #include "servo_control/position_watchdog.h"
 #include "servo_control/position_clock.h"
 #include <cassert>
@@ -87,52 +86,21 @@ void check_admission_isolation(const PreparedSegment& first,const PreparedSegmen
  std::cout<<"PASS 100 ms import isolation, single in-flight SPSC, post-import deadline check, zero commit/sample allocation or deletion, no adoption before commit and failed-import preservation\n";
 }
 
-void check_shutdown(){
- Shutdown action;TargetSnapshot seed;seed.q[1]=.2;seed.q[8]=-.2;seed.q[3]=-.916625;
- seed.v[0]=.03;seed.a[0]=.02;seed.valid=true;
- auto goal=seed.q;goal[0]+=.02;
- auto now=steady_ns();seed.effective_steady=now+50000000;
- action.begin(seed,goal,.25,.5,162.,now,8.);
- while(steady_ns()<seed.effective_steady){action.poll(steady_ns());std::this_thread::sleep_for(std::chrono::milliseconds(1));}
- assert(action.poll(seed.effective_steady));assert(action.sampling());
- Observation obs;obs.sample=1;obs.valid_mask=0xfffff;obs.wkc=obs.expected_wkc=67;
- obs.status.fill(0x27);obs.output_valid=true;
- for(unsigned i=0;i<joint_count;++i)obs.position[position_slot(i)]=float(seed.q[i]);
- Output output;output.selected=true;output.policy=2;output.kp.fill(1);output.kd.fill(.2f);output.torque.fill(6);
- now=seed.effective_steady;obs.sampled_ns=now;action.tick(now,obs,output,.01);
- for(unsigned i=0;i<joint_count;++i){assert(std::abs(output.reference_position[i]-seed.q[i])<1e-12);assert(std::abs(output.reference_speed[i]-seed.v[i])<1e-12);assert(std::abs(output.reference_acceleration[i]-seed.a[i])<1e-12);}
- assert(output.kp[3]==1&&output.kd[3]==.2f&&output.torque[3]==6&&!output.shutdown_disable);
- bool stopped=false,returned=false,disabled=false;unsigned moving_feedback=0;
- for(unsigned n=0;n<20000&&action.phase!=Shutdown::Phase::Done;++n){
-  now+=1000000;obs.sampled_ns=now;++obs.sample;
-  // Explicit memory device response; a reference alone cannot confirm motion.
-  for(unsigned i=0;i<joint_count;++i)obs.position[position_slot(i)]=float(output.reference_position[i]);
-  obs.speed.fill(0);
-  if(action.phase==Shutdown::Phase::StopHold && moving_feedback<600){obs.speed[0]=.1f;++moving_feedback;}
-  action.tick(now,obs,output,.01);
-  if(moving_feedback && moving_feedback<600)assert(action.phase==Shutdown::Phase::StopHold);
-  stopped|=action.phase==Shutdown::Phase::StopHold;
-  returned|=action.phase==Shutdown::Phase::Returning;
-  if(output.shutdown_disable){disabled=true;assert(action.phase==Shutdown::Phase::Disabling || action.phase==Shutdown::Phase::Done);obs.shutdown_disabled=true;}
- }
- assert(stopped&&returned&&disabled&&moving_feedback==600&&!action.failed()&&action.phase==Shutdown::Phase::Done);
- Watchdog guard;Output packet;packet.selected=true;packet.policy=2;packet.operation=1;packet.admission_generation=1;packet.deadline=now+100000000;
- obs.shutdown_disabled=false;obs.sampled_ns=now;guard.evaluate(packet,obs,now);
- obs.wkc=28;guard.evaluate(packet,obs,now);assert(guard.latched_failure==FEEDBACK_INVALID);
- obs.wkc=67;packet.shutdown=true;packet.shutdown_deadline=now+1000000000;packet.admission_generation=99;
- guard.evaluate(packet,obs,now);assert(guard.disabled&&guard.latched_failure==FEEDBACK_INVALID);
- Shutdown failed;failed.disable(now,"existing_fault");failed.tick(now,obs,packet,.01);
- assert(packet.shutdown_disable&&failed.phase==Shutdown::Phase::Disabling);
- failed.tick(now+8000000000LL,obs,packet,.01);assert(failed.failed()&&failed.phase==Shutdown::Phase::Done);
- Shutdown stale;stale.disable(now);obs.shutdown_disabled=true;obs.sampled_ns=now-21000000;
- stale.tick(now,obs,packet,.01);assert(stale.phase==Shutdown::Phase::Disabling);
- obs.sampled_ns=now;stale.tick(now,obs,packet,.01);assert(stale.phase==Shutdown::Phase::Done);
- Shutdown late;seed.effective_steady=now-1;late.begin(seed,goal,.25,.5,162.,now,8.);
- assert(late.poll(now)&&late.failed()&&late.phase==Shutdown::Phase::Disabling);
- std::cout<<"PASS shutdown C2 first frame, unchanged gains/feedforward, fresh measured stop/home, disable ACK and retained fault latch\n";
+void check_shutdown_planning(){
+ TrajectoryQueue queue;TrajectoryAdmission<AdmissionPacket> worker(queue);
+ TargetSnapshot seed;seed.q[1]=.2;seed.q[8]=-.2;seed.q[3]=-.916625;seed.v[0]=.03;seed.a[0]=.02;
+ seed.effective_steady=steady_ns()+50000000;
+ assert(worker.submit_shutdown(seed,seed.q,.25,.5,162.,8.));
+ TrajectoryAdmission<AdmissionPacket>::Result* result=nullptr;
+ while(!(result=worker.poll()))std::this_thread::yield();
+ assert(result->shutdown&&result->error.empty()&&result->shutdown_home);
+ const auto first=result->prepared->segment->sample(0.);
+ for(unsigned i=0;i<joint_count;++i){assert(std::abs(first.q[i]-seed.q[i])<1e-12);assert(std::abs(first.v[i]-seed.v[i])<1e-12);assert(std::abs(first.a[i]-seed.a[i])<1e-12);}
+ worker.release(result);
+ std::cout<<"PASS existing admission worker prepares shutdown with continuous q/v/a\n";
 }
 int main(){
- check_shutdown();
+ check_shutdown_planning();
  RejectedTrajectory rejected;Meta failed{7,2,1020000000,1220000000,0};rejected.reject(failed,"trajectory_controls");
  for(unsigned relay=0;relay<1000;++relay){assert(rejected.matches(failed));assert(rejected.reason=="trajectory_controls");}
  auto delayed=failed;--delayed.sequence;assert(rejected.blocks(delayed));
