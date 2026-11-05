@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-spec = importlib.util.spec_from_file_location('snowbot_errors', Path(find_spec('snowbot_bringup.teleop.snowbot_errors').origin))
+spec = importlib.util.spec_from_file_location('snowbot_errors', Path(find_spec('snowbot_bringup.visualization.snowbot_errors').origin))
 errors = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(errors)
 

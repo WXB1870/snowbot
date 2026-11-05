@@ -234,7 +234,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         observer_log=(out/(mode+'-observer.log')).open('w')
         from bindu_runtime.teleop_deployment import load_deployment
         observer_robot=load_deployment(path,package_share('bindu_runtime'))[1]['robot_config']
-        observer=subprocess.Popen([sys.executable, '-m', 'snowbot_bringup.teleop.snowbot_live','--observe',
+        observer=subprocess.Popen([sys.executable, '-m', 'snowbot_bringup.visualization.snowbot_live','--observe',
             '--namespace',ns,'--run-id',json.loads((out/'unified-session/session.json').read_text())['run_id'] if physics else views[-1]['run_id'],
             '--robot-config',observer_robot,
             '--runtime-mode',mode,'--device-backend','external_simulation' if physics else 'kinematic' if mode=='simulation' else 'snowbot_vendor',
@@ -431,7 +431,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
             assert not states[-1].stop_failures
             sys.path.insert(0,str(ROOT))
-            from snowbot_bringup.teleop.snowbot_errors import pinocchio_fk
+            from snowbot_bringup.visualization.snowbot_errors import pinocchio_fk
             from bindu_kinematics.tool_geometry import coupling_metrics
             tool_cfg=json.loads((CFG/'bimanual_snowbot_real.json').read_text())
             robot_meta=json.loads((out/'unified-session/session.json').read_text())

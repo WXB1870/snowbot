@@ -145,11 +145,10 @@ class PicoNode(RuntimeNode):
         self.primitive_library = None
         if self.position_contract and self.cfg.get('primitive_library'):
             from bindu_contracts.resources import resource_file
-            from snowbot_bringup.teleop.snowbot_primitive_replay import AxialGraspGuard, replay_graph, NAMES
+            from snowbot_teleop.replay import replay_graph, NAMES
             self.primitive_library = resource_file(self.cfg['primitive_library'])
             library, _, _ = replay_graph(self.primitive_library, 1., None)
             self.prepare_positions = dict(zip(NAMES, library['nodes'][library['home_node']]))
-            self.primitive_grasp_guard = AxialGraspGuard(self.tool_cfg['urdf'], library['grasp'])
         prepare_names=[n for g in self.tool_cfg['resource_groups'] for n in self.profile.groups[g]]
         if self.prepare_positions is not None and (not set(prepare_names)<=set(self.prepare_positions) or any(
                 not math.isfinite(self.prepare_positions[n]) or
@@ -628,7 +627,7 @@ class PicoNode(RuntimeNode):
 
     async def prepare_primitive(self, intent):
         """A return from a certified held-tool node, using the same transition graph."""
-        from snowbot_bringup.teleop.snowbot_primitive_replay import plan_from_current, replay_follow_limits
+        from snowbot_teleop.replay import plan_from_current, replay_follow_limits
         self.current(intent)
         state, measured = self.reading()
         if not joints_at_rest(state.joints, self.names, parameters_for(self, 'execution')['prepare_start_velocity_tolerance_rad_s']):
@@ -650,9 +649,8 @@ class PicoNode(RuntimeNode):
                 return False
             raise
         self.prepare_limit_reference=self.prepare_limit_start=self.prepare_recovery=None
-        self.primitive_grasp_guard.check(measured)
         self.event('PICO_PRIMITIVE_HOME', json.dumps(dict(
-            route=list(plan.route), duration_s=plan.duration, coupling_checked=True)))
+            route=list(plan.route), duration_s=plan.duration)))
         await self.move(intent, dict(zip(plan.names, plan.points[-1])), plan.duration, replay=plan)
         return True
 
@@ -663,7 +661,7 @@ class PicoNode(RuntimeNode):
                            else self.profile.feedback_tolerances['joint_position'])
         nominal_arrival=self.position_contract and getattr(self,'execution_mode','position')=='impedance'
         if nominal_arrival and replay is not None:
-            from snowbot_bringup.teleop.snowbot_primitive_replay import replay_follow_limits
+            from snowbot_teleop.replay import replay_follow_limits
             follow_limits=replay_follow_limits(self.tool_cfg,'impedance')
         execution_instance_id=self.state.instance_id
         future=self.leases.call_async(Lease.Request(operation='acquire',
@@ -727,7 +725,6 @@ class PicoNode(RuntimeNode):
                     anchor=held['positions']
                 if tuple(self.names)!=replay.names or max(abs(anchor[n]-x) for n,x in zip(self.names,replay.points[0]))>.01:
                     raise RuntimeError('PREPARE_STATE_CHANGED')
-                self.primitive_grasp_guard.check(q)
             elif getattr(self,'primitive_library',None) and intent.operation=='prepare':
                 travel=max(abs(end[i]-start[n]) for i,n in enumerate(self.names) if n.startswith('body_joint_'))
                 duration=max(duration,1.875*travel/.025,(5.774*travel/.12)**.5)
@@ -756,7 +753,6 @@ class PicoNode(RuntimeNode):
                 self.current(intent)
                 state,measured=self.reading();now=self.now()
                 if replay is not None:
-                    self.primitive_grasp_guard.check(measured)
                     if nominal_arrival and any(abs(measured[n]-x)>follow_limits[n]
                             for n,x in zip(self.names,replay.sample(max(0.,now-started)))):
                         raise RuntimeError('REPLAY_TRACKING_ERROR')

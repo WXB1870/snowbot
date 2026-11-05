@@ -62,7 +62,7 @@ def observe(args, publish=None, stop=None):
     from bindu_runtime.common import EVENT_QOS
     from bindu_runtime.robot_setup import RobotSetup
     robot = RobotSetup.load(args.robot_config)
-    from snowbot_bringup.teleop.snowbot_errors import EndEffectorErrors, pinocchio_fk
+    from snowbot_bringup.visualization.snowbot_errors import EndEffectorErrors, pinocchio_fk
     error_config = json.loads(robot.tool_config.read_text())
     errors = EndEffectorErrors(error_config, pinocchio_fk(robot.urdf, error_config))
     meta = dict(schema=1, run_id=args.run_id, profile_hash=robot.profile.digest,
@@ -78,7 +78,7 @@ def observe(args, publish=None, stop=None):
         args.state_file.parent.mkdir(parents=True, exist_ok=True)
     if args.trace_file:
         args.trace_file.parent.mkdir(parents=True, exist_ok=True)
-    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter, VR_INPUT_STREAMS
+    from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter, VR_INPUT_STREAMS
     from snowbot_hardware.parameters import load_parameters
     parameters = load_parameters(getattr(args, 'parameters_config', None))
     real_vendor = args.runtime_mode == 'real' and args.device_backend == 'snowbot_vendor'
@@ -90,10 +90,10 @@ def observe(args, publish=None, stop=None):
     ros_logs = None
     wrench_observer = None
     if real_vendor:
-        from snowbot_bringup.teleop.snowbot_pdo import PdoObserver
+        from snowbot_bringup.visualization.snowbot_pdo import PdoObserver
         pdo_observer = PdoObserver(node, diagnostics, settings=parameters['diagnostics'])
         if diagnostics:
-            from snowbot_bringup.teleop.snowbot_diagnostics import RosLogObserver, WrenchObserver
+            from snowbot_bringup.visualization.snowbot_diagnostics import RosLogObserver, WrenchObserver
             ros_logs = RosLogObserver(node, diagnostics, args.run_id)
             wrench_observer = WrenchObserver(node, diagnostics, args.run_id)
     ns = '/'+args.namespace.strip('/')
@@ -209,7 +209,7 @@ def observe(args, publish=None, stop=None):
 def dashboard(args):
     """ROS observation and browser serving share memory in this display process."""
     import signal
-    from snowbot_bringup.teleop.snowbot_web import serve
+    from snowbot_bringup.visualization.snowbot_web import serve
     state, stop = LatestState(), threading.Event()
     def observe_worker():
         try:
@@ -427,7 +427,7 @@ def main():
         parser.error('Isaac display requires --output')
     if args.web:
         args.output.mkdir(parents=True,exist_ok=True)
-        from snowbot_bringup.teleop.snowbot_web import serve
+        from snowbot_bringup.visualization.snowbot_web import serve
         serve(args)
         return
     args.output.mkdir(parents=True, exist_ok=False)

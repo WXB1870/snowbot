@@ -19,9 +19,10 @@ import statistics
 import time
 import uuid
 
-GROUPS = ('waist', 'left_arm', 'right_arm')
-NAMES = ('body_joint_1', 'body_joint_2',
-         *(f'arm_{side}_joint_{i}' for side in ('l', 'r') for i in range(1, 8)))
+from snowbot_hardware.session import (
+    REPLAY_GROUPS as GROUPS, REPLAY_NAMES as NAMES, checked_execution_state as checked_state,
+)
+
 SLOTS = (18, 19, *range(7), *range(8, 15))
 MASK = sum(1 << i for i in SLOTS)
 ENCODER_PROFILES = {'legacy-65536': (65536, 65536), 'outer-262144': (262144, 65536)}
@@ -252,33 +253,6 @@ def signal_metadata(plan):
                     envelope_cycles=1, dwell_s=plan.dwell,
                     dynamic_upper_bounds=dict(zip(('speed', 'acceleration', 'jerk'), plan.dynamic_bounds)))
     return dict(waveform='quintic')
-
-
-def checked_state(msg, now, received, steady, profile_hash, *, owned=False, epoch=0, stationary=True,
-                  state_max_age=.1, feedback_max_age=.2):
-    feedback_age = now-(msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9)
-    if (msg.runtime_mode != 'real' or msg.simulated or msg.device_backend != 'snowbot_vendor' or
-            msg.profile_hash != profile_hash or msg.stop_failures or
-            not 0 <= steady-received <= state_max_age or
-            not 0 <= feedback_age <= feedback_max_age or
-            msg.state in ('FAILED', 'STOPPING')):
-        raise RuntimeError('EXECUTION_NOT_READY:state='+msg.state+';code='+msg.code+
-                           ';feedback_age='+str(round(feedback_age, 4))+
-                           ';state_age='+str(round(steady-received, 4))+
-                           ';profile_match='+str(msg.profile_hash == profile_hash)+
-                           ';stop_failures='+str(list(msg.stop_failures)))
-    if (msg.lease_active != owned or (owned and
-            (msg.lease_epoch != epoch or set(msg.lease_resources) != set(GROUPS)))):
-        raise RuntimeError('EXECUTION_OWNERSHIP_CHANGED')
-    if len(msg.joints.name) != len(set(msg.joints.name)) or not (
-            len(msg.joints.name) == len(msg.joints.position) == len(msg.joints.velocity)):
-        raise RuntimeError('MEASUREMENT_LAYOUT')
-    q, v = dict(zip(msg.joints.name, msg.joints.position)), dict(zip(msg.joints.name, msg.joints.velocity))
-    if any(n not in q or not all(math.isfinite(x) for x in (q[n], v[n])) for n in NAMES):
-        raise RuntimeError('MEASUREMENT_MISSING_OR_NONFINITE')
-    if stationary and not owned and any(abs(v[n]) > .01 for n in NAMES):
-        raise RuntimeError('MEASUREMENT_NOT_STATIONARY')
-    return q, v
 
 
 def checked_pdo(msg, now, received, steady, boot):
@@ -518,7 +492,7 @@ def execute(args, plan):
     from snowbot_ctl_msgs.msg import PositionObservation
     from bindu_runtime.common import stamp
     from bindu_runtime.robot_setup import RobotSetup
-    from snowbot_bringup.teleop.snowbot_pdo import observation_payload
+    from snowbot_bringup.visualization.snowbot_pdo import observation_payload
 
     if not args.robot_config or not args.output:
         raise ValueError('--execute requires --robot-config and --output')

@@ -28,7 +28,7 @@ def commands(args):
     control = ['ros2', 'launch', getattr(args, 'launch_package', 'bindu_runtime'), args.launch,
                *[f'{key}:={value}' for key,value in deployment.items() if value!=''],
                f'run_id:={args.run_id}']
-    display = [sys.executable, '-m', 'snowbot_bringup.teleop.snowbot_live', '--dashboard',
+    display = [sys.executable, '-m', 'snowbot_bringup.visualization.snowbot_live', '--dashboard',
         '--namespace', args.namespace, '--run-id', args.run_id, '--port', str(args.port),
         '--robot-config', args.deployment['robot_config'],
         '--runtime-mode', args.deployment['runtime_mode'],
@@ -81,13 +81,13 @@ def check(args):
             pico.get('simulation_only') is not simulation or
             grippers.get('simulation_only',False) is not simulation):
         raise ValueError('部署、工具、PICO 和夹爪配置范围不匹配')
-    from snowbot_bringup.teleop.runtime_check import check_runtime
+    from snowbot_bringup.runtime.runtime_check import check_runtime
     report = check_runtime(args.deployment, robot)
     print('VR_SOFTWARE_CHECK_OK：依赖、配置、消息字段与 TLS 检查通过；不表示机器人接口可用。')
     if args.deployment['runtime_mode'] == 'real':
         requested = getattr(args, 'check_robot', False)
         if requested:
-            from snowbot_bringup.teleop.runtime_check import check_robot_interface
+            from snowbot_bringup.runtime.runtime_check import check_robot_interface
             online = check_robot_interface(args.deployment, args.robot_check_timeout)
             report['online'] = online
             print(json.dumps(online, ensure_ascii=False))
@@ -177,7 +177,7 @@ def startup_lock(domain_id, namespace, *, inherit=False):
 def run_session(args, manifest):
     os.environ['ROS_DOMAIN_ID']=str(args.domain_id)
     if args.declare_load:
-        from snowbot_bringup.teleop.snowbot_live import declare_load
+        from snowbot_bringup.visualization.snowbot_live import declare_load
         args.robot_config=args.deployment['robot_config']
         args.runtime_mode=args.deployment['runtime_mode']
         args.run_id=args.context_run_id
@@ -244,7 +244,7 @@ def run_session(args, manifest):
             print('安装版本：'+(', '.join(name+'='+str(value.get('commit')) for name,value in revisions.items())
                                   if revisions else '无构建身份记录'), flush=True)
             if args.diagnostics:
-                from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+                from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
                 process_logs=DiagnosticWriter(args.output/'process-output.jsonl',
                     settings=args.runtime_parameters['diagnostics'],input_settings=args.runtime_parameters['pico'],
                     health_filename='process-log-health.json',echo=True)
@@ -295,7 +295,7 @@ def run_session(args, manifest):
 
 def copy_output(child, path, writer=None):
     # Always drain the pipe; disk and terminal writes belong to the bounded worker.
-    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter, console_log
+    from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter, console_log
     owns_writer=writer is None
     if owns_writer:
         writer=DiagnosticWriter(path.with_suffix('.jsonl'),health_filename=path.stem+'-log-health.json',echo=True)

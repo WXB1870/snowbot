@@ -16,18 +16,14 @@ log/
 dist/
 *.egg-info/
 
-# Local generated releases, deployment receipts, and recovery copies
-/backups/*
-!/backups/COLCON_IGNORE
+# Local generated releases (field records are covered by artifacts/)
 /releases/*
 !/releases/COLCON_IGNORE
-/deployments/*
-!/deployments/COLCON_IGNORE
 
 # Local planning, progress, and field records
-/*目标*.md
-/*记录*.md
-/当前进度.md
-/项目上下文.md
-/TODO.md
-/过程记录/
+/docs/*目标*.md
+/docs/*记录*.md
+/docs/当前进度.md
+/docs/项目上下文.md
+/docs/TODO.md
+/docs/过程记录/

@@ -18,13 +18,13 @@ from types import SimpleNamespace as S
 from unittest.mock import patch, Mock, MagicMock
 from collections import defaultdict
 
-spec = importlib.util.spec_from_file_location('snowbot_live', Path(find_spec('snowbot_bringup.teleop.snowbot_live').origin))
+spec = importlib.util.spec_from_file_location('snowbot_live', Path(find_spec('snowbot_bringup.visualization.snowbot_live').origin))
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
-webspec = importlib.util.spec_from_file_location('snowbot_web', Path(find_spec('snowbot_bringup.teleop.snowbot_web').origin))
+webspec = importlib.util.spec_from_file_location('snowbot_web', Path(find_spec('snowbot_bringup.visualization.snowbot_web').origin))
 web = importlib.util.module_from_spec(webspec)
 webspec.loader.exec_module(web)
-entryspec = importlib.util.spec_from_file_location('run_vr_sim', Path(find_spec('snowbot_bringup.teleop.run_vr').origin))
+entryspec = importlib.util.spec_from_file_location('run_vr_sim', Path(find_spec('snowbot_bringup.runtime.run_vr').origin))
 entry = importlib.util.module_from_spec(entryspec)
 entryspec.loader.exec_module(entry)
 
@@ -150,7 +150,7 @@ class ModelVisibilityTests(unittest.TestCase):
             modules={'pinocchio':pin,'pinocchio.visualize':S(MeshcatVisualizer=lambda *a:vis),
                      'meshcat':meshcat,'meshcat.geometry':geom,'zmq':S(RCVTIMEO=1,SNDTIMEO=2)}
             with patch.dict(sys.modules,modules),patch.object(web,'meshcat_urdf',return_value=path), \
-                    patch('snowbot_bringup.teleop.snowbot_live.display_tool_config',return_value=config), \
+                    patch('snowbot_bringup.visualization.snowbot_live.display_tool_config',return_value=config), \
                     patch.object(web,'_server',side_effect=server), \
                     patch.object(web.threading,'Thread',side_effect=fake_thread), \
                     patch.object(web.time,'time',side_effect=lambda:clock['now']), \
@@ -253,7 +253,7 @@ class WebFeedbackTests(unittest.TestCase):
             controller_states={'left':dict(valid=True,buttons=1,squeeze=1.,trigger=0.)}))
 
     def project(self,data,now=10.1):
-        with patch.dict(sys.modules,{'snowbot_bringup.teleop.snowbot_live':helper}):
+        with patch.dict(sys.modules,{'snowbot_bringup.visualization.snowbot_live':helper}):
             return web.project_state(data,now,self.data)
 
     def test_executor_restart_is_not_silently_displayed(self):
@@ -292,7 +292,7 @@ class WebFeedbackTests(unittest.TestCase):
             self.assertEqual(saved,log.events)
 
     def test_web_events_queue_without_disk_wait_and_keep_the_existing_jsonl_format(self):
-        from snowbot_bringup.teleop import snowbot_diagnostics as diagnostics
+        from snowbot_bringup.visualization import snowbot_diagnostics as diagnostics
         import threading
         gate=threading.Event();original=diagnostics.DiagnosticWriter.run
         def delayed(writer):gate.wait(2.);original(writer)
@@ -503,7 +503,7 @@ class BlockTools(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
         if fullname.split('.')[0]=='tools':raise ModuleNotFoundError('source tools import: '+fullname)
 sys.meta_path.insert(0,BlockTools())
-from snowbot_bringup.teleop import runtime_check
+from snowbot_bringup.runtime import runtime_check
 from snowbot_bringup.simulation import scene,physics,kinematic_scene
 '''
         env=dict(os.environ,PYTHONPATH=os.pathsep.join(sys.path))
