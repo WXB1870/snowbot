@@ -497,6 +497,17 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         checks.append('capture at Push then release before A; preparation starts a new measured grasp scope')
         before=len(accepted)
         source['buttons'][1]=1
+        wait(lambda:len(accepted)>before+2)
+        source['buttons'][1]=0
+        wait(lambda:views[-1]['pending'] is None and not states[-1].lease_active and
+             states[-1].state not in ('RUNNING','STOPPING'))
+        assert not states[-1].stop_failures
+        source['grip']=1.;phase('following')
+        source['grip']=0.;phase('tool_standby')
+        wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+        checks.append('releasing A cancels its admitted motion; a fresh clutch captures the measured stopped pose')
+        before=len(accepted)
+        source['buttons'][1]=1
         wait(lambda:views[-1]['pending'] is None and views[-1]['reason']=='PREPARED',40.)
         source['buttons'][1]=0;pump(.3)
         assert views[-1]['phase']=='standby'
