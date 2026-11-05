@@ -127,14 +127,14 @@ def check_runtime(args, robot):
     from bindu_interfaces.msg import VRInput
     if 'stick' not in VRInput.get_fields_and_field_types():
         raise ValueError('VR_INPUT_STICK_SCHEMA_REBUILD_REQUIRED')
-    from bindu_contracts.teleoperation import VRFrame
+    from bindu_contracts.teleoperation import VRFrame, load_tool_config
     head_fields={'head_pose','head_stamp','head_age_s','head_source_id','head_seq'}
     if (not head_fields<=set(VRInput.get_fields_and_field_types()) or
             not head_fields<=set(VRFrame.__dataclass_fields__)):
         raise ValueError('VR_INPUT_HEADSET_SCHEMA_REBUILD_REQUIRED')
     for module in ('pinocchio', 'casadi', 'vuer', 'bindu_execution.interpolation'):
         importlib.import_module(module)
-    tool = json.loads(robot.tool_config.read_text())
+    tool = load_tool_config(robot.tool_config)
     if args.get('position_contract') in (True,'true'):
         from snowbot_hardware.parameters import load_parameters, apply_tool_timing
         tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))

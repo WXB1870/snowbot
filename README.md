@@ -45,14 +45,16 @@ snowbot/
 
 ## 配置与模型
 
-配置模板位于 [src/snowbot_bringup/config/](src/snowbot_bringup/config/)：
+[配置目录](src/snowbot_bringup/config/)随 `snowbot_bringup` 安装。按要调整的内容选择入口。
 
-- `deployments/`：当前实机与位置仿真两份运行配方。
-- `robots/snowbot/`：当前本体、动态限制、工具、PICO、夹爪和可选底盘参数；实机与位置仿真共用本体和工具配置。
-- `examples/snowbot/`：单臂、独立适配和较早仿真入口使用的示例配置。
-- `robots/snowbot/teleop.json`：操作流程、准备姿态与握持确认。
-- `robots/snowbot/grippers.json`：夹爪开闭、增益、速度、标定与到位参数。
-- `robots/snowbot/runtime_parameters.json`：输入／反馈有效期、求解超时、命令时序、执行、诊断与显示参数。
+| 要调整的内容 | 配置位置 |
+|---|---|
+| 真机或位置仿真启动哪些组件 | [deployments/](src/snowbot_bringup/config/deployments/) 下的 real、sim 两份配方 |
+| VR 有效期、双手配对、求解超时和执行时序 | [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。顶层是默认值，`remote_vr` 保存远程覆盖；同目录的 `runtime_parameters_remote_vr.json` 仅供已有部署选择远程模式 |
+| 准备姿态、按钮流程、握持确认；夹爪和底盘参数 | [teleop.json](src/snowbot_bringup/config/robots/snowbot/teleop.json)、[grippers.json](src/snowbot_bringup/config/robots/snowbot/grippers.json)、[snowbot_base.json](src/snowbot_bringup/config/robots/snowbot/snowbot_base.json) |
+| 本体、关节限制、双臂工具几何和求解权重 | [本体入口](src/snowbot_bringup/config/robots/snowbot/robot_snowbot_real.json)引用关节配置和[双臂工具配置](src/snowbot_bringup/config/robots/snowbot/bimanual_snowbot_real.json)。独立加载双臂工具时，从同目录的运行参数读取默认时序 |
+| 动作回放数据、雪铲物理仿真参数 | [primitive-library/](src/snowbot_bringup/config/robots/snowbot/primitive-library/) 和 [snowbot_shovel_physics.json](src/snowbot_bringup/config/robots/snowbot/snowbot_shovel_physics.json) |
+| 单臂、独立适配和早期仿真示例 | [examples/snowbot/](src/snowbot_bringup/config/examples/snowbot/) |
 
 `teleop.json` 和 `grippers.json` 的公共字段位于顶层，`modes.real`／`modes.simulation` 保存各环境差异，运行时按配方的 `runtime_mode` 合并。
 

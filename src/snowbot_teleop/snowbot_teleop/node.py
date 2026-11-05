@@ -20,7 +20,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger, SetBool
 from trajectory_msgs.msg import JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
-from bindu_contracts.teleoperation import VRFrame
+from bindu_contracts.teleoperation import VRFrame, load_tool_config
 from snowbot_teleop.control import PicoControl, PicoFeedback, PICO_MAPPING, temporary_capture_refusal
 from bindu_kinematics.bimanual_worker import BimanualWorker
 from bindu_interfaces.msg import VRInput, ExecutionState, MotionCommand, TeleopModeState, RecorderHealth, RuntimeEvent
@@ -89,7 +89,7 @@ class PicoNode(RuntimeNode):
                 self.backend not in (('kinematic','external_simulation') if self.simulation and self.position_contract else
                                      ('kinematic',) if self.simulation else ('snowbot_vendor',))):
             raise ValueError('PICO_ACTUATOR_BACKEND_UNAVAILABLE:'+self.backend)
-        self.tool_cfg=json.loads(Path(self.get_parameter('tool_config').value).read_text())
+        self.tool_cfg=load_tool_config(self.get_parameter('tool_config').value)
         if self.position_contract:
             self.tool_cfg=apply_tool_timing(self.tool_cfg,self.runtime_parameters)
         self.automatic_close_grippers=self.cfg.get('automatic_close_grippers',False)

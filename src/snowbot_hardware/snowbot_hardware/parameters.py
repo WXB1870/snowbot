@@ -142,17 +142,11 @@ def parameters_for(owner, group):
 
 
 def apply_tool_timing(config, parameters):
-    """Use one startup snapshot for PICO, sessions and the solver worker.
-
-    Tool files retain standalone/offline defaults; position teleoperation
-    selects its timing exclusively through parameters_config.
-    """
-    t, s = parameters['teleop'], parameters['solver']
-    input_age = parameters['pico'].get('remote_input_timeout_s', t['input_max_age_s'])
-    result = dict(config, input_max_age=input_age,
-        feedback_max_age=t['feedback_max_age_s'], command_max_age=t['command_ttl_s'],
-        worker_timeout=s['worker_timeout_s'], worker_startup_timeout=s['startup_timeout_s'],
-        solve_timeout_us=round(s['timeout_s']*1e6))
+    """Apply the selected site timing before constructing sessions and workers."""
+    from bindu_contracts.teleoperation import tool_with_timing
+    result = tool_with_timing(config, parameters['teleop'], parameters['solver'])
+    if 'remote_input_timeout_s' in parameters['pico']:
+        result['input_max_age'] = parameters['pico']['remote_input_timeout_s']
     gap = result.get('integration_max_sample_gap', result.get('max_integration_interval', .1))
     if gap > result['input_max_age']:
         raise ValueError('BIMANUAL_SAMPLE_GAP_EXCEEDS_INPUT_TIMEOUT')
