@@ -521,11 +521,14 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert len(accepted)==before and all(g.grasp_state=='unknown' for g in grippers.values())
         checks.append('independent Trigger open/close uses only the requested gripper; no arm command or grasp claim')
         assert views[-1]['load_state']=='unknown'
+        prepared=dict(zip(states[-1].joints.name,states[-1].joints.position))
         source['buttons'][1]=1
         wait(lambda:views[-1]['reason']=='PREPARED' and views[-1]['pending'] is None,40.)
         source['buttons'][1]=0;pump(.2)
-        assert len(accepted)==before
-        checks.append('A accepts unknown load at the reached preparation pose without motion or gripper commands')
+        measured=dict(zip(states[-1].joints.name,states[-1].joints.position))
+        assert max(abs(measured[n]-prepared[n]) for n in prepared)<.003
+        assert not states[-1].stop_failures and views[-1]['gripper_modes']==['closed','closed']
+        checks.append('A accepts unknown load at certified Home and preserves measured pose and gripper positions')
         before=len(accepted);source['grip']=1.;phase('following');set_delta(.006)
         wait(lambda:len(accepted)>before+5)
         error_sample('right_axial')
