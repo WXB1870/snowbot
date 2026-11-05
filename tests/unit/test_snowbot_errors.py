@@ -76,6 +76,16 @@ class EndEffectorErrorTests(unittest.TestCase):
         self.capture(); self.target()
         self.assertAlmostEqual(self.sample()['coupled'][0], 4.)
 
+    def test_measured_axial_uses_captured_grip_and_still_reports_later_drift(self):
+        self.config['grasp_reference_source'] = 'measured_axial'
+        self.q['right'] += .04
+        self.capture('right_axial'); self.target()
+        np.testing.assert_allclose(self.sample()['coupled'], [0., 0.], atol=1e-9)
+        np.testing.assert_allclose(self.sample()['right'], [100., 0.], atol=1e-9)
+        self.q['right'] += .006; self.metric.last = None
+        np.testing.assert_allclose(self.sample()['coupled'], [6., 0.], atol=1e-9)
+        np.testing.assert_allclose(self.sample()['right'], [94., 0.], atol=1e-9)
+
     def test_missing_or_stale_target_is_null_not_zero(self):
         self.metric.target = None
         self.assertIsNone(self.sample()['left'])

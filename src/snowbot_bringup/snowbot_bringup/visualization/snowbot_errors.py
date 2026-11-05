@@ -58,9 +58,12 @@ class EndEffectorErrors:
             self.capture = self.target = None
             self.targets.clear()
             left, right = self.fk(payload['feedback'])
+            relative = np.linalg.inv(left) @ right
             self.serial += 1
             self.capture = dict(task=task_id, stamp=stamp, mode=payload['grasp_mode'],
-                                relative=np.linalg.inv(left) @ right, serial=self.serial)
+                                relative=relative, serial=self.serial,
+                                tool_grip=(np.linalg.inv(self.mount) @ relative @ self.right_grip
+                                    if self.config.get('grasp_reference_source') == 'measured_axial' else self.tool_grip))
         elif kind == 'BIMANUAL_QP_RESULT' and self.capture and task_id == self.capture['task']:
             if payload.get('teleop_mode') != 'bimanual_tool':
                 return
@@ -98,7 +101,7 @@ class EndEffectorErrors:
         left, right = self.fk(data['q'])
         tool = left @ self.mount
         actual_right = right @ self.right_grip
-        desired_right = tool @ self.tool_grip
+        desired_right = tool @ c['tool_grip']
         coupled = pose_error(actual_right, desired_right, axial=True)
         if c['mode'] == 'rigid':
             coupled[1] = angle(c['relative'][:3, :3].T @ (np.linalg.inv(left) @ right)[:3, :3])
@@ -114,7 +117,7 @@ class EndEffectorErrors:
                 0 <= stamp-t['stamp']):
             desired_left = t['pose'] @ np.linalg.inv(self.mount)
             result['left'] = pose_error(left @ self.left_grip, desired_left @ self.left_grip)
-            desired_right = (t['pose'] @ self.tool_grip if c['mode'] == 'right_axial' else
+            desired_right = (t['pose'] @ c['tool_grip'] if c['mode'] == 'right_axial' else
                              desired_left @ c['relative'] @ self.right_grip)
             result['right'] = pose_error(actual_right, desired_right, axial=c['mode'] == 'right_axial')
             result['target_stamp'] = t['input_stamp']
