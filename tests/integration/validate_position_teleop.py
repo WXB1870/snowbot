@@ -82,7 +82,7 @@ def websocket_input(port, source, stop, errors):
         if not stop.is_set():errors.append(type(exc).__name__+':'+str(exc))
 
 
-def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=None, collision_recovery=False, prepare_return=None, stop_boundary=False):
+def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=None, collision_recovery=False, prepare_return=None, stop_boundary=False, composition=False):
     token=uuid.uuid4().hex[:8];ns='/position_'+token;vendor='/fixture_'+token
     node=rclpy.create_node('position_fixture_'+token)
     states=[];views=[];accepted=[];grippers={};packets=[]
@@ -94,9 +94,15 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     counters=[ButtonCounters(),ButtonCounters()]
     vr=node.create_publisher(VRInput,ns+'/teleop/vr/raw',10)
     fixture=load_mode_config(CFG/'teleop.json','simulation')
+    from bindu_contracts.resources import resource_file
+    from snowbot_bringup.teleop.snowbot_primitive_replay import replay_graph, NAMES
+    library, _, _ = replay_graph(resource_file(fixture['primitive_library']), 1., None)
+    fixture['prepare_positions_rad'] = dict(zip(NAMES, library['nodes'][library['home_node']]))
     # Exercise an invalid startup posture even if the deployment example is
     # later calibrated to a valid grasp. Keep this override in the fixture only.
     fixture['device_initial_positions_rad']={n:0. for n in fixture['device_initial_positions_rad']}
+    if composition:
+        fixture['device_initial_positions_rad'].update(fixture['prepare_positions_rad'])
     if replay:
         fixture['device_initial_positions_rad']=dict(replay['segment']['capture']['feedback'])
         source.update(raw_pair=replay['segment']['pairs'][0],raw_held=False,raw_replay=False,raw_index=0)
@@ -167,6 +173,8 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     node.create_timer(.01,publish)
     recipe=json.loads((package_share('snowbot_bringup')/f'config/deployments/snowbot_vr_{"sim" if mode=="simulation" else "real"}.json').read_text())
     recipe['arguments'].update(namespace=ns,vr_enabled=websocket,command_enabled=True)
+    if not websocket:
+        recipe['arguments'].pop('base_config', None)
     if websocket:
         with socket.socket() as probe:
             probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
@@ -246,6 +254,12 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     try:
         wait(lambda:states and views and time.time()-seconds(states[-1].feedback_stamp)<.2 and
              len(grippers)==2 and all(g.feedback_valid for g in grippers.values()),60. if physics else 40.)
+        runtime_nodes = {name for name, namespace in node.get_node_names_and_namespaces() if namespace == ns}
+        assert {'pico_control', 'execution'} <= runtime_nodes, runtime_nodes
+        assert not {'teleop_tool', 'teleop_mode'} & runtime_nodes, runtime_nodes
+        if websocket:
+            assert 'vr_input' in runtime_nodes, runtime_nodes
+        checks.append('one application node owns mode selection and following')
         start_observer()
         pump(2.)  # Discover every reader before connecting the test hands, on either backend.
         source['stream']=True
@@ -256,9 +270,81 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert all(n in initial and abs(initial[n]-v)<(.003 if physics else 1e-9)
                    for n,v in (q if mode=='real' else fixture['device_initial_positions_rad']).items()),'startup feedback differs from configured fixture'
         assert states[-1].simulated==(mode=='simulation') and states[-1].runtime_mode==mode
-        assert views[-1]['capabilities']['axial_grasp'] is True
+        if composition:
+            assert views[-1]['capabilities']['continuous_axial_grasp'] is True
+            assert views[-1]['capabilities']['axial_grasp'] is False
+        else:
+            assert views[-1]['capabilities']['axial_grasp'] is True
         checks.append('same feedback contract, no startup commands, configured axial position capability explicit')
         pump(.3)
+        if composition:
+            expected_modes = ('independent_arms', 'bimanual_tool') if ordinary else ('bimanual_tool', 'independent_arms')
+            for index, expected_mode in enumerate(expected_modes):
+                if index:
+                    click(1, 1)
+                    wait(lambda:views[-1]['pending'] is None and views[-1]['teleop_mode']==expected_mode)
+                    assert views[-1]['phase']=='standby'
+                    checks.append('mode changes locally after confirmed stop and fresh released input')
+                before = len(accepted)
+                source['grip'] = 1.
+                phase('following')
+                expected_phase = 'follow:independent:3' if expected_mode=='independent_arms' else 'follow:right_axial'
+                wait(lambda:views[-1]['tool_phase']==expected_phase)
+                source['delta'] += .002
+                wait(lambda:len(accepted)>before+3)
+                assert not states[-1].stop_failures
+                checks.append(expected_mode+' captures, solves and submits accepted joint targets')
+                if expected_mode=='independent_arms':
+                    source['grips'] = [0., 1.]
+                    wait(lambda:views[-1]['tool_phase']=='follow:independent:2')
+                    assert views[-1]['phase']=='following'
+                    source['grips'] = None
+                    checks.append('one-hand release keeps the active partner following')
+                else:
+                    assert views[-1]['grasp_applied']=='right_axial'
+                    positions = {side:value.measured_position for side,value in grippers.items()}
+                    source['buttons'][0] = 1
+                    pump(.2)
+                    assert views[-1]['phase']=='following' and views[-1]['tool_phase']=='follow:right_axial'
+                    assert all(abs(grippers[side].measured_position-value)<.003 for side,value in positions.items())
+                    source['buttons'][0] = 0
+                    checks.append('continuous axial model is reported and X retains current gripper targets')
+                source['grip'] = 0.
+                phase('tool_standby')
+                wait(lambda:views[-1]['stop_confirmed'] and not states[-1].lease_active)
+                paused = len(accepted)
+                source['delta'] += .015
+                pump(.25)
+                assert len(accepted)==paused
+                source['grip'] = 1.
+                phase('following')
+                wait(lambda:len(accepted)>paused+3)
+                checks.append('release confirms stop and a fresh clutch recaptures the paused input')
+                if index==0:
+                    source['buttons'][0] = 2
+                    phase('locked')
+                    source['buttons'][0] = 0
+                else:
+                    source['stream'] = False
+                    phase('locked')
+                source['grip'] = 0.
+                wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+                assert not states[-1].stop_failures
+                source['stream'] = True
+                pump(.4)
+                click(1, 1)
+                phase('standby')
+                stopped = len(accepted)
+                pump(.25)
+                assert len(accepted)==stopped
+                checks.append(('Y cancellation' if index==0 else 'input loss')+' confirms stop; B recovers to standby')
+            terminate(observer,node)
+            observer = None
+            health = json.loads((trace_dir/'diagnostics-health.json').read_text())
+            assert not health['active'] and not health['error'] and not health['dropped'], health
+            assert not peer_errors
+            return dict(mode=mode, initial_mode=expected_modes[0], checks=checks,
+                        accepted=len(accepted), vendor_packets=len(packets), composition=True)
         if prepare_return:
             expected_mode='independent_arms' if ordinary else 'bimanual_tool'
             assert views[-1]['load_state']=='unknown' and views[-1]['teleop_mode']==expected_mode
@@ -693,6 +779,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);p.add_argument('--mode',choices=('simulation','real','both'),default='both')
+    p.add_argument('--composition', action='store_true', help='Current single-application lifecycle from the configured prepared pose')
     p.add_argument('--physics',action='store_true',help='Use the actual Isaac backend and unified launcher; requires simulation and WebSocket input')
     p.add_argument('--teleop-mode',choices=('ordinary','tool','both'),default='both')
     p.add_argument('--websocket-input',action='store_true')
@@ -707,6 +794,8 @@ def main():
     p.add_argument('--runs',type=int,default=1)
     args=p.parse_args()
     prepare_return=json.loads(args.prepare_return.read_text()) if args.prepare_return else None
+    if args.composition and (args.mode!='simulation' or args.physics or args.prepare_return or args.collision_recovery or args.replay_log):
+        p.error('--composition requires a pure kinematic simulation fixture')
     if prepare_return:prepare_return=prepare_return.get('feedback',prepare_return)
     if args.prepare_return and (args.collision_recovery or args.replay_log):p.error('--prepare-return cannot combine with recovery/replay')
     if args.physics and (args.mode!='simulation' or not args.websocket_input):p.error('--physics requires --mode simulation --websocket-input')
@@ -736,7 +825,7 @@ def main():
                 for ordinary in ((True,False) if args.teleop_mode=='both' else (args.teleop_mode=='ordinary',)):
                     out=args.output/(('ordinary-' if ordinary else 'tool-')+m+('' if args.runs==1 else f'-{run:02}'));out.mkdir()
                     case=scenario(out,m,args.websocket_input,ordinary,physics=args.physics,replay=replay,
-                                  collision_recovery=args.collision_recovery,prepare_return=prepare_return,stop_boundary=args.stop_boundary);result.append(case)
+                                  collision_recovery=args.collision_recovery,prepare_return=prepare_return,stop_boundary=args.stop_boundary,composition=args.composition);result.append(case)
                     (out/'verification.json').write_text(json.dumps(case,indent=2))
                     print(out.name+': '+str(len(case['checks']))+' checks passed',flush=True)
         (args.output/'verification.json').write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))

@@ -101,7 +101,9 @@ def operator_view(app, feedback):
         grasp_applied=(
             None
             if app.control.teleop_mode == "independent_arms"
-            else "right_axial" if app.control.virtual else "rigid"
+            else "right_axial"
+            if app.control.continuous_axial or app.control.virtual
+            else "rigid"
         ),
     )
     if feedback.healthy and app.prepare_positions is not None:

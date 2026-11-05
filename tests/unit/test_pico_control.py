@@ -1611,6 +1611,18 @@ class LocalApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tool.trajectory_reference)
         self.assertEqual(app.prepare_positions.keys(), set(app.names))
         host.create_subscription.assert_called_once()
+        status_path = app_path.with_name('status.py')
+        status = next(n for n in ast.parse(status_path.read_text()).body
+                      if getattr(n, 'name', '') == 'operator_view')
+        view_namespace = dict(seconds=lambda value:value)
+        exec(compile(ast.Module(body=[status], type_ignores=[]), str(status_path), 'exec'), view_namespace)
+        app.state = None
+        app.base = None
+        app.input_status = lambda now:{}
+        app.control.teleop_mode = 'bimanual_tool'
+        app.control.virtual = False
+        view = view_namespace['operator_view'](app, PicoFeedback(0., False, healthy=False))
+        self.assertEqual(view['grasp_applied'], 'right_axial')
 
     async def mode_rig(self, *, input_enabled=True):
         from types import SimpleNamespace as S
