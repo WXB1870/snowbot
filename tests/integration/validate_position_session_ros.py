@@ -64,11 +64,13 @@ def main():
         if layer=='upper':command+=['--ros-args','-p','control_source:=topic']
         launch_stamps[layer]=observer.get_clock().now().nanoseconds
         states.pop(layer,None)
-        process=subprocess.Popen(command,stdout=handle,stderr=subprocess.STDOUT,env=os.environ.copy())
+        environment=os.environ.copy()
+        environment['PYTHONHOME']=sys.base_prefix  # Match the middle layer's embedded Python to this test.
+        process=subprocess.Popen(command,stdout=handle,stderr=subprocess.STDOUT,env=environment)
         children.append(process);launched[process.pid]=time.monotonic()
         (args.output.parent/(str(process.pid)+'-launch.json')).write_text(json.dumps(dict(
-            command=command,pid=process.pid,environment={key:os.environ.get(key,'') for key in
-            ('AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','LD_LIBRARY_PATH','PYTHONPATH','ROS_DOMAIN_ID')}),indent=2)+'\n')
+            command=command,pid=process.pid,environment={key:environment.get(key,'') for key in
+            ('AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','LD_LIBRARY_PATH','PYTHONPATH','PYTHONHOME','ROS_DOMAIN_ID')}),indent=2)+'\n')
         return process
     def stop(process):
         if process.poll() is None:
