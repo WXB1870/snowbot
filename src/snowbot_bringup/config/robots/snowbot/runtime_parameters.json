@@ -1,16 +1,19 @@
 {
   "schema_version": 1,
   "teleop": {
+    "_comment": "默认时序（秒）。input_max_age_s 是手柄输入有效期，feedback_max_age_s 是机器人反馈有效期，command_ttl_s 是运动命令有效期。",
     "input_max_age_s": 0.25,
     "feedback_max_age_s": 0.2,
     "command_ttl_s": 0.4
   },
   "solver": {
+    "_comment": "单位为秒。timeout_s 是单次求解预算，worker_timeout_s 是等待求解进程回复的时限，startup_timeout_s 只用于启动。",
     "timeout_s": 0.08,
     "worker_timeout_s": 0.23,
     "startup_timeout_s": 30.0
   },
   "pico": {
+    "_comment": "prepare_button_hold_s 是触发准备动作所需的长按时间（秒）。pair_max_skew_s 是左右手输入时间戳允许相差的秒数。grip 和 trigger 分别是握把和扳机，press / release 是按下和松开的阈值（0～1）。",
     "prepare_button_hold_s": 1.0,
     "pair_max_skew_s": 0.02,
     "grip_press_threshold": 0.7,
@@ -44,6 +47,7 @@
     "target_stream_brake_lead_s": 0.12
   },
   "diagnostics": {
+    "_comment": "input_gap_warning_s 是两帧到达间隔的告警阈值（秒），调大后间隔告警会减少。",
     "state_period_s": 0.1,
     "health_period_s": 1.0,
     "wrench_period_s": 0.01,
@@ -64,13 +68,21 @@
     "report_ms": 3000
   },
   "remote_vr": {
+    "_comment": "仅在选择远程模式时，以下参数覆盖上面的默认值。",
     "pico": {
+      "_comment": {
+        "remote_input_timeout_s": "远程手柄输入有效期（秒）。",
+        "remote_source_timeout_s": "旧连接连续多久没有手柄输入后，允许新连接接管（秒）。",
+        "controller_fps": "请求 VR 端发送手柄数据的目标帧率（帧/秒）。",
+        "pair_max_skew_s": "左右手输入时间戳允许的最大差值（秒），0.05 即 50 毫秒。"
+      },
       "remote_input_timeout_s": 1.0,
       "remote_source_timeout_s": 1.0,
       "controller_fps": 60,
       "pair_max_skew_s": 0.05
     },
     "diagnostics": {
+      "_comment": "远程链路两帧到达间隔超过 input_gap_warning_s 秒时提示告警。",
       "input_gap_warning_s": 1.0
     }
   }
