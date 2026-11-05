@@ -30,7 +30,7 @@ def main():
     from bindu_hardware.snowbot_session import CONTROL_NAMES
     from bindu_contracts.resources import package_share
     profile=Profile.load(package_share('snowbot_bringup')/'config/examples/snowbot/snowbot_vendor_position.json')
-    from tools.teleop.snowbot_pdo import observation_payload
+    from snowbot_bringup.visualization.snowbot_pdo import observation_payload
     rclpy.init()
     observer=rclpy.create_node('position_session_validation')
     feedback=rclpy.create_node('servo_node') # Test fixture only, not the servo executable.
