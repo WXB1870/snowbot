@@ -72,7 +72,10 @@ def load_parameters(path=None):
         for group, values in raw.items():
             if group == 'schema_version':
                 continue
-            if not isinstance(values, dict) or set(values)-set(result[group]):
+            allowed = set(result[group])
+            if group == 'pico':
+                allowed.add('remote_input_timeout_s')
+            if not isinstance(values, dict) or set(values)-allowed:
                 raise ValueError('SNOWBOT_PARAMETERS_GROUP:'+group)
             result[group].update(values)
     for group, values in result.items():
@@ -137,7 +140,8 @@ def apply_tool_timing(config, parameters):
     selects its timing exclusively through parameters_config.
     """
     t, s = parameters['teleop'], parameters['solver']
-    result = dict(config, input_max_age=t['input_max_age_s'],
+    input_age = parameters['pico'].get('remote_input_timeout_s', t['input_max_age_s'])
+    result = dict(config, input_max_age=input_age,
         feedback_max_age=t['feedback_max_age_s'], command_max_age=t['command_ttl_s'],
         worker_timeout=s['worker_timeout_s'], worker_startup_timeout=s['startup_timeout_s'],
         solve_timeout_us=round(s['timeout_s']*1e6))

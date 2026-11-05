@@ -64,7 +64,11 @@ class PicoControl:
         self.last_input_timeout=None
         from snowbot_hardware.parameters import load_parameters
         self.settings = dict(load_parameters()['pico'], **(settings or {}))
-        self.max_age = max_age
+        # The longer VR window applies to controller input only. Robot feedback
+        # is measured locally and retains the original freshness budget.
+        self.remote_vr = 'remote_input_timeout_s' in self.settings
+        self.feedback_max_age = max_age
+        self.max_age = self.settings.get('remote_input_timeout_s', max_age)
         self.prepare_hold = self.settings['prepare_button_hold_s'] if prepare_hold is None else prepare_hold
         self.phase, self.reason = 'checking', 'WAITING_FOR_INPUT_AND_FEEDBACK'
         self.fault_active = False
@@ -140,12 +144,12 @@ class PicoControl:
 
     def rest(self, now):
         f=self.feedback
-        return bool(f and f.healthy and f.stopped and 0 <= now-f.stamp <= self.max_age)
+        return bool(f and f.healthy and f.stopped and 0 <= now-f.stamp <= self.feedback_max_age)
 
     def prepare_checks(self, now):
         hands={f.side:f for f in self.frames or ()}
         return dict(**({} if self.guided_loading else dict(load_empty=self.load=='empty')),
-            feedback_fresh=bool(self.feedback and self.feedback.healthy and 0<=now-self.feedback.stamp<=self.max_age),
+            feedback_fresh=bool(self.feedback and self.feedback.healthy and 0<=now-self.feedback.stamp<=self.feedback_max_age),
             motion_stopped=bool(self.feedback and self.feedback.stopped),
             input_fresh=bool(self.frames and 0<=now-self.stamp<=self.max_age),
             left_squeeze_released=bool('left' in hands and hands['left'].grip<self.settings['grip_release_threshold']),
@@ -192,10 +196,10 @@ class PicoControl:
 
     def update_feedback(self, feedback, now):
         self.feedback=feedback
-        if self.guided_loading and self.phase == 'loading' and feedback.healthy and 0 <= now-feedback.stamp <= self.max_age:
+        if self.guided_loading and self.phase == 'loading' and feedback.healthy and 0 <= now-feedback.stamp <= self.feedback_max_age:
             for i, mode in enumerate(feedback.modes):
                 if mode == 'open': self.loading_opened[i] = True
-        if not feedback.healthy or not 0 <= now-feedback.stamp <= self.max_age:
+        if not feedback.healthy or not 0 <= now-feedback.stamp <= self.feedback_max_age:
             if self.source and self.phase!='checking': self.lock(feedback.fault or 'PICO_FEEDBACK_UNAVAILABLE',now)
         elif (self.phase=='checking' and feedback.stopped and self.frames and
               0 <= now-self.stamp <= self.max_age):
@@ -214,13 +218,20 @@ class PicoControl:
                 self.a_since = None
             else:
                 self.lock('PICO_INPUT_TIMEOUT',now)
-        if self.phase!='checking' and self.feedback and not 0 <= now-self.feedback.stamp <= self.max_age:
+        if self.phase!='checking' and self.feedback and not 0 <= now-self.feedback.stamp <= self.feedback_max_age:
             self.lock('PICO_FEEDBACK_STALE',now)
 
     def ingest(self, left, right, now):
         pair=(left,right)
-        if self.source is None and self.phase=='checking' and any(not f.valid for f in pair):
-            return  # Initial tracking acquisition is not an active-session fault.
+        if self.remote_vr and left.source_id == right.source_id and left.source_id in self.retired:
+            return
+        idle_reconnect = (self.remote_vr and self.phase == 'standby' and not self.pending
+                          and not self.fault_active and self.rest(now)
+                          and left.source_id == right.source_id != self.source)
+        acquiring = self.source is None and self.phase == 'checking'
+        if (acquiring or idle_reconnect) and any(not f.valid for f in pair):
+            if not idle_reconnect or not any(f.stop for f in pair):
+                return  # Wait for tracking before adopting the new input.
         try:
             poses=tuple(pose_matrix(f.pose) for f in pair)
         except (ValueError,TypeError):
@@ -244,7 +255,11 @@ class PicoControl:
             if old:
                 self.load='unknown';self.supported=False
                 self.load_source='unknown'
-                self.lock('PICO_CONNECTION_CHANGED',now)
+                if idle_reconnect:
+                    # A new controller starts with its own released-button baseline.
+                    self.reason = 'READY_FOR_OPERATOR'
+                else:
+                    self.lock('PICO_CONNECTION_CHANGED',now)
         if left.seq<=self.seq:return
         if (self.frames and self.frames[0].source_id==left.source_id and
                 any(new.stamp<old.stamp for old,new in zip(self.frames,pair))):

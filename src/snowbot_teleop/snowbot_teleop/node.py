@@ -165,7 +165,8 @@ class PicoNode(RuntimeNode):
         if self.simulation or self.get_parameter('position_protocol').value!='session_v3':
             self.prepare_limit_max=0.
         self.control=PicoControl(initial_load=initial_load,simulation_demo=self.simulation_demo,
-                                 max_age=float(self.tool_cfg['input_max_age']),guided_loading=self.position_contract,
+                                 max_age=(self.runtime_parameters['teleop']['input_max_age_s'] if self.position_contract
+                                          else float(self.tool_cfg['input_max_age'])),guided_loading=self.position_contract,
                                  dual_modes=self.position_contract,direct_grippers=self.position_contract,
                                  initial_mode=self.cfg.get('initial_teleop_mode','independent_arms'),
                                  pose_jump_translation_m=self.cfg.get('pose_jump_translation_m',.35),
@@ -329,6 +330,8 @@ class PicoNode(RuntimeNode):
 
     def on_frame(self,msg):
         if not self.matches_mode(msg) or msg.side not in ('left','right'):return
+        if self.control.remote_vr and msg.source_id in self.control.retired:
+            return
         self.frames[msg.side]=msg
         if set(self.frames)!= {'left','right'}:return
         a,b=self.frames['left'],self.frames['right']
@@ -337,8 +340,9 @@ class PicoNode(RuntimeNode):
         received_monotonic=time.monotonic()
         previous_monotonic=getattr(self,'last_pair_monotonic',None)
         monotonic_gap=None if previous_monotonic is None else received_monotonic-previous_monotonic
-        if self.last_pair_at is not None and (now-self.last_pair_at>.1 or
-                monotonic_gap is not None and monotonic_gap>.1):
+        warning_s = self.runtime_parameters['diagnostics']['input_gap_warning_s']
+        if self.last_pair_at is not None and (now-self.last_pair_at>warning_s or
+                monotonic_gap is not None and monotonic_gap>warning_s):
             self.event('PICO_INPUT_DELIVERY_GAP',json.dumps(dict(
                 interval_s=now-self.last_pair_at,interval_clock='ros_callback',
                 monotonic_interval_s=monotonic_gap,

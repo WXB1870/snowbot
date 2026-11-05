@@ -1424,6 +1424,61 @@ class StateTests(unittest.TestCase):
         self.assertEqual(rig.core.drain()[-1].operation,'stop')
         self.assertEqual(rig.core.desired,['open','closed'])
 
+    def remote_parameters(self):
+        from snowbot_hardware.parameters import load_parameters
+        config = package_share('snowbot_bringup') / 'config/robots/snowbot/runtime_parameters_remote_vr.json'
+        return load_parameters(config)
+
+    def test_remote_pair_window_and_stream_timeout(self):
+        from snowbot_hardware.parameters import apply_tool_timing
+        params = self.remote_parameters()
+        tool = apply_tool_timing({}, params)
+        self.assertEqual((tool['input_max_age'], tool['command_max_age'], tool['feedback_max_age']),
+                         (1., .4, .2))
+        for settings, skew, expected in ((None, .04, 'locked'),
+                                        (params['pico'], .04, 'standby'),
+                                        (params['pico'], .051, 'locked')):
+            with self.subTest(settings=settings, skew=skew):
+                rig = Rig(settings=settings)
+                t = rig.now + .1
+                left, right = rig.core.frames
+                rig.core.ingest(replace(left, stamp=t-skew, seq=3),
+                                replace(right, stamp=t, seq=3), t)
+                self.assertEqual(rig.core.phase, expected)
+        rig = Rig(settings=params['pico'])
+        core = rig.core
+        core.phase = 'following'
+        for gap in (.5, 1.01):
+            now = rig.now + gap
+            core.update_feedback(PicoFeedback(now, True), now)
+            core.tick(now)
+            if gap == .5:
+                self.assertEqual(core.phase, 'following')
+        self.assertEqual(core.reason, 'PICO_INPUT_TIMEOUT')
+        self.assertEqual(core.last_input_timeout['input_max_age_s'], 1.)
+        rig = Rig(settings=params['pico'])
+        rig.core.tick(rig.now + .3)
+        self.assertEqual(rig.core.reason, 'PICO_FEEDBACK_STALE')
+
+    def test_remote_reconnect_in_standby_and_in_motion(self):
+        settings = self.remote_parameters()['pico']
+        rig = Rig(settings=settings)
+        old = rig.core.frames
+        rig.source = 'reconnected'
+        acquiring = [replace(f, source_id=rig.source, valid=False) for f in old]
+        rig.core.ingest(*acquiring, rig.now)
+        self.assertEqual((rig.core.phase, rig.core.source), ('standby', 'headset-1'))
+        rig.buttons[1] = 1  # A is already held on reconnect.
+        self.assertEqual(rig.step(), [])
+        self.assertEqual((rig.core.phase, rig.core.source), ('standby', 'reconnected'))
+        rig.core.ingest(*(replace(f, valid=False) for f in old), rig.now)
+        self.assertEqual(rig.core.phase, 'standby')
+        self.assertEqual(rig.step(), [])
+        rig.core.phase = 'following'
+        rig.source = 'another-connection'
+        self.assertEqual([i.operation for i in rig.step()], ['stop'])
+        self.assertEqual(rig.core.reason, 'PICO_CONNECTION_CHANGED')
+
     def test_reconnect_locks_and_retired_source_cannot_take_over(self):
         rig=Rig();old=rig.core.frames;rig.source='new';rig.counters=[ButtonCounters(),ButtonCounters()]
         rig.step();self.assertEqual(rig.core.phase,'locked')

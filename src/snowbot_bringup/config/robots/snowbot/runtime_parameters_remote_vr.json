@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "pico": {
+    "remote_input_timeout_s": 1.0,
+    "pair_max_skew_s": 0.05
+  },
+  "diagnostics": {
+    "input_gap_warning_s": 1.0
+  }
+}
