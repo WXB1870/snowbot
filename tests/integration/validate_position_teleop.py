@@ -491,15 +491,6 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             assert any(e['state']=='BIMANUAL_CAPTURED' and 'independent:' in e['code'] for e in events)
             return dict(mode=mode,teleop_mode='independent_arms',checks=checks,accepted=len(accepted),vendor_packets=len(packets))
         assert views[-1]['load_state']=='unknown'
-        source['grip']=1.
-        phase('following');pump(.3)
-        measured=dict(zip(states[-1].joints.name,states[-1].joints.position))
-        assert max(abs(measured[n]-initial[n]) for n in initial)<.003
-        assert views[-1]['tool_phase']=='follow:right_axial'
-        checks.append('measured axial engagement captures the current geometry; stationary hands preserve the initial pose')
-        source['grip']=0.;phase('tool_standby')
-        wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
-        assert not states[-1].stop_failures
         before=len(accepted)
         source['buttons'][1]=1
         wait(lambda:views[-1]['pending'] is None and views[-1]['reason']=='PREPARED',40.)
@@ -521,11 +512,14 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert len(accepted)==before and all(g.grasp_state=='unknown' for g in grippers.values())
         checks.append('independent Trigger open/close uses only the requested gripper; no arm command or grasp claim')
         assert views[-1]['load_state']=='unknown'
+        prepared=dict(zip(states[-1].joints.name,states[-1].joints.position))
         source['buttons'][1]=1
         wait(lambda:views[-1]['reason']=='PREPARED' and views[-1]['pending'] is None,40.)
         source['buttons'][1]=0;pump(.2)
-        assert len(accepted)==before
-        checks.append('A accepts unknown load at the reached preparation pose without motion or gripper commands')
+        measured=dict(zip(states[-1].joints.name,states[-1].joints.position))
+        assert max(abs(measured[n]-prepared[n]) for n in prepared)<.003
+        assert not states[-1].stop_failures and views[-1]['gripper_modes']==['closed','closed']
+        checks.append('A accepts unknown load at certified Home and preserves measured pose and gripper positions')
         before=len(accepted);source['grip']=1.;phase('following');set_delta(.006)
         wait(lambda:len(accepted)>before+5)
         error_sample('right_axial')

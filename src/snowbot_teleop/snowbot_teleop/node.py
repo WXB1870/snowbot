@@ -1316,7 +1316,7 @@ class PicoNode(RuntimeNode):
                 stop_confirmed=(self.control.rest(self.now()) and self.control.pending is None and
                                 self.running is None and self.handoff_complete),
                 grasp_applied=None if self.control.teleop_mode=='independent_arms' else
-                    'right_axial' if self.control.virtual else 'rigid')
+                    'right_axial' if self.control.continuous_axial or self.control.virtual else 'rigid')
             if feedback.healthy and self.prepare_positions is not None:
                 measured=view['model_joints']
                 view['measured_limit_joints']=[n for n in self.names
