@@ -43,7 +43,7 @@ struct ServoCommand {
  Meta source{};SourceIdentity identity{};uint64_t frame=0,feedback_boot=0,feedback_sample=0,middle_instance=0;
  std::array<double,joint_count> target{};
  std::array<float,joint_count> kp{},kd{},torque{};
- bool derived=false,target_stream=false;
+ bool derived=false;
 };
 struct RejectedTrajectory {
  Meta source{};FixedText reason;bool active=false;
@@ -54,10 +54,10 @@ struct RejectedTrajectory {
 };
 template<class Packet> const char* inspect_servo_command(const Packet& packet,const Packet* origin,
  const AdmissionContext& context,ServoCommand& result)noexcept{
- result.source=meta(packet.meta);result.frame=packet.frame_sequence;result.target_stream=packet.meta.reference_mode==2;
+ result.source=meta(packet.meta);result.frame=packet.frame_sequence;
  result.feedback_boot=packet.meta.feedback_boot_id;result.feedback_sample=packet.meta.feedback_sample;
  result.middle_instance=packet.meta.middle_instance_id;result.identity.epoch=packet.meta.epoch;
- if(!((packet.meta.reference_mode==1&&packet.trajectory.version==1)||(packet.meta.reference_mode==2&&(packet.trajectory.version==2||packet.trajectory.version==3||packet.trajectory.version==4||packet.trajectory.version==5)))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
+ if(!(packet.meta.reference_mode==2&&(packet.trajectory.version==2||packet.trajectory.version==3||packet.trajectory.version==4||packet.trajectory.version==5))||packet.command.if_use_debugmod||!packet.command.if_topic_point_position)return "reference_mode_conflict";
  if(!result.identity.command.assign(packet.meta.source_command_id)||!result.identity.lease.assign(packet.meta.lease_id)||
     !result.identity.profile.assign(packet.meta.profile_hash)||!result.identity.command.size||!result.identity.lease.size||!result.identity.profile.size)return "source_identity_layout";
  for(unsigned i=0;i<7;++i){
@@ -164,9 +164,9 @@ public:
  template<class Wire> static std::unique_ptr<Prepared> prepare(const Wire& wire,const Meta& source,
    double max_v=.25,double max_a=.5,double max_j=162.) {
   using namespace bindu::execution;
-  require((wire.version==1||wire.version==4||wire.version==5) && wire.segment_id==source.sequence,"trajectory_version_or_identity");
+  require((wire.version==4||wire.version==5) && wire.segment_id==source.sequence,"trajectory_version_or_identity");
   const auto pieces=wire.duration.size();
-  const unsigned maximum=wire.version>=4?256:64;
+  const unsigned maximum=256;
   require(pieces>0 && pieces<=maximum && wire.piece_start.size()==pieces && wire.source_duration.size()==pieces &&
           wire.source_elapsed.size()==pieces && wire.control_count.size()==pieces*joint_count &&
           wire.controls.size()<=maximum*joint_count*6,"trajectory_layout");
@@ -353,13 +353,6 @@ public:
   entry.inner_reference=input.inner_reference;entry.trend=input.trend;entry.target_stream=input.target_stream;entry.replay=input.replay;entry.id=input.id;entry.replay_id=input.id;entry.admission=input.admission;entry.effective=input.effective;entry.start=start;entry.deadline=deadline;
   velocity_=input.velocity;acceleration_=input.acceleration;jerk_=input.jerk;selected_=nullptr;clock_offset_=offset;++version_;return nullptr;
  }
- // Non-periodic convenience for native fixtures and offline callers.
- template<class Wire> void accept(const Wire& wire,const Meta& source,int64_t ros,int64_t steady,
-   const std::array<double,joint_count>& measured_q,const std::array<double,joint_count>& measured_v,
-   double max_v=.25,double max_a=.5,double max_j=162.){
-  auto prepared=prepare(wire,source,max_v,max_a,max_j);prepared->admission=source.sequence;const auto error=commit(*prepared,ros,steady,measured_q,measured_v);
-  reclaim();if(error)throw std::invalid_argument(error);
- }
  bool sample(int64_t now)noexcept {
   selected_=at(now);return selected_&&selected_->segment->sample_into(std::max(0.,(now-selected_->start)*1e-9),q.data(),v.data(),a.data(),j.data(),joint_count);
  }
@@ -395,10 +388,10 @@ struct ServoAdmissionState {
   const bool derived=source==gate.last();
   if(derived!=command.derived)return "admission_source_changed";
   if(derived){
-   if(!gate.live(steady)||!fresh(source,ros,command.target_stream?maximum_target_pause_ttl:maximum_ttl,command.target_stream?maximum_target_ttl:maximum_ttl)||command.frame<=frame)return "duplicate_or_expired_frame";
+   if(!gate.live(steady)||!fresh(source,ros,maximum_target_pause_ttl,maximum_target_ttl)||command.frame<=frame)return "duplicate_or_expired_frame";
   }else{
    if(source.operation!=1 && !command.identity.authority(identity))return "source_authority_changed";
-   if(!gate.accepts(source,ros,steady,command.target_stream?maximum_target_pause_ttl:maximum_ttl,command.target_stream?maximum_target_ttl:maximum_ttl))return gate.rejection;
+   if(!gate.accepts(source,ros,steady,maximum_target_pause_ttl,maximum_target_ttl))return gate.rejection;
    if(!prepared || !(prepared->source==source))return "prepared_source_mismatch";
    prepared->admission=gate.generation()+1;
    if(const auto error=trajectory.commit(*prepared,ros,steady,feedback.q,feedback.v))return error;
@@ -436,7 +429,7 @@ private:
    }
    auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
    const auto began=std::chrono::steady_clock::now();
-   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else if(result->packet->meta.reference_mode==2)result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());else result->prepared=TrajectoryQueue::prepare(result->packet->trajectory,meta(result->packet->meta),limits_[0],limits_[1],limits_[2]);}}
+   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());}}
    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
    result->prepare_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-began).count();
    // Observation-only callback; its failure cannot alter control acceptance.

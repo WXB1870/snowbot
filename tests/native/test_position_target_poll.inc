@@ -1,4 +1,10 @@
 void check_target_production(){
+ for(auto mode:{0,1,2}){
+  Packet retired;retired.meta.reference_mode=mode;retired.trajectory.version=1;
+  position_session::ServoCommand checked;position_session::AdmissionContext context;
+  assert(std::string(position_session::inspect_servo_command(retired,static_cast<const Packet*>(nullptr),context,checked))=="reference_mode_conflict");
+ }
+
  using namespace position_session;
  ServoNode node;node.position_reference_mode_=2;
  node.position_admission_=std::make_unique<TrajectoryAdmission<Packet>>(node.position_trajectory_,[](auto& result){
@@ -22,7 +28,7 @@ void check_target_production(){
  const auto sample_time=steady_ns()+10000000;assert(node.position_trajectory_.sample(sample_time));
  const auto nominal_q=node.position_trajectory_.q,nominal_v=node.position_trajectory_.v,nominal_a=node.position_trajectory_.a;
  auto derived=std::make_shared<Packet>(*take);derived->frame_sequence=2;derived->command.l_kp[0]=41;derived->command.l_torque_grav_comp[0]=.123;
- node.position_submit(derived);drain();assert(node.position_v2_.frame==2&&node.position_output_.kp[0]==41&&std::abs(node.position_output_.torque[0]-.123f)<1e-8f);
+ node.position_submit(derived);drain();assert(node.position_acceptance_.frame==2&&node.position_output_.kp[0]==41&&std::abs(node.position_output_.torque[0]-.123f)<1e-8f);
  assert(node.position_gate_.generation()==generation&&node.position_gate_.deadline()==deadline&&node.position_gate_.last().sequence==1);
  assert(node.position_trajectory_.sample(sample_time)&&node.position_trajectory_.q==nominal_q&&node.position_trajectory_.v==nominal_v&&node.position_trajectory_.a==nominal_a);
  assert(!node.position_receipts_.pop(receipt));
@@ -55,7 +61,7 @@ void check_target_production(){
  assert(node.position_gate_.last().operation==2&&node.position_gate_.last().sequence==pause->meta.sequence);
  auto pause_derived=std::make_shared<Packet>(*pause);pause_derived->frame_sequence=2;pause_derived->command.l_torque_grav_comp[0]=.234;
  const auto pause_generation=node.position_gate_.generation();node.position_submit(pause_derived);drain();
- assert(node.position_target_barrier_==barrier&&node.position_gate_.generation()==pause_generation&&node.position_v2_.frame==2&&std::abs(node.position_output_.torque[0]-.234f)<1e-8f);
+ assert(node.position_target_barrier_==barrier&&node.position_gate_.generation()==pause_generation&&node.position_acceptance_.frame==2&&std::abs(node.position_output_.torque[0]-.234f)<1e-8f);
  // A late PAUSE while already in flight remains prior to later ordinary input.
  auto restart=packet(1,1,72);node.position_submit(restart);drain();
  inspect_hold=true;inspect_entered=false;auto late_pause=packet(2,2,72);node.position_submit(late_pause);while(!inspect_entered.load())std::this_thread::yield();
@@ -105,7 +111,7 @@ void check_bootstrap_interrupts(){
    wrong->meta.lease_id="wrong-lease";const auto barrier=node.position_target_barrier_;
    node.position_submit(wrong);assert(node.position_target_barrier_==barrier);
    node.position_submit(cancel);assert(node.position_target_barrier_>barrier);
-   assert(node.position_v2_.rejected.blocks(meta(cancel->meta)));
+   assert(node.position_acceptance_.rejected.blocks(meta(cancel->meta)));
    assert(std::string(node.position_cycle_reason_)=="takeover_canceled_before_activation");
    node.position_submit(cancel);assert(std::string(node.position_cycle_reason_)=="takeover_canceled_before_activation");
    assert(node.position_gate_.last().session!=session&&enable_requests==enabled_before);

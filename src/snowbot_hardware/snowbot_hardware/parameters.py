@@ -7,6 +7,17 @@ from pathlib import Path
 from functools import lru_cache
 
 
+def execution_backend(runtime_mode, backend='', execution_mode='position'):
+    """Choose the installed backend once for both launch entry points."""
+    if execution_mode not in ('position', 'impedance'):
+        raise ValueError('SNOWBOT_EXECUTION_MODE')
+    backend = backend or ('snowbot_vendor' if runtime_mode == 'real' else 'kinematic')
+    supported = ('snowbot_vendor',) if runtime_mode == 'real' else ('kinematic', 'external_simulation')
+    if backend not in supported or execution_mode == 'impedance' and backend != 'snowbot_vendor':
+        raise ValueError('ROBOT_HARDWARE_BACKEND_NOT_IMPLEMENTED:'+backend+':'+execution_mode)
+    return backend
+
+
 _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
  'solver': ('timeout_s', 'worker_timeout_s', 'startup_timeout_s'),
  'pico': ('prepare_button_hold_s',

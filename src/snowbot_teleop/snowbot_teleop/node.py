@@ -65,7 +65,8 @@ class PicoNode(RuntimeNode):
         self.declare_parameter('tool_config',str(share/'config/examples/snowbot/bimanual_snowbot_shovel.json'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('model_root',str(Path(get_package_share_directory('snowbot_description'))/'urdf'),descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('device_backend','kinematic',descriptor=ParameterDescriptor(read_only=True))
-        self.declare_parameter('position_protocol','legacy_guard',descriptor=ParameterDescriptor(read_only=True))
+        if 'position_protocol' in self._parameter_overrides:
+            raise ValueError('SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol')
         self.execution_mode=self.declare_parameter('execution_mode','position',descriptor=ParameterDescriptor(read_only=True)).value
         self.declare_parameter('gripper_config','',descriptor=ParameterDescriptor(read_only=True))
         self.declare_parameter('base_config','',descriptor=ParameterDescriptor(read_only=True))
@@ -164,7 +165,7 @@ class PicoNode(RuntimeNode):
         if (not math.isfinite(self.prepare_limit_max) or
                 not 0<=self.prepare_limit_max<=self.prepare_position_tolerance):
             raise ValueError('PICO_PREPARE_LIMIT_RECOVERY_CONFIG')
-        if self.simulation or self.get_parameter('position_protocol').value!='session_v3':
+        if self.simulation:
             self.prepare_limit_max=0.
         self.control=PicoControl(initial_load=initial_load,simulation_demo=self.simulation_demo,
                                  max_age=(self.runtime_parameters['teleop']['input_max_age_s'] if self.position_contract

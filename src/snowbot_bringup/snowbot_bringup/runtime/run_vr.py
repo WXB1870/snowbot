@@ -385,7 +385,7 @@ def parse_args(argv=None):
     if pico.get('tool_grasp_confirmation') not in ('calibrated','operator'):
         raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
     lead=0.
-    if d.get('runtime_mode')=='real' and d.get('position_protocol')=='session_v3':
+    if d.get('runtime_mode')=='real':
         lead=braking_lead(args.runtime_parameters,d.get('target_stream_brake_lead_s'))
         d['target_stream_brake_lead_s']=str(lead)
         target_stream_limits(d)

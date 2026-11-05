@@ -114,12 +114,9 @@ def check_runtime(args, robot):
         validate_base_config(json.loads(Path(args['base_config']).read_text()))
         modules += [('geometry_msgs.msg', ('Twist',)), ('nav_msgs.msg', ('Odometry',))]
     if args['runtime_mode'] == 'real':
-        modules.append(('snowbot_ctl_msgs.msg', ('JointPositionCommand', 'RetInformation')))
-        if args.get('position_protocol') in ('session_v1','session_v3'):
-            modules.append(('snowbot_ctl_msgs.msg', ('PositionObservation', 'PositionSessionMeta',
-                'PositionSessionCommand', 'PositionSessionUpper', 'PositionSessionServo', 'PositionSessionState')))
-            if args.get('position_protocol') == 'session_v3':
-                modules.append(('snowbot_ctl_msgs.msg', ('PositionTrajectory',)))
+        modules.append(('snowbot_ctl_msgs.msg', ('PositionObservation', 'PositionSessionMeta',
+            'PositionSessionCommand', 'PositionSessionUpper', 'PositionSessionServo',
+            'PositionSessionState', 'PositionTrajectory')))
     for module, names in modules:
         package = importlib.import_module(module)
         for name in names:
@@ -139,31 +136,13 @@ def check_runtime(args, robot):
         from snowbot_hardware.parameters import load_parameters, apply_tool_timing
         tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))
     from bindu_runtime.teleop_deployment import apply_execution_tracking
-    tool = apply_execution_tracking(tool, args.get('execution_mode','position'),
-                                    real=args['runtime_mode']=='real',
-                                    position_contract=args.get('position_contract') in (True,'true'))
+    tool = apply_execution_tracking(tool, args.get('execution_mode','position'))
     tool['urdf'] = str(robot.urdf)
     solver = BimanualQP(tool, robot.profile)
     solver.close()
     report = dict(software_dependencies='passed', robot_interface='not_checked')
     if args['runtime_mode'] == 'real':
-        package = importlib.import_module('snowbot_ctl_msgs.msg')
-        report['vendor_messages'] = inspect_vendor_messages(package.JointPositionCommand, package.RetInformation)
-    return report
-
-
-def inspect_vendor_messages(command_type, feedback_type):
-    """ROS type support alone does not establish the actual field contract."""
-    from snowbot_hardware.protocol import feedback_schema
-    report = feedback_schema(feedback_type.get_fields_and_field_types())
-    command = command_type.get_fields_and_field_types()
-    for name in ('l_arm_position', 'r_arm_position'):
-        if command.get(name) not in ('double[7]', 'float64[7]'):
-            report['errors'].append(name+':float64[7]')
-    report['compatible'] = not report['errors']
-    report['full_body_feedback'] = report['compatible'] and not report['missing_groups']
-    if report['errors']:
-        raise ValueError('SNOWBOT_MESSAGE_SCHEMA_MISMATCH:'+','.join(report['errors']))
+        report['vendor_messages'] = dict(protocol='session_v3', typesupport='loaded')
     return report
 
 
@@ -181,35 +160,16 @@ def vendor_endpoints(args):
     result = []
     def add(name, kind, role, node):
         result.append(dict(topic=topic(name), type=kind, role=role, node=node))
-    if args.get('position_protocol') in ('session_v1','session_v3'):
-        if value != '/':
-            raise ValueError('SNOWBOT_POSITION_SESSION_ROOT_NAMESPACE_REQUIRED')
-        add('bindu/position/observation', 'snowbot_ctl_msgs/msg/PositionObservation', 'publisher', servo)
-        for layer, owner in (('upper', arm), ('middle', middle), ('servo', servo)):
-            add('bindu/position/'+layer+'_state', 'snowbot_ctl_msgs/msg/PositionSessionState', 'publisher', owner)
-        add('bindu/position/command', 'snowbot_ctl_msgs/msg/PositionSessionCommand', 'subscription', arm)
-        for name, kind, sender, receiver in (
-            ('upper', 'PositionSessionUpper', arm, middle), ('servo', 'PositionSessionServo', middle, servo)):
-            add('bindu/position/'+name, 'snowbot_ctl_msgs/msg/'+kind, 'publisher', sender)
-            add('bindu/position/'+name, 'snowbot_ctl_msgs/msg/'+kind, 'subscription', receiver)
-        return result
-    add('dualArmCtl_fdback', 'snowbot_ctl_msgs/msg/RetInformation', 'publisher', servo)
-    for name, kind, receiver in (
-        ('joint_position_cmd', 'snowbot_ctl_msgs/msg/JointPositionCommand', arm),
-        ('body/motor_cmd', 'std_msgs/msg/Float64MultiArray', servo),
-        ('head/motor_cmd', 'std_msgs/msg/Float64MultiArray', servo),
-        ('bindu/heartbeat', 'std_msgs/msg/UInt64MultiArray', servo)):
-        add(name, kind, 'subscription', receiver)
+    if value != '/':
+        raise ValueError('SNOWBOT_POSITION_SESSION_ROOT_NAMESPACE_REQUIRED')
+    add('bindu/position/observation', 'snowbot_ctl_msgs/msg/PositionObservation', 'publisher', servo)
+    for layer, owner in (('upper', arm), ('middle', middle), ('servo', servo)):
+        add('bindu/position/'+layer+'_state', 'snowbot_ctl_msgs/msg/PositionSessionState', 'publisher', owner)
+    add('bindu/position/command', 'snowbot_ctl_msgs/msg/PositionSessionCommand', 'subscription', arm)
     for name, kind, sender, receiver in (
-        ('upperMonitor_msg_send', 'snowbot_ctl_msgs/msg/MidNodeCtlMsgSend', arm, middle),
-        ('ctl_data_pub', 'snowbot_ctl_msgs/msg/CtlInformation', middle, servo)):
-        add(name, kind, 'publisher', sender)
-        add(name, kind, 'subscription', receiver)
-    add('bindu/servo_health', 'std_msgs/msg/String', 'publisher', servo)
-    add('bindu/control_source', 'std_msgs/msg/String', 'publisher', arm)
-    if args.get('gripper_config'):
-        for side in ('left', 'right'):
-            add('gripper/'+side+'_cmd', 'std_msgs/msg/Float64MultiArray', 'subscription', servo)
+        ('upper', 'PositionSessionUpper', arm, middle), ('servo', 'PositionSessionServo', middle, servo)):
+        add('bindu/position/'+name, 'snowbot_ctl_msgs/msg/'+kind, 'publisher', sender)
+        add('bindu/position/'+name, 'snowbot_ctl_msgs/msg/'+kind, 'subscription', receiver)
     return result
 
 
@@ -284,79 +244,13 @@ def inspect_position_routes(args, node):
     return list(dict.fromkeys(errors))
 
 
-def assess_robot_interface(args, node, messages, now, health):
-    """Combine endpoint identity, actual measured fields and advancing PDO health."""
-    from snowbot_hardware.protocol import GROUPS, decode_feedback
-    errors = inspect_vendor_endpoints(args, node)
-    missing = list(GROUPS)
-    feedback_usable = False
-    msg = messages.get('feedback')
-    try:
-        if msg is None:
-            raise ValueError('SNOWBOT_FEEDBACK_UNAVAILABLE')
-        q, v, stamp = decode_feedback(msg)
-        if (not all(math.isfinite(x) for x in (*q.values(), *v.values(), stamp)) or
-                not 0 <= now-stamp <= .2):
-            raise ValueError('SNOWBOT_FEEDBACK_STALE_OR_INVALID')
-        feedback_usable = not any(':dualArmCtl_fdback' in e or '/dualArmCtl_fdback:' in e for e in errors)
-        missing = [g for g, names in GROUPS.items() if not set(names) <= q.keys()]
-        if missing:
-            errors.append('SNOWBOT_FEEDBACK_INCOMPLETE:'+','.join(missing))
-    except (ValueError, AttributeError, TypeError) as exc:
-        errors.append(str(exc))
-    try:
-        health.require(tuple(GROUPS), armed=False)
-        if health.messages.get('servo', {}).get('native_position_guard_version') != 1:
-            raise RuntimeError('SNOWBOT_NATIVE_GUARD_REQUIRED')
-    except RuntimeError as exc:
-        errors.append(str(exc))
-    if args.get('gripper_config'):
-        # Historical custom-wire guards reject the native five-element topics.
-        if 'gripper_control_enabled' in health.messages.get('servo', {}):
-            errors.append('GRIPPER_NATIVE_PROTOCOL_GUARD_UNVERIFIED')
-        from snowbot_hardware.parameters import load_mode_config
-        cfg = load_mode_config(args['gripper_config'],args['runtime_mode'])
-        if not cfg['calibrated']:
-            errors.append('GRIPPER_CALIBRATION_REQUIRED')
-    return dict(robot_interface='available' if not errors else 'unavailable',
-                feedback_usable=feedback_usable, missing_feedback_groups=missing,
-                errors=errors, scope='read-only endpoints, feedback and safety metadata; no motion acceptance')
 
 
 def check_robot_interface(args, timeout=2.):
     """Subscribe/read only. Never launch a driver, publish a target or call a service."""
     if not math.isfinite(timeout) or not 0 < timeout <= 30:
         raise ValueError('SNOWBOT_INTERFACE_CHECK_TIMEOUT')
-    if args.get('position_protocol') in ('session_v1','session_v3'):
-        return check_position_session(args, timeout)
-    import rclpy
-    from rclpy.qos import qos_profile_sensor_data
-    from snowbot_ctl_msgs.msg import RetInformation
-    from std_msgs.msg import String
-    from snowbot_hardware.protocol import VendorHealth
-    rclpy.init(args=[])
-    node = rclpy.create_node('bindu_interface_check_'+uuid.uuid4().hex[:8])
-    now = lambda: node.get_clock().now().nanoseconds*1e-9
-    health, messages = VendorHealth(now), {}
-    prefix = args.get('vendor_namespace', '/snowbot').rstrip('/')
-    def receive_health(channel, msg):
-        try:
-            health.receive(channel, msg.data)
-        except ValueError:
-            pass  # VendorHealth retains the channel's explicit invalid status.
-    try:
-        node.create_subscription(RetInformation, prefix+'/dualArmCtl_fdback',
-                                 lambda msg: messages.update(feedback=msg), qos_profile_sensor_data)
-        for channel, name in (('servo', 'servo_health'), ('source', 'control_source')):
-            node.create_subscription(String, prefix+'/bindu/'+name,
-                                     lambda msg, c=channel: receive_health(c, msg), qos_profile_sensor_data)
-        deadline = time.monotonic()+timeout
-        while time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=min(.05, max(0., deadline-time.monotonic())))
-        return assess_robot_interface(args, node, messages, now(), health)
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    return check_position_session(args, timeout)
 
 
 def check_position_session(args, timeout):
@@ -370,8 +264,7 @@ def check_position_session(args, timeout):
     rclpy.init(args=[])
     node = rclpy.create_node('bindu_position_check_'+uuid.uuid4().hex[:8])
     health = SessionHealth(lambda: node.get_clock().now().nanoseconds*1e-9,
-                           execution_mode=args.get('execution_mode','position'),
-                           reference_mode=2 if args.get('position_protocol') == 'session_v3' else 0)
+                           execution_mode=args.get('execution_mode','position'))
     failures = {}
     def observe(msg):
         try:
@@ -411,7 +304,7 @@ def check_position_session(args, timeout):
         except (ValueError, AttributeError):
             pass
         return dict(robot_interface='available' if not errors else 'unavailable',
-            position_protocol=args.get('position_protocol','session_v1'), feedback_usable=bool(q), errors=errors,
+            position_protocol='session_v3', feedback_usable=bool(q), errors=errors,
             missing_feedback_groups=[g for g, names in GROUPS.items() if not set(names) <= q.keys()],
             required_control_groups=sorted(CONTROL_GROUPS), deferred_resources=['grippers', 'head'],
             scope='read-only session endpoints, measured PDO progress and faults; no motion acceptance')
