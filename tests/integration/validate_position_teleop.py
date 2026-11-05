@@ -447,10 +447,11 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             checks.append('paused-hand displacement is discarded when only that hand recaptures its baseline')
             source['grips']=[0.,0.];phase('tool_standby');pump(.3)
             count=len(accepted);click(1,1)
-            wait(lambda:views[-1]['phase']=='standby' and views[-1]['pending'] is None and
-                 'BIMANUAL_GRASP_POSE' in views[-1]['reason'])
+            phase('standby')
+            assert views[-1]['teleop_mode']=='bimanual_tool' and len(accepted)==count
+            click(1,1);phase('standby')
             assert views[-1]['teleop_mode']=='independent_arms' and len(accepted)==count
-            checks.append('B requests tool mode at rest; geometric refusal preserves normal mode and sends no motion')
+            checks.append('B selects either mode at rest without motion; grasp geometry belongs to engagement')
             source['grips']=[1.,0.];phase('following');source['buttons'][0]=2;phase('locked')
             source.update(grips=[0.,0.],buttons=[0,0]);pump(.3);click(1,1);phase('standby')
             count=len(accepted);pump(.3);assert len(accepted)==count

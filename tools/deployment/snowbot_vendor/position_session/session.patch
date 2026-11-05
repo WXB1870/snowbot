@@ -625,7 +625,7 @@
 @@ -844,0 +893,2 @@
 +    if(!position_initialized_){position_rejection_="initialization_incomplete";return;}
 +
-@@ -881,0 +932,46 @@
+@@ -881,0 +932,47 @@
 +
 +void RobotCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionCommand::SharedPtr packet){
 + if(packet->meta.reference_mode!=2){position_rejection_="reference_mode_conflict";return;}
@@ -643,7 +643,8 @@
 + auto native=std::make_shared<snowbot_ctl_msgs::msg::JointPositionCommand>(packet->command);
 + for(unsigned i=0;i<2;++i)position_waist_target_[i]=packet->waist_position[i];
 + position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_pending_=true;
-+ position_dispatch_=true;joint_position_cmd_callback(native);position_dispatch_=false;position_rejection_.clear();
++ // Materialize this target before any loop branch can publish its envelope.
++ position_dispatch_=true;joint_position_cmd_callback(native);position_dispatch_=false;jointPositionOutp();position_rejection_.clear();
 +}
 +
 +bool RobotCtlNode::position_ready(){

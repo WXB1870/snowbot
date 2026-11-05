@@ -245,6 +245,9 @@ def main():
         assert all(frame.trajectory==msg.trajectory and frame.meta==msg.meta for frame in matching)
         relayed=[frame for frame in upper_frames if frame.meta.session==101]
         assert relayed and all(frame.trajectory==msg.trajectory and frame.meta==msg.meta for frame in relayed)
+        assert all(frame.command.if_streaming_joint_position and frame.command.ctl_trans_mod==3 and
+                   list(frame.command.l_position)==list(msg.command.l_arm_position) and
+                   list(frame.command.r_position)==list(msg.command.r_arm_position) for frame in relayed)
         assert all(frame.meta.expires_at_ns==msg.meta.expires_at_ns for frame in matching)
         checks['empty_curve_target_recipe_and_source_identity_relayed_unchanged']=True
         observed=observations['last']
