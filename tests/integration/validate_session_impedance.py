@@ -96,7 +96,7 @@ def main():
         if not args.physics_controller_output and args.case in ('all','rt'):
             driver=(source/'servo_control/src/servo_control/ethercat_driver.cpp').read_text()
             start=driver.index('    obs.sensor_valid_mask=0;')
-            sensor=driver[start:driver.index('    obs.session=session_watchdog_.session;',start)]
+            sensor=driver[start:driver.index('    obs.shutdown_disabled=',start)]
             start=driver.index('    uint32_t position_written=0;')
             output=driver[start:driver.index('    // --- PDO 收发 ---',start)]
             rt=(tests/'test_impedance_rt.cpp').read_text().replace('// SENSOR_CAPTURE',sensor).replace('// FINAL_PDO_WRITE',output)
