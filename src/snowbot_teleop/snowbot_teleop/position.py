@@ -25,9 +25,9 @@ class PositionOperations:
         self.release_pending = False
         self.stop_unconfirmed = False
         self.sequence = 0
-        self.leases = node.create_client(Lease, 'gripper/lease')
-        self.control = node.create_client(GripperControl, 'gripper/control')
-        node.create_subscription(GripperState, 'gripper/state', self.receive, 10)
+        self.leases = node.node.create_client(Lease, 'gripper/lease')
+        self.control = node.node.create_client(GripperControl, 'gripper/control')
+        node.node.create_subscription(GripperState, 'gripper/state', self.receive, 10)
 
     def receive(self, msg):
         n = self.node

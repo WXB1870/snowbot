@@ -24,6 +24,8 @@ ROOT = Path(os.environ.get('BINDU_FRAMEWORK_SOURCE', Path.cwd())).resolve()
 
 def commands(args):
     deployment=dict(args.deployment)
+    if args.diagnostics:
+        deployment['detailed_diagnostics']='true'
     if getattr(args,'input_timing',False):deployment['input_timing_enabled']='true'
     control = ['ros2', 'launch', getattr(args, 'launch_package', 'bindu_runtime'), args.launch,
                *[f'{key}:={value}' for key,value in deployment.items() if value!=''],

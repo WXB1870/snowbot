@@ -730,3 +730,23 @@ def loading_guide(view, modes):
         return dict(title='步骤 4/4：确认'+operation+'完成',
                     detail='松开双侧握，按 B 确认'+('工具已装夹' if goal=='held' else '工具已取出')+'，返回待命',key='B',step='confirm')
     return {}
+
+
+def prepare_start_tolerance(profile,cfg):
+    """Bound snapshot drift independently of the final arrival tolerance."""
+    value=float(cfg.get('prepare_start_tolerance_rad',.0001))
+    if not math.isfinite(value) or not 0<value<=profile.feedback_tolerances['joint_position']:
+        raise RuntimeError('PICO_PREPARE_START_TOLERANCE_INVALID')
+    return value
+
+
+def prepare_reference(profile,names,measured):
+    """Keep explicit A references legal without rewriting measured feedback."""
+    result=dict(measured)
+    tolerance=profile.feedback_tolerances['joint_position']
+    for n in names:
+        q=measured[n];lo,hi=profile.limits[n]
+        if not math.isfinite(q) or not lo-tolerance<=q<=hi+tolerance:
+            raise RuntimeError('PREPARE_START_JOINT_LIMIT:'+n)
+        result[n]=min(hi,max(lo,q))
+    return result

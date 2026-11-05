@@ -113,29 +113,31 @@ def assemble(context):
                           namespace=ns, output='screen', parameters=[{
                               'robot_description': robot.display_urdf.read_text(), 'publish_frequency': 30.}],
                           remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')]))
-    tool = {'tool_config': str(robot.tool_config), 'input_source': value('tool_input_source')}
+    tool = {'detailed_diagnostics':enabled('detailed_diagnostics','false'), 'tool_config': str(robot.tool_config), 'input_source': value('tool_input_source')}
     tool.update({key:input_settings[key] for key in ('grip_press_threshold','grip_release_threshold','trigger_release_threshold','pair_max_skew_s')})
-    nodes.append(Node(package='bindu_runtime', executable='teleop_mode', namespace=ns,
-                      output='screen', parameters=[{**common, **tool, 'initial_side': side,
-                          'supported_sides': [side],
-                          **({'input_max_age_s': input_settings['remote_input_timeout_s']}
-                             if 'remote_input_timeout_s' in input_settings else {}),
-                          'single_arm_enabled':single_enabled,'require_single_worker':single_enabled,
-                          'independent_arms_enabled':position_contract,
-                          'require_recording':recorder_enabled}]))
+    if not pico:
+        nodes.append(Node(package='bindu_runtime', executable='teleop_mode', namespace=ns,
+                          output='screen', parameters=[{**common, **tool, 'initial_side': side,
+                              'supported_sides': [side],
+                              **({'input_max_age_s': input_settings['remote_input_timeout_s']}
+                                 if 'remote_input_timeout_s' in input_settings else {}),
+                              'single_arm_enabled':single_enabled,'require_single_worker':single_enabled,
+                              'independent_arms_enabled':position_contract,
+                              'require_recording':recorder_enabled}]))
     if single_enabled:
         nodes.append(Node(package='bindu_runtime', executable='teleop', namespace=ns,
                           output='screen', parameters=[{**common, **model,
                               'teleop_config': str(robot.single_arm[side]), 'require_mode_selection': True,'require_recording':recorder_enabled}]))
-    nodes.append(Node(package='snowbot_teleop' if position_contract else 'bindu_runtime', executable='teleop_tool', namespace=ns,
-                      output='screen', parameters=[{**common, **model, **tool,'require_recording':recorder_enabled,
-                          'simulation_demo':pico_demo,
-                          'position_contract':position_contract,
-                          **({'parameters_config':value('parameters_config')} if position_contract else {}),
-                          'execution_mode':execution_mode,
-                          'position_protocol':value('position_protocol','legacy_guard'),
-                          'gripper_config':value('gripper_config') if position_contract else '',
-                          'tool_ground_policy':'report_only' if pico_demo else 'configured'}]))
+    if not pico:
+        nodes.append(Node(package='snowbot_teleop' if position_contract else 'bindu_runtime', executable='teleop_tool', namespace=ns,
+                          output='screen', parameters=[{**common, **model, **tool,'require_recording':recorder_enabled,
+                              'simulation_demo':pico_demo,
+                              'position_contract':position_contract,
+                              **({'parameters_config':value('parameters_config')} if position_contract else {}),
+                              'execution_mode':execution_mode,
+                              'position_protocol':value('position_protocol','legacy_guard'),
+                              'gripper_config':value('gripper_config') if position_contract else '',
+                              'tool_ground_policy':'report_only' if pico_demo else 'configured'}]))
     nodes.append(Node(package='bindu_runtime', executable='teleop_display', namespace=ns,
                       condition=IfCondition(LaunchConfiguration('tool_display_enabled')),
                       output='screen', parameters=[{**common, **model, 'tool_config': str(robot.tool_config)}]))
@@ -151,7 +153,8 @@ def assemble(context):
             parameters=[{**common,**model,'parameters_config':value('parameters_config'),'tool_config':str(robot.tool_config),
                          'pico_config':pico_config,'device_backend':backend,'recording_enabled':recorder_enabled,
                          'gripper_config':value('gripper_config'),
-                         'base_config':base_config, 'command_enabled':enabled('command_enabled','false'),
+                         'base_config':base_config, 'position_contract':position_contract, **tool, 'require_recording':recorder_enabled,
+                         'tool_ground_policy':'report_only' if pico_demo else 'configured', 'command_enabled':enabled('command_enabled','false'),
                          'position_protocol':value('position_protocol','legacy_guard'),
                          'simulation_demo':pico_demo}]))
     nodes.append(Node(package='bindu_runtime', executable='vr_input', namespace=ns,

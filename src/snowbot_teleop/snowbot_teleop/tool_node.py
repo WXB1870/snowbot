@@ -1,6 +1,7 @@
 """Snowbot gripper policy attached to the generic bimanual tool node."""
 from bindu_runtime.bimanual_tool_node import BimanualToolNode
 from bindu_runtime.common import spin
+from bindu_runtime.execution_client import parameter
 from snowbot_hardware.gripper import validate_config, JOINTS
 
 
@@ -12,7 +13,7 @@ def load_grippers(config, profile, mode):
 def load_tool(node, config):
     from rcl_interfaces.msg import ParameterDescriptor
     from snowbot_hardware.parameters import load_parameters, apply_tool_timing
-    node.runtime_parameters = load_parameters(node.declare_parameter(
+    node.runtime_parameters = load_parameters(parameter(node,
         'parameters_config', '', descriptor=ParameterDescriptor(read_only=True)).value or None)
     return apply_tool_timing(config, node.runtime_parameters)
 

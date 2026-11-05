@@ -43,6 +43,26 @@ snowbot/
 
 运行工具安装在 `snowbot_bringup.teleop` 和 `snowbot_bringup.simulation`，页面位于该包的 `share/web/`。
 
+## 遥操作代码
+
+PICO 配方由 `vr_input → pico_control → execution → 厂商 upper/middle/servo` 连接输入与设备。`pico_control` 在进程内组合应用流程、模式选择和 Bindu 会话，共享一个执行客户端及反馈缓存。QP 和准备路径校验使用各自的数值 worker，电脑显示通过观察器读取状态。
+
+| 阅读位置 | 职责 |
+|---|---|
+| [assembly.py](src/snowbot_bringup/snowbot_bringup/assembly.py) | 启动装配与参数传递 |
+| [node.py](src/snowbot_teleop/snowbot_teleop/node.py) | ROS 发布、订阅、服务和组件装配 |
+| [application.py](src/snowbot_teleop/snowbot_teleop/application.py) | 准备、模式切换、跟随、取消及操作交接 |
+| [control.py](src/snowbot_teleop/snowbot_teleop/control.py) | PICO 按键状态机与操作意图 |
+| [preparation.py](src/snowbot_teleop/snowbot_teleop/preparation.py) | 准备路径、目标生成及实测到位检查 |
+| [position.py](src/snowbot_teleop/snowbot_teleop/position.py) | 夹爪操作及夹爪反馈 |
+| [status.py](src/snowbot_teleop/snowbot_teleop/status.py) | 面向操作者的状态视图 |
+| Bindu `tool_session.py` / `tool_follow.py` | 会话就绪、输入映射、QP 事务、执行租约与清理 |
+| Bindu `execution_client.py` | 执行服务客户端和唯一执行反馈缓存 |
+
+模式选择和会话启动在应用内直接调用，`teleop/mode_state` 与 `teleop/state` 提供观察出口。`teleop/vr/input` 在存在观察或记录订阅者时发布处理后输入，独立夹爪通过 `teleop/vr/gripper_input` 接收扳机。执行层继续通过租约、修订号和实测反馈确认命令与停止。
+
+日常 QP 诊断和稳定会话反馈以约 10 Hz 更新，阶段变化及时报告。`--diagnostics` 启用逐次 QP 诊断，采集与浏览器显示由独立观察进程处理。
+
 ## 配置与模型
 
 [配置目录](src/snowbot_bringup/config/)随 `snowbot_bringup` 安装。按要调整的内容选择入口。
