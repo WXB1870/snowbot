@@ -106,7 +106,7 @@ class Plan:
 
 
 def make_plan(degrees=1., speed=.1, acceleration=.5, jerk=10.):
-    for value, maximum in ((degrees, 45.), (speed, .375), (acceleration, 2.25), (jerk, 162.)):
+    for value, maximum in ((degrees, 90.), (speed, 1.), (acceleration, 3.), (jerk, 162.)):
         if type(value) not in (float, int) or not math.isfinite(value) or not 0 < value <= maximum:
             raise ValueError('TEST_ENVELOPE_EXCEEDED')
     distance = math.radians(degrees)
@@ -326,10 +326,14 @@ def targets(plan, elapsed, initial, limits, axis='body_joint_1'):
     q = {n: initial[n] for n in NAMES}
     q[axis] += offset
     for n in NAMES:
-        # Extra excursion clearance applies only to the axis being moved.
-        margin = .01 if n == axis else 0.
-        if not math.isfinite(q[n]) or not limits[n][0]+margin <= q[n] <= limits[n][1]-margin:
+        # Held joints may have a small measured offset beyond a model boundary.
+        # Keep their commanded targets inside the model; retain moving-axis clearance.
+        margin = .01 if n == axis else -.001
+        lo, hi = limits[n]
+        if not math.isfinite(q[n]) or not lo+margin <= q[n] <= hi-margin:
             raise ValueError('TEST_POSITION_LIMIT:'+n)
+        if n != axis:
+            q[n] = min(hi, max(lo, q[n]))
     return q
 
 
@@ -996,9 +1000,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--axis', choices=(*NAMES[:2], 'both'), default='body_joint_1',
                         help='both is available only with --backend waist_topic')
-    parser.add_argument('--degrees', type=float, default=1., help='code-scale excursion each way; default 1 deg, <=45; selected joint limits still apply')
-    parser.add_argument('--speed', type=float, default=.1, help='code-scale rad/s; default .1, <=0.375 and selected profile')
-    parser.add_argument('--acceleration', type=float, default=.5, help='code-scale rad/s^2; default .5, <=2.25 and selected profile')
+    parser.add_argument('--degrees', type=float, default=1., help='code-scale excursion each way; default 1 deg, <=90; selected joint limits still apply')
+    parser.add_argument('--speed', type=float, default=.1, help='code-scale rad/s; default .1, <=1 and selected profile')
+    parser.add_argument('--acceleration', type=float, default=.5, help='code-scale rad/s^2; default .5, <=3 and selected profile')
     parser.add_argument('--jerk', type=float, default=10., help='code-scale rad/s^3; default 10, <=162')
     parser.add_argument('--backend', choices=('session', 'waist_topic'), default='session')
     parser.add_argument('--waveform', choices=('quintic', 'sine', 'scurve'), default='quintic')

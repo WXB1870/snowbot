@@ -222,7 +222,8 @@ def build_scene(motion, cfg, output):
                 contact_filter_prim_paths_expr=[str(links[f'arm_{short}_link_{n}'].GetPath()) for n in (7,8)],
                 max_contact_count=2048, disable_stablization=False))
     UsdLux.DomeLight.Define(stage, '/World/Light').CreateIntensityAttr(1000.)
-    set_camera_view(eye=[3., 2.4, 2.1], target=[.6, -.3, .8])
+    set_camera_view(eye=cfg.get('camera_eye_m', [3., 2.4, 2.1]),
+                    target=cfg.get('camera_target_m', [.6, -.3, .8]))
     world.get_physics_context().set_gravity(-9.81)
     from isaacsim.core.simulation_manager import SimulationManager
     SimulationManager.enable_fabric(cfg.get('use_fabric', True))

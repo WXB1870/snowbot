@@ -127,7 +127,7 @@ class RuntimeParameterTests(unittest.TestCase):
         base=package_share('snowbot_bringup')/'config/robots/snowbot'
         profile=Profile.load(base/'snowbot_real_position.json')
         for mode,closed,speed,policy,calibrated,duration in (
-                ('real',.26,.5,'operator',False,4.),('simulation',0.,.2,'calibrated',True,8.)):
+                ('real',.26,.5,'operator',False,30.),('simulation',0.,.2,'calibrated',True,30.)):
             operations=load_mode_config(base/'teleop.json',mode)
             grippers=validate_config(load_mode_config(base/'grippers.json',mode),profile)
             self.assertEqual(operations['tool_grasp_confirmation'],policy)

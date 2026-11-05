@@ -148,6 +148,7 @@ class PositionSessionDevices:
         self.io.trajectory_reference = bool(self.health.reference_mode)
         self.io.target_stream = self.health.reference_mode == 2
         self.io.supports_rigid_reference = self.health.reference_mode == 2
+        self.io.supports_prepared_replay = self.health.reference_mode == 2
         self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s'] if self.health.reference_mode == 2 else 0.
         self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
         self.io.stop_requires_arrival = self.health.reference_mode != 2
@@ -234,16 +235,28 @@ class PositionSessionDevices:
         except (ValueError, RuntimeError) as exc:
             self.node.get_logger().warn(str(exc), throttle_duration_sec=1.)
 
-    def identity(self, topic, expected, kind, *, subscription=False):
+    def identity(self, topic, expected, kind, *, subscription=False, discovering=False):
         method = self.graph.get_subscriptions_info_by_topic if subscription else self.graph.get_publishers_info_by_topic
         infos = method(topic)
+        # Fast DDS may deliver samples before its graph resolves the node name.
+        # Before the first measured frame, discard these samples and keep waiting.
+        if discovering and self.health.observation is None and (not infos or
+                len(infos) == 1 and infos[0].topic_type == kind and
+                (infos[0].node_name == '_NODE_NAME_UNKNOWN_' or
+                 infos[0].node_namespace == '_NODE_NAMESPACE_UNKNOWN_')):
+            return False
         matched = [i for i in infos if i.node_namespace.rstrip('/')+'/'+i.node_name == expected and i.topic_type == kind]
         if len(matched) != 1 or not subscription and len(infos) != 1:
-            raise RuntimeError('SNOWBOT_SESSION_ENDPOINT:'+topic)
+            found = [dict(node=i.node_namespace.rstrip('/')+'/'+i.node_name, type=i.topic_type) for i in infos]
+            raise RuntimeError('SNOWBOT_SESSION_ENDPOINT:'+topic+';expected='+expected+
+                               ';type='+kind+';found='+json.dumps(found, separators=(',', ':')))
+        return True
 
     def receive_state(self, layer, topic, receiver, msg):
         try:
-            self.identity(topic, self.receivers[receiver], 'snowbot_ctl_msgs/msg/PositionSessionState')
+            if not self.identity(topic, self.receivers[receiver],
+                                 'snowbot_ctl_msgs/msg/PositionSessionState', discovering=True):
+                return
             self.health.state(layer, msg)
         except (ValueError, RuntimeError) as exc:
             self.health.states.pop(layer, None)
@@ -251,7 +264,9 @@ class PositionSessionDevices:
 
     def receive(self, msg):
         try:
-            self.identity(self.feedback_topic, self.receivers['head'], 'snowbot_ctl_msgs/msg/PositionObservation')
+            if not self.identity(self.feedback_topic, self.receivers['head'],
+                                 'snowbot_ctl_msgs/msg/PositionObservation', discovering=True):
+                return
             q, v, stamp = self.health.observe(msg)
             if self.grippers and self.grippers.core and stamp > self.grippers.core.feedback_stamp:
                 try:
@@ -553,6 +568,23 @@ class PositionSessionDevices:
             msg.trajectory.version = (3 if not self.io.sending_hold and
                                       getattr(self.io.source_motion,'rigid_reference',False) else 2)
             msg.trajectory.segment_id = metadata['sequence']
+            prepared = getattr(self.io, 'prepared_replay', None)
+            if prepared is not None and not self.io.sending_hold:
+                msg.trajectory.version = 4 if prepared.inner_reference else 5
+                msg.trajectory.effective_at_ns = round(prepared.effective*1e9)
+                if self.io.source_motion.mode != 'trajectory_heartbeat':
+                    self.replay_segment_id = metadata['sequence']
+                    # Existing Bernstein wire representation; never refit q.
+                    order = [self.io.source_motion.names.index(n) for n in CONTROL_NAMES]
+                    for start, duration, source_duration, elapsed, controls in prepared.description:
+                        msg.trajectory.piece_start.append(start)
+                        msg.trajectory.duration.append(duration)
+                        msg.trajectory.source_duration.append(source_duration)
+                        msg.trajectory.source_elapsed.append(elapsed)
+                        for i in order:
+                            msg.trajectory.control_count.append(len(controls[i]))
+                            msg.trajectory.controls.extend(controls[i])
+                msg.trajectory.segment_id = self.replay_segment_id
             for field, getter, ceiling in (('max_velocity', self.io.profile.speed, self.trajectory_limits['trajectory_max_velocity']),
                     ('max_acceleration', self.io.profile.acceleration, self.trajectory_limits['trajectory_max_acceleration']),
                     ('max_jerk', self.io.profile.jerk, self.trajectory_limits.get('trajectory_max_jerk', 162.))):

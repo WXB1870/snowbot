@@ -519,12 +519,13 @@ from snowbot_bringup.simulation import scene,physics,kinematic_scene
 
     def test_device_selection_propagates_to_control_and_display(self):
         root=ROOT
-        args=entry.parse_args(['--config',str(package_share('snowbot_bringup')/'config/deployments/snowbot_vr_real.json')])
+        args=entry.parse_args(['--config',str(package_share('snowbot_bringup')/'config/deployments/snowbot_vr_real.json'),'--execution-mode','impedance'])
         control,display=entry.commands(args)
         self.assertIn('runtime_mode:=real',control)
         self.assertIn('device_backend:=snowbot_vendor',control)
         self.assertIn('command_enabled:=false',control)
         self.assertIn('position_contract:=true',control)
+        self.assertIn('execution_mode:=impedance',control)
         self.assertNotIn('pico_simulation_demo:=true',control)
         self.assertEqual(display[display.index('--runtime-mode')+1],'real')
         self.assertEqual(display[display.index('--device-backend')+1],'snowbot_vendor')

@@ -66,6 +66,8 @@ snowbot/
 
 通用契约、求解与执行逻辑在 Bindu 维护；型号配置、底层适配和操作流程在 Snowbot 维护。底层代码以 `vendor/snowbot/original/` 为基线，在 `tools/deployment/snowbot_vendor/position_session/` 维护补丁与公共头，通过 [prepare_position_session.py](tools/deployment/prepare_position_session.py) 生成构建源码。
 
+main 的准备器与运行入口保持位置模式；阻抗控制器、专属参数及构建选项在 `xavier/impedance-control` 分支维护。
+
 应用测试从仓库根目录执行，例如 `python -m unittest tests.unit.test_pico_control`。ROS 与原生依赖的加载方式、仿真构建及集成检查见[运行指南](运行与验证.md#仿真与浏览器操作台)。
 
 ## 文档

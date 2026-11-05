@@ -1,7 +1,7 @@
 """Operator-run replay of certified Snowbot atomic joint targets.
 
 Preview is offline. --execute uses an already running session_v3 executor;
-Prepare is an empty-hand entry to the side-scoop ready pose. No driver
+Prepare is an empty-hand entry to the configured preset ready pose. No driver
 startup, motor enabling, encoder homing, or base commands are performed.
 Prepare opens/closes the grippers only after separate operator Enter confirmations.
 """
@@ -42,12 +42,14 @@ class Replay:
     kinematics: str
     speed: float
     waist_lead_s: float = 0.
-    backend_ready: bool = False
     reference_margin_rad: float = 0.
     empty_prepare: bool = False
     measured_start: tuple = ()
     start_reference_source: str = 'measured'
     reverse_prepare: bool = False
+    velocities: tuple = ()
+    accelerations: tuple = ()
+    curves: tuple = ()
 
     @property
     def duration(self):
@@ -55,9 +57,38 @@ class Replay:
 
     def _at(self, elapsed):
         t = min(max(0., elapsed * self.speed), self.times[-1])
+        if self.curves:
+            return self.state(elapsed)[0]
         i = min(bisect.bisect_right(self.times, t)-1, len(self.times)-2)
         u = (t-self.times[i])/(self.times[i+1]-self.times[i])
         return tuple(a+(b-a)*u for a, b in zip(self.points[i], self.points[i+1]))
+
+    def state(self, elapsed):
+        """q/v/a from the same accepted Bernstein polynomial."""
+        if not self.curves:
+            return self._at(elapsed), (), ()
+        t = min(max(0., elapsed*self.speed), self.times[-1])
+        index = min(bisect.bisect_right([p[0] for p in self.curves], t)-1, len(self.curves)-1)
+        start, duration, source, offset, axes = self.curves[index]
+        u = (offset+min(duration, max(0., t-start)))/source
+        def value(controls):
+            values = list(controls)
+            while len(values) > 1:
+                values = [(1-u)*a+u*b for a,b in zip(values, values[1:])]
+            return values[0]
+        q, v, a = [], [], []
+        for controls in axes:
+            degree = len(controls)-1
+            first = [degree*(y-x)/source for x,y in zip(controls,controls[1:])]
+            second = [(degree-1)*(y-x)/source for x,y in zip(first,first[1:])]
+            q.append(value(controls)); v.append(value(first)*self.speed); a.append(value(second)*self.speed**2)
+        return tuple(q), tuple(v), tuple(a)
+
+    def trajectory_knots(self):
+        if not self.curves or self.waist_lead_s:
+            raise ValueError('REPLAY_PREPARED_CURVE_REQUIRED')
+        times = [p[0]/self.speed for p in self.curves]+[self.duration]
+        return tuple((t, *self.state(t)) for t in times)
 
     def sample(self, elapsed):
         waist = self._at(elapsed)
@@ -129,7 +160,10 @@ def load_replay(path, action, speed=1., waist_lead_s=None):
     samples = data['samples']
     times, points = tuple(s['t'] for s in samples), tuple(tuple(s['q']) for s in samples)
     return Replay(times, points, NAMES, manifest['tool_id'],
-                  manifest['kinematic_sha256'], speed, lead, manifest.get('backend_ready') is True, margin)
+                  manifest['kinematic_sha256'], speed, lead, reference_margin_rad=margin,
+                  velocities=tuple(tuple(s['qd']) for s in samples) if 'qd' in samples[0] else (),
+                  accelerations=tuple(tuple(s['qdd']) for s in samples) if 'qdd' in samples[0] else (),
+                  curves=tuple(data.get('curves', ())))
 
 
 
@@ -154,8 +188,6 @@ class ReplaySequence:
     @property
     def waist_lead_s(self): return self.segments[0].waist_lead_s
     @property
-    def backend_ready(self): return all(s.backend_ready for s in self.segments)
-    @property
     def reference_margin_rad(self): return self.segments[0].reference_margin_rad
 
     def sample(self, elapsed):
@@ -165,12 +197,32 @@ class ReplaySequence:
             elapsed -= segment.duration+self.hold_s
         return self.segments[-1].sample(elapsed)
 
+    def state(self, elapsed):
+        for segment in self.segments[:-1]:
+            if elapsed <= segment.duration+self.hold_s:
+                return segment.state(min(elapsed, segment.duration))
+            elapsed -= segment.duration+self.hold_s
+        return self.segments[-1].state(elapsed)
+
     def validate_profile(self, profile):
         for segment in self.segments: segment.validate_profile(profile)
 
+    def trajectory_knots(self):
+        knots, offset = [], 0.
+        for i, segment in enumerate(self.segments):
+            current = segment.trajectory_knots()
+            if knots and max(abs(a-b) for a,b in zip(knots[-1][1],current[0][1])) > 1e-8:
+                raise ValueError('REPLAY_SEGMENT_DISCONTINUITY')
+            knots.extend((t+offset,q,v,a) for t,q,v,a in current[bool(knots):])
+            offset += segment.duration
+            if i < len(self.segments)-1 and self.hold_s:
+                offset += self.hold_s
+                knots.append((offset, *current[-1][1:]))
+        return tuple(knots)
+
 
 @lru_cache(maxsize=16)
-def replay_graph(path, speed, waist_lead_s):
+def replay_graph(path, speed, waist_lead_s, hold_s):
     manifest = load_library(Path(path).resolve())
     if manifest.get('transition_validation_passed') is not True:
         raise ValueError('REPLAY_TRANSITIONS_UNVALIDATED')
@@ -179,14 +231,16 @@ def replay_graph(path, speed, waist_lead_s):
         key, a, b = edge['segment'], edge['from'], edge['to']
         segment = load_replay(path, key, speed, waist_lead_s)
         plans[key] = segment
-        edges.setdefault(a, []).append((b, key, segment.duration+3.))
+        edges.setdefault(a, []).append((b, key, segment.duration+hold_s))
     return manifest, edges, plans
 
 
-def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01):
+def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, tolerance=.01, *, hold_s=None):
     """Select a route from current measurements over the cached certified graph."""
     import heapq
-    manifest, edges, plans = replay_graph(path, speed, waist_lead_s)
+    manifest = load_library(Path(path).resolve())
+    hold = float(manifest.get('transition_hold_s', 3.) if hold_s is None else hold_s)
+    manifest, edges, plans = replay_graph(path, speed, waist_lead_s, hold)
     if not set(NAMES) <= set(measured):
         raise ValueError('REPLAY_TRANSITION_START_LAYOUT')
     if any(not math.isfinite(measured[n]) for n in NAMES):
@@ -197,7 +251,10 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
     if not errors or min(errors.values()) > tolerance:
         raise RuntimeError('REPLAY_UNKNOWN_START: use a certified action start/end pose')
     source = min(errors, key=errors.get)
-    target = manifest['home_node'] if action == 'Home' else manifest['actions'][action]['start_node']
+    if action == 'Flip' and source != manifest['actions']['Flip']['start_node']:
+        raise RuntimeError('REPLAY_FLIP_REQUIRES_COMPLETED_SIDE_SCOOP')
+    items = manifest.get('transfers', {}) | manifest['actions']
+    target = manifest['home_node'] if action == 'Home' else items[action]['start_node']
     queue, costs = [(0., source, ())], {source: 0.}
     selected = None
     while queue:
@@ -218,12 +275,12 @@ def plan_from_current(path, action, measured, speed=1., waist_lead_s=None, toler
         # A at home still confirms the measured pose and stop; no artificial path.
         home = load_replay(path, manifest['home_node'].split(':')[0], speed, waist_lead_s)
         selected_plans = (Replay((0., .02), (tuple(nodes[target]),)*2, home.names,
-                                home.tool_id, home.kinematics, speed, 0.,
-                                home.backend_ready, home.reference_margin_rad),)
+                                home.tool_id, home.kinematics, speed,
+                                reference_margin_rad=home.reference_margin_rad),)
     else:
         selected_plans = tuple(plans[k] if k in plans else load_replay(path, k, speed, waist_lead_s)
                                for k in selected)
-    return ReplaySequence(selected_plans, selected)
+    return ReplaySequence(selected_plans, selected, hold_s=hold)
 
 
 
@@ -264,7 +321,7 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
             raise ValueError('PREPARE_MEASUREMENT_REQUIRED:'+name)
         if not profile.limits[name][0]-tolerance <= measured[name] <= profile.limits[name][1]+tolerance:
             raise ValueError('PREPARE_START_JOINT_LIMIT:'+name)
-    after = tuple(manifest['nodes'][manifest['home_node']])
+    after = tuple(manifest['nodes'][manifest['preparation']['goal_node']])
     config = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')
     recovering = any(not profile.limits[n][0] <= measured[n] <= profile.limits[n][1] for n in NAMES)
     start = measured
@@ -281,12 +338,12 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
                                             tolerance, float(config['prepare_position_tolerance_rad']))
             reference_source = 'confirmed_pause'
     before = tuple(start[n] for n in NAMES)
-    duration = float(config['prepare_duration'])
+    # Preset entry has its own floor; VR retains teleop.prepare_duration.
+    duration = float(manifest['preparation'].get('minimum_duration_s', 2.))
     for name, a, b in zip(NAMES, before, after):
-        shared = name.startswith('body_')
-        velocity = min(profile.speed(name)*.8, .025) if shared else profile.speed(name)*.8
-        acceleration = min(profile.acceleration(name)*.8, .12) if shared else profile.acceleration(name)*.8
-        jerk = min(profile.jerk(name)*.8, .8) if shared else profile.jerk(name)*.8
+        velocity = profile.speed(name)*.8
+        acceleration = profile.acceleration(name)*.8
+        jerk = profile.jerk(name)*.8
         distance = abs(b-a)
         duration = max(duration, 1.875*distance/velocity,
                        math.sqrt(10/math.sqrt(3)*distance/acceleration),
@@ -297,10 +354,13 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
         raise ValueError('PREPARE_MOTION_LIMITS')
     times = tuple(k*.02 for k in range(round(duration/.02)+1))
     plan = Replay(times, tuple(curve.sample(t).q for t in times), NAMES,
-                  home.tool_id, home.kinematics, speed, 0., home.backend_ready,
-                  home.reference_margin_rad, empty_prepare=True,
+                  home.tool_id, home.kinematics, speed,
+                  reference_margin_rad=home.reference_margin_rad, empty_prepare=True,
                   measured_start=tuple(measured[n] for n in NAMES) if recovering else (),
-                  start_reference_source=reference_source)
+                  start_reference_source=reference_source,
+                  velocities=tuple(curve.sample(t).v for t in times),
+                  accelerations=tuple(curve.sample(t).a for t in times),
+                  curves=((0., duration, duration, 0., tuple((a,a,a,b,b,b) for a,b in zip(before,after))),))
     plan.validate_profile(profile)
     recipe = dict(tool['demo'])
     recipe['left_grip_in_tool_m'] = (np.linalg.inv(np.array(tool['left_to_tool']).reshape(4,4)) @
@@ -324,17 +384,54 @@ def plan_prepare(path, robot, measured, speed=1., *, reference=None):
 
 
 
+def replay_follow_limits(config, mode):
+    from bindu_runtime.teleop_deployment import apply_execution_tracking
+    from bindu_contracts.teleoperation import joint_reference_limits
+    selected = apply_execution_tracking(config, mode, real=True, position_contract=True)
+    default = selected.get('max_reference_error', .15) if mode == 'impedance' else .10
+    overrides = selected.get('joint_reference_error_limits', {}) if mode == 'impedance' else {}
+    return dict(zip(NAMES, joint_reference_limits(NAMES, default, overrides)))
 
 
-def run_replay(plan, port, *, settle_timeout=5., velocity_tolerance=.005, settle_time=.2, command_ttl=.25):
+def run_replay(plan, port, *, settle_timeout=5., execution_mode='position', velocity_tolerance=.005, settle_time=.2, command_ttl=.25):
     """Port owns ROS/feedback; this loop owns source time and playback progress."""
+    nominal = execution_mode == 'impedance'
     attempted, acquired, sent, arrived, stopped, failure = False, False, 0, False, False, None
     try:
+        # Startup READY is historical: a later settling swing can still fail
+        # the servo's takeover gate. Wait without owning or commanding joints.
+        print(f'WAIT_REST 连续停稳 {settle_time:g} 秒后接管；速度门限 {velocity_tolerance:g} rad/s，最多等待 {settle_timeout:g} 秒', flush=True)
+        deadline = port.steady()+settle_timeout
+        rest_since = previous_sample = None
+        while True:
+            _, velocity = port.check(False)
+            sample, now = port.feedback_stamp(), port.steady()
+            worst_speed, worst_joint = max((abs(velocity[n]), n) for n in plan.names)
+            if worst_speed > velocity_tolerance:
+                rest_since = None
+            if previous_sample is None or sample > previous_sample:
+                previous_sample = sample
+                if worst_speed <= velocity_tolerance:
+                    if rest_since is None:
+                        rest_since = now
+                    elif now-rest_since >= settle_time:
+                        break
+            if now >= deadline:
+                raise RuntimeError(f'REPLAY_NOT_SETTLED:axis={worst_joint};speed={worst_speed:g};limit={velocity_tolerance:g}')
+            port.wait_until(now+.02)
+        print('REST_CONFIRMED 开始接管', flush=True)
         attempted = True
         port.acquire()
         acquired = True
         start = due = renewed = port.steady()
         ros_start = port.ros()
+        if getattr(port, 'prepared', None) is not None:
+            # One dated trajectory, followed by TTL heartbeats. The lead covers
+            # admission, never changes the trajectory's recorded timing.
+            port.begin(plan, ros_start+.12)
+            start += .12
+            due = start
+            ros_start += .12
         rest_since = None
         measured_at_goal = False
         while True:
@@ -356,7 +453,7 @@ def run_replay(plan, port, *, settle_timeout=5., velocity_tolerance=.005, settle
             port.send(goal, ros_start+elapsed)
             sent += 1
             if elapsed >= plan.duration:
-                arrival = q
+                arrival = port.nominal_reference() if nominal else q
                 measured_at_goal = all(abs(q[n]-x) <= port.arrival_tolerance(n)
                                        for n,x in zip(plan.names,plan.points[-1]))
                 resting = (arrival is not None and all(abs(arrival[n]-x) <= port.arrival_tolerance(n)
@@ -378,6 +475,7 @@ def run_replay(plan, port, *, settle_timeout=5., velocity_tolerance=.005, settle
             except (Exception, KeyboardInterrupt) as exc:
                 failure = (failure+'; ' if failure else '')+'STOP_UNCONFIRMED:'+str(exc)
     result = dict(targets_sent=sent, measured_arrival_confirmed=arrived and measured_at_goal,
+                  nominal_arrival_confirmed=arrived and nominal,
                   measured_end_error_rad={n:q[n]-x for n,x in zip(plan.names,plan.points[-1])} if arrived else None,
                   stop_confirmed=stopped, completed=arrived and failure is None,
                   error=failure, driver_started=False, snow_removal_verified=False)
@@ -413,7 +511,8 @@ def execute(args, plan):
     robot = RobotSetup.load(args.robot_config)
     from snowbot_hardware.parameters import load_parameters, load_mode_config
     settings = load_parameters()
-    velocity_tolerance = settings['execution']['motion_arrival_velocity_tolerance_rad_s']
+    velocity_tolerance = max(settings['execution']['motion_arrival_velocity_tolerance_rad_s'],
+                             robot.profile.feedback_tolerances['joint_velocity'])
     settle_time = settings['execution']['stop_confirmation_window_s']
     settle_timeout = settings['pico']['motion_completion_grace_s']
     prepare_tolerance = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')['prepare_position_tolerance_rad']
@@ -442,6 +541,14 @@ def execute(args, plan):
     def receive(kind):
         def callback(msg):
             latest[kind] = (msg, time.monotonic())
+            if kind == 'state':
+                record('diagnostic', stamp=msg.stamp.sec+msg.stamp.nanosec*1e-9,
+                       feedback_stamp=msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9,
+                       reference_stamp=msg.reference.header.stamp.sec+msg.reference.header.stamp.nanosec*1e-9,
+                       joint_names=list(msg.joints.name), measured_q=list(msg.joints.position),
+                       measured_qd=list(msg.joints.velocity), reference_names=list(msg.reference.name),
+                       reference_q=list(msg.reference.position), reference_qd=list(msg.reference.velocity),
+                       reference_qdd=list(msg.reference_accelerations))
         return callback
 
     node.create_subscription(ExecutionState, ns+'/execution/state', receive('state'), 10)
@@ -556,11 +663,15 @@ def execute(args, plan):
             p, _ = latest['pdo']
             if self.boot is None: self.boot = p.boot_id
             if not self.boot: raise RuntimeError('REPLAY_BOOT_MISSING')
-            if p.execution_mode != 0:
+            if p.execution_mode != (1 if args.execution_mode == 'impedance' else 0):
                 raise RuntimeError('REPLAY_EXECUTION_MODE_MISMATCH:'+args.execution_mode)
             if latest.get('error'):
                 raise RuntimeError(latest['error'])
             return q, v
+        @staticmethod
+        def feedback_stamp():
+            stamp = latest['state'][0].feedback_stamp
+            return stamp.sec+stamp.nanosec*1e-9
         def nominal_reference(self):
             state = latest['state'][0]
             if self.lease and getattr(self, 'commanded', False):
@@ -602,12 +713,41 @@ def execute(args, plan):
             wait(lambda: latest['state'][0].lease_active, .25)
         def renew(self):
             call(leases, Lease.Request(operation='renew', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
+        def begin(self, plan, effective):
+            from trajectory_msgs.msg import JointTrajectoryPoint
+            from builtin_interfaces.msg import Duration
+            source = self.ros()
+            self.replay_identity = uuid.uuid4().hex
+            msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=self.replay_identity,
+                task_id=task, observation_id=str(latest['pdo'][0].pdo_sample),
+                profile_hash=robot.profile.digest, lease_id=self.lease.lease_id, epoch=self.lease.epoch,
+                mode='prepared_entry' if empty_handed else 'prepared_trajectory', resource_groups=list(GROUPS), joint_names=list(NAMES),
+                stamp=stamp(source), valid_for=.25)
+            for t,q,v,a in self.prepared:
+                at = stamp(effective-source+t)
+                msg.points.append(JointTrajectoryPoint(positions=list(q), velocities=list(v),
+                    accelerations=list(a), time_from_start=Duration(sec=at.sec, nanosec=at.nanosec)))
+            commands.add(msg.command_id)
+            call(submit, SubmitMotion.Request(command=msg))
+            self.commanded = True
+            self.reference_ready_by = self.steady()+tool_config['feedback_max_age']
+            record('trajectory', identity=self.replay_identity, effective_stamp=effective,
+                   joint_names=list(NAMES), sample_period_s=.02, stage='final_accepted_reference')
+            for k in range(math.ceil(plan.duration/.02)+1):
+                t = min(k*.02, plan.duration)
+                q,v,a = plan.state(t)
+                record('trajectory_sample', t=t, q=q, qd=v, qdd=a)
+
         def send(self, goal, source):
             msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=uuid.uuid4().hex,
                 task_id=task, observation_id=str(latest['pdo'][0].pdo_sample),
                 profile_hash=robot.profile.digest, lease_id=self.lease.lease_id, epoch=self.lease.epoch,
                 mode='joint_target', resource_groups=list(GROUPS), joint_names=list(NAMES),
                 positions=list(goal), stamp=stamp(source), valid_for=.25)
+            if self.prepared is not None:
+                msg.mode = 'trajectory_heartbeat'
+                msg.observation_id = self.replay_identity
+                msg.positions = []
             commands.add(msg.command_id)
             call(submit, SubmitMotion.Request(command=msg))
             if not getattr(self,'commanded',False):
@@ -616,9 +756,9 @@ def execute(args, plan):
             record('target', source_stamp=source, q=list(goal))
         @staticmethod
         def arrival_tolerance(name):
-            if args.action == 'Prepare': return prepare_tolerance
-            return robot.profile.stop_position_tolerances.get(
+            tolerance = prepare_tolerance if args.action == 'Prepare' else robot.profile.stop_position_tolerances.get(
                 name, robot.profile.feedback_tolerances['joint_position'])
+            return max(math.radians(2), tolerance)
         def release_and_confirm_stop(self):
             if not self.lease: return False
             call(leases, Lease.Request(operation='release', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
@@ -651,12 +791,16 @@ def execute(args, plan):
             port.check(False)
         elif args.action != 'ReturnZero':
             if manifest.get('transition_validation_passed'):
-                plan = plan_from_current(args.library, args.action, q, args.speed, args.waist_lead, args.start_tolerance)
+                anchor = port.nominal_reference() if args.execution_mode=='impedance' else q
+                plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead,
+                                         args.start_tolerance, hold_s=getattr(args, 'transition_hold_s', None))
                 plan.validate_profile(robot.profile)
         record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
-        result = run_replay(plan, port,
+        segments = getattr(plan, 'segments', (plan,))
+        port.prepared = plan.trajectory_knots() if all(s.curves for s in segments) else None
+        result = run_replay(plan, port, execution_mode=args.execution_mode,
                             velocity_tolerance=velocity_tolerance, settle_time=settle_time,
                             settle_timeout=settle_timeout)
         if args.action == 'Prepare':
@@ -684,7 +828,7 @@ def replay_action(args, parser):
         if not args.execute:
             print(json.dumps(dict(action='Prepare', execution_mode=args.execution_mode, empty_handed=True,
                 start_source='fresh measured joints on execute; full path checked before lease',
-                goal_q_rad=dict(zip(plan.names,manifest['nodes'][manifest['home_node']])),
+                goal_q_rad=dict(zip(plan.names, manifest['nodes'][manifest['preparation']['goal_node']])),
                 posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
             return
     elif args.action == 'ReturnZero':
@@ -692,14 +836,13 @@ def replay_action(args, parser):
     elif manifest.get('transition_validation_passed'):
         start = args.from_node or manifest['home_node']
         plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])),
-                                 args.speed, args.waist_lead, args.start_tolerance)
+                                 args.speed, args.waist_lead, args.start_tolerance,
+                                 hold_s=getattr(args, 'transition_hold_s', None))
     else:
         plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
         if not args.output or (args.action not in ('Prepare', 'ReturnZero') and not args.tool_id):
             parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare/ReturnZero')
-        if not plan.backend_ready:
-            parser.error('REPLAY_VENDOR_LIMIT_ALIGNMENT_REQUIRED: backend source approval/build is pending')
         execute(args, plan)
     else:
         print(json.dumps(dict(execution_mode=args.execution_mode, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
@@ -710,23 +853,40 @@ def replay_action(args, parser):
 
 
 def interactive_replay(args, parser):
-    actions = {'1': 'Push', '2': 'SideScoop', '3': 'Flip'}
+    manifest = json.loads(args.library.read_text())
+    items = manifest.get('transfers', {}) | manifest['actions']
+    state, node = 'ready', args.from_node or manifest['preparation']['goal_node']
+    commands = {
+        'ready': {'1': ('Push', 'pushed'), '2': ('SideScoop', 'scooped')},
+        'pushed': {'': ('PushReverse', 'ready')},
+        'scooped': {'3': ('Flip', 'dumped'), '': ('Home', 'ready')},
+        'dumped': {'': ('Home', 'ready')},
+    }
+    prompts = {
+        'ready': '输入 1 前推或 2 侧前铲，按 Enter 执行；q 退出',
+        'pushed': '前推完成，直接按 Enter 拉回；q 退出',
+        'scooped': '侧前铲完成，输入 3 后按 Enter 翻倒，或直接按 Enter 回到侧前铲初始位；q 退出',
+        'dumped': '翻倒完成，直接按 Enter 连续退回侧前铲初始位；q 退出',
+    }
     while True:
-        print('\n1 前推    2 侧前铲    3 翻倒    q 退出')
         try:
-            choice = input('输入编号并按 Enter 执行：').strip()
+            choice = input('\n等待输入（'+prompts[state]+'）：').strip()
         except (EOFError, KeyboardInterrupt):
             return
         if choice.lower() == 'q':
             return
-        if choice not in actions:
-            print('请输入 1、2、3 或 q。')
+        if choice not in commands[state]:
+            print('当前状态不能执行该输入。')
             continue
+        action, following = commands[state][choice]
         selected = argparse.Namespace(**vars(args))
-        selected.action = actions[choice]
+        selected.action, selected.from_node = action, node
+        selected.transition_hold_s = 0.
         selected.output = args.output_dir/(time.strftime('%Y%m%d-%H%M%S')+'-'+
                                           selected.action+'-'+uuid.uuid4().hex[:8]+'.jsonl')
         replay_action(selected, parser)
+        state = following
+        node = manifest['home_node'] if action == 'Home' else items[action]['end_node']
 
 
 def main(argv=None):
@@ -735,7 +895,7 @@ def main(argv=None):
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare', 'ReturnZero'))
     parser.add_argument('--prepare-log', type=Path, help='ReturnZero: old empty-hand Prepare JSONL')
-    selection.add_argument('--interactive', action='store_true', help='Select 1=Push, 2=SideScoop, 3=Flip; Enter executes')
+    selection.add_argument('--interactive', action='store_true', help='Staged 1/2/3 actions; empty Enter returns after each action')
     parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
