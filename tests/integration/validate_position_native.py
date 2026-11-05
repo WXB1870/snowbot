@@ -239,15 +239,20 @@ def write_shutdown_check(source, work, root):
     header=(source/'servo_control/include/ros_controller/rosLoop.h').read_text()
     fields=header[header.index('        // Local shutdown'):header.index('        uint64_t position_frame_')]
     body=body[:body.index(' void start(')]+TARGET_FIELDS+fields+'''
+ bool drive_startup_finished_=false;std::string position_init_error_;
+ std::vector<double> lArm_pos_receive=std::vector<double>(7),rArm_pos_receive=std::vector<double>(7);
+ struct StartupCommand {double joint_pos=0;};StartupCommand servo_desMsg_orig[14]{};
+ double h_pos_curr[2]{},t_pos_curr[2]{};
+ void EtherCATmsg_Get(){};
 };
 bool control_allowed=true;unsigned shutdown_controls=0;
 bool ServoNode::session_impedance_step(double){++shutdown_controls;return control_allowed;}
-std::vector<double> lArm_shutdownPos(7),rArm_shutdownPos(7);
+double g_left_pos_curr=0,g_right_pos_curr=0;
 '''
     if 'sensor_valid_mask' not in (source/'servo_control/include/servo_control/position_observation.h').read_text():
         body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
     constants='\n'.join(line for line in text.splitlines() if line.startswith('constexpr auto kShutdownTimeout'))+'\n'
-    methods=text[text.index('bool ServoNode::position_shutdown_control'):text.index('//目标值包装协议')]
+    methods=text[text.index('void ServoNode::position_startup'):text.index('//目标值包装协议')]
     if 'session_impedance_step(dt)' in methods:
         preamble='#define POSITION_SHUTDOWN_IMPEDANCE 1\n'+preamble
     path=work/'test_position_shutdown.cpp'

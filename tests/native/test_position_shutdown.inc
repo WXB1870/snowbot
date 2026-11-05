@@ -1,7 +1,16 @@
 int main(){
  using namespace position_session;
  snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);
- snapshot.output_valid=snapshot.reference_valid=true;snapshot.position[1]=.2f;snapshot.position[9]=-.2f;snapshot.position[3]=-.916625f;
+ snapshot.position[1]=.2f;snapshot.position[9]=-.2f;snapshot.position[3]=-.916625f;
+ snapshot.position[18]=.17f;snapshot.position[19]=-.12f;snapshot.position[16]=.3f;snapshot.position[7]=.235f;
+ ServoNode startup;startup.feedback();startup.position_startup();
+ assert(startup.position_startup_complete_&&startup.drive_startup_finished_&&enable_requests==0);
+ for(unsigned i=0;i<7;++i){assert(startup.servo_desMsg_orig[i].joint_pos==snapshot.position[i]);assert(startup.servo_desMsg_orig[i+7].joint_pos==snapshot.position[i+8]);}
+ assert(startup.t_pos_curr[0]==snapshot.position[18]&&startup.t_pos_curr[1]==snapshot.position[19]);
+ assert(startup.h_pos_curr[0]==snapshot.position[16]&&g_left_pos_curr==snapshot.position[7]);
+ const auto initial_feedback=snapshot.position;snapshot.position.fill(0);startup.feedback();startup.position_startup();
+ assert(startup.position_startup_complete_&&enable_requests==0);snapshot.position=initial_feedback;
+ snapshot.output_valid=snapshot.reference_valid=true;
  ServoNode node;node.shutdown_mode_=true;node.position_reference_mode_=2;
 #ifdef POSITION_SHUTDOWN_IMPEDANCE
  node.session_execution_mode_="impedance";
@@ -16,19 +25,17 @@ int main(){
  assert(!node.position_trajectory_.commit(prepared,now,now,q,v));node.position_interval_.reset(now);
  auto& packet=node.position_output_;packet.selected=true;packet.policy=2;packet.kp.fill(1);packet.kd.fill(.2f);packet.torque.fill(6);
  packet.deadline=now+200000000;packet.reference_position=q;const auto original_deadline=packet.deadline;
- for(unsigned i=0;i<7;++i){lArm_shutdownPos[i]=q[i];rArm_shutdownPos[i]=q[i+7];}
- bool returned=false,disabled=false,done=false;const auto began=now;
+ bool disabled=false,done=false;const auto began=now;
  do{
   node.feedback();snapshot.speed[0]=(steady_ns()-began<300000000)?.1f:0.f;
   done=node.position_shutdown_tick();
   assert(enable_requests==0&&applied.deadline==original_deadline);
-  returned|=node.shutdown_phase_==ServoNode::ShutdownReturning;
   if(!applied.shutdown_disable){assert(std::abs(applied.q[3]-q[3])<1e-7&&applied.kp[3]==1&&applied.kd[3]==.2f&&applied.torque[3]==6);}
-  else{assert(returned);disabled=true;snapshot.shutdown_disabled=true;}
-  if(snapshot.speed[0]>.01)assert(!returned);
+  else{disabled=true;snapshot.shutdown_disabled=true;}
+  if(snapshot.speed[0]>.01)assert(!disabled);
   assert(steady_ns()-began<3000000000LL);std::this_thread::sleep_for(std::chrono::milliseconds(1));
  }while(!done);
- assert(returned&&disabled&&node.shutdown_exit_code_==0);
+ assert(disabled&&node.shutdown_exit_code_==0);
 #ifdef POSITION_SHUTDOWN_IMPEDANCE
  assert(shutdown_controls>0);
 #endif
@@ -44,5 +51,5 @@ int main(){
  assert(!failed.position_shutdown_tick());failed.feedback();assert(failed.position_shutdown_tick()&&failed.shutdown_exit_code_==1);
  ServoNode idle;idle.position_startup_complete_=false;snapshot.shutdown_disabled=false;idle.feedback();
  assert(!idle.position_shutdown_tick()&&enable_requests==0);snapshot.shutdown_disabled=true;idle.feedback();assert(idle.position_shutdown_tick());
- std::cout<<"PASS actual shutdown: shared planner, continuous first frame, measured stop/home, unchanged gains/masks/TTL, watchdog latch and fresh disable ACK\n";
+ std::cout<<"PASS passive startup and stop-only exit: arbitrary/zero pose seed, no startup enables, no home target, retained gains/masks/TTL and fresh disable ACK\n";
 }

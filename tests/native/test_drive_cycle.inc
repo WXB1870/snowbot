@@ -104,7 +104,7 @@ int main(){
  check_feedback_ratios();
 #endif
  check_csp_snapshot();
- EtherCATDriver d;
+ EtherCATDriver d;assert(!d.motor_enable_.load());
  std::array<motor_rx_pdo_t,16> rx{};std::array<motor_tx_pdo_t,16> tx{};
  std::array<csp_rx_t,4> crx{};std::array<csp_tx_t,4> ctx{};
  for(unsigned i=0;i<20;++i){
@@ -164,18 +164,21 @@ int main(){
  EtherCATDriver shutdown;
  for(unsigned m=0;m<20;++m){
   shutdown.motor_enable_mask_[m].store(true);
-  if(m<16){shutdown.m_rx_[m]=&rx[m];shutdown.m_tx_[m]=&tx[m];tx[m].statusword=0x27;}
+  if(m<16){shutdown.m_rx_[m]=&rx[m];shutdown.m_tx_[m]=&tx[m];tx[m].statusword=0x27;tx[m].actual_position=.2f;}
   else{shutdown.is_csp_motor_[m]=true;shutdown.csp_rx_[m]=&crx[m-16];shutdown.csp_tx_[m]=&ctx[m-16];ctx[m-16].statusword=0x27;}
  }
  auto& fresh=shutdown.observation_rt_;fresh.valid_mask=0xfffff;fresh.wkc=fresh.expected_wkc=67;fresh.sample=1;fresh.status.fill(0x27);
- position_session::Output request;request.selected=true;request.policy=2;request.operation=0;request.shutdown=true;
+ position_session::Output request;request.selected=true;request.policy=2;request.operation=1;request.admission_generation=1;
  request.q.fill(.2f);request.kp.fill(1);request.kd.fill(.2f);request.torque.fill(6);
  request.shutdown_deadline=position_session::steady_ns()+1000000000;
+ request.deadline=request.shutdown_deadline;
  for(unsigned n=0;n<35;++n){
   fresh.sampled_ns=position_session::steady_ns();
   shutdown.sessionOutput(request);shutdown.cycle();
  }
  assert(rx[3].target_position==.2f&&rx[3].KP==1&&rx[3].KD==.2f&&rx[3].target_torque==6);
+ request.shutdown=true;request.operation=0;shutdown.sessionOutput(request);shutdown.cycle();
+ assert(rx[3].target_position==.2f&&rx[3].KP==1);
  request.shutdown_disable=true;shutdown.sessionOutput(request);shutdown.cycle();
  for(unsigned m=0;m<20;++m){
   assert(shutdown.motor_enable_mask_[m].load()); // No partial mask handover.

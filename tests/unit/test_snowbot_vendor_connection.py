@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','shutdown'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -65,32 +65,6 @@ class PositionReleaseTests(unittest.TestCase):
             folder='include' if name.endswith('.hpp') else 'src'
             copied=self.release/'src/servo_control'/folder/'bindu_execution_native'/name
             self.assertEqual(vendor.digest(copied),manifest['native_execution'][name])
-
-    def test_arm_homing_uses_half_degree_and_keeps_timeout_and_bus_gate(self):
-        header=(self.release/'src/servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text()
-        loop=(self.release/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
-        self.assertIn('#define ZERO_POS_THRESHOLD    (0.008726646259971648)',header)
-        self.assertIn('#define ZERO_POS_EXIT_THRESH  ZERO_POS_THRESHOLD',header)
-        self.assertIn('constexpr float kRetzeroTimeoutAcceptError = 0.01f;',loop)
-        self.assertIn('if (settle_cnt > 500) retZero_done = true;',loop)
-        self.assertIn('constexpr int kRetzeroTimeoutCycles = 10000;',loop)
-        self.assertIn('bool residual_within_startup_tolerance = EtherCAT_communicationHealthy();',loop)
-        self.assertIn('arm_startup_ready = residual_within_startup_tolerance;',loop)
-        import re
-        definitions='\n'.join(re.findall(r'^#define ZERO_POS_(?:THRESHOLD|EXIT_THRESH).*$',header,re.M))
-        timeout=re.search(r'^constexpr float kRetzeroTimeoutAcceptError = .*?;',loop,re.M).group()
-        source=self.work/'homing-tolerance.cpp'
-        source.write_text('#include <cassert>\n#include <cmath>\n#include <initializer_list>\n'+definitions+'\n'+timeout+
-            '\nint main(){ const double degree=std::acos(-1.)/180.;\n'
-            'assert(std::abs(ZERO_POS_THRESHOLD/degree-.5)<1e-12);\n'
-            'for(double sign:{-1.,1.}){\n'
-            'assert(!(std::abs(sign*.499*degree)>ZERO_POS_EXIT_THRESH));\n'
-            'assert(!(std::abs(sign*.5*degree)>ZERO_POS_EXIT_THRESH));\n'
-            'assert(std::abs(sign*.501*degree)>ZERO_POS_EXIT_THRESH); }\n'
-            'assert(kRetzeroTimeoutAcceptError>ZERO_POS_EXIT_THRESH); }\n')
-        binary=self.work/'homing-tolerance'
-        subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True)
-        subprocess.run([str(binary)],check=True)
 
     def test_optional_impedance_is_explicit_and_stays_disabled(self):
         output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)

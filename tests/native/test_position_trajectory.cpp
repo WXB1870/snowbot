@@ -90,10 +90,10 @@ void check_shutdown_planning(){
  TrajectoryQueue queue;TrajectoryAdmission<AdmissionPacket> worker(queue);
  TargetSnapshot seed;seed.q[1]=.2;seed.q[8]=-.2;seed.q[3]=-.916625;seed.v[0]=.03;seed.a[0]=.02;
  seed.effective_steady=steady_ns()+50000000;
- assert(worker.submit_shutdown(seed,seed.q,.25,.5,162.,8.));
+ assert(worker.submit_shutdown(seed,.25,.5,162.,8.));
  TrajectoryAdmission<AdmissionPacket>::Result* result=nullptr;
  while(!(result=worker.poll()))std::this_thread::yield();
- assert(result->shutdown&&result->error.empty()&&result->shutdown_home);
+ assert(result->shutdown&&result->error.empty()&&result->prepared);
  const auto first=result->prepared->segment->sample(0.);
  for(unsigned i=0;i<joint_count;++i){assert(std::abs(first.q[i]-seed.q[i])<1e-12);assert(std::abs(first.v[i]-seed.v[i])<1e-12);assert(std::abs(first.a[i]-seed.a[i])<1e-12);}
  worker.release(result);

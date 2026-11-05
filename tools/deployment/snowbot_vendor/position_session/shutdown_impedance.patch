@@ -1,16 +1,16 @@
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -1764,3 +1764,3 @@
+@@ -1451,3 +1451,3 @@
  bool ServoNode::position_shutdown_control(double dt){
 -    (void)dt;return true;
 +    return session_execution_mode_!="impedance" || session_impedance_step(dt);
  }
-@@ -1844,3 +1844,3 @@
+@@ -1528,3 +1528,3 @@
          for(unsigned i=0;i<joint_count;++i){
 -            if(std::abs(output.reference_position[i]-obs.position[position_slot(i)])>.5)tracking=false;
 +            if((i<14 || session_execution_mode_!="impedance") && std::abs(output.reference_position[i]-obs.position[position_slot(i)])>(session_execution_mode_=="impedance"?impedance_following_error_rad_:.5))tracking=false;
              output.q[i]=float(output.reference_position[i]);output.v[i]=float(output.reference_speed[i]);
-@@ -2718,4 +2718,4 @@
+@@ -2402,4 +2402,4 @@
   for(unsigned i=0;i<position_session::joint_count;++i){const auto slot=position_session::position_slot(i);
 -  session_nominal_[session_q_index_[slot]]=position_reference_mode_?position_trajectory_.q[i]:position_follower_.q[i];
 -  session_velocity_[session_v_index_[slot]]=position_reference_mode_?position_trajectory_.v[i]:position_follower_.v[i];
