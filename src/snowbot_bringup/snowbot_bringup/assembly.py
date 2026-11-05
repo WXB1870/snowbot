@@ -9,7 +9,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 from bindu_runtime.robot_setup import RobotSetup
 from bindu_contracts.runtime_mode import resolve_mode
-from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits, execution_backend
+from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits, execution_backend, position_contract_for
 
 
 def assemble(context):
@@ -39,7 +39,7 @@ def assemble(context):
     overrides = {'profile': value('profile'), 'tool': value('bimanual_config')} if legacy else None
     robot = RobotSetup.load(selection, overrides=overrides)
     tool_settings=json.loads(robot.tool_config.read_text())
-    position_contract=tool_settings.get('simulation_only') is False
+    position_contract=position_contract_for(tool_settings)
     if value('gripper_config') and not position_contract:
         raise ValueError('GRIPPER_REQUIRES_POSITION_CONTRACT')
     if position_contract and (robot.robot_id!='snowbot' or single_enabled):

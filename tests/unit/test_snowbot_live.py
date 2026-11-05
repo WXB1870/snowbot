@@ -398,6 +398,12 @@ class ToolDisplayPoseTests(unittest.TestCase):
 
 
 class SimulationEntryTests(unittest.TestCase):
+    def test_execution_override_validates_the_effective_backend_before_launch(self):
+        simulation=package_share('snowbot_bringup')/'config/deployments/snowbot_vr_sim.json'
+        for extra in ([],['--physics']):
+            with self.subTest(extra=extra),self.assertRaisesRegex(ValueError,'BACKEND_NOT_IMPLEMENTED'):
+                entry.parse_args(['--config',str(simulation),'--execution-mode','impedance',*extra])
+
     def test_startup_lock_is_shared_and_released(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(entry.tempfile,'gettempdir',return_value=directory):
             with entry.startup_lock('42','/snowbot/',inherit=True) as lock:

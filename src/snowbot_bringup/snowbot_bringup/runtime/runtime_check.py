@@ -132,11 +132,13 @@ def check_runtime(args, robot):
     for module in ('pinocchio', 'casadi', 'vuer', 'bindu_execution.interpolation'):
         importlib.import_module(module)
     tool = load_tool_config(robot.tool_config)
-    from snowbot_hardware.parameters import load_parameters, apply_tool_timing
-    tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))
-    from bindu_runtime.teleop_deployment import apply_execution_tracking
+    from bindu_runtime.teleop_deployment import apply_execution_tracking, position_contract_for
+    position_contract = position_contract_for(tool)
+    if position_contract:
+        from snowbot_hardware.parameters import load_parameters, apply_tool_timing
+        tool = apply_tool_timing(tool,load_parameters(args.get('parameters_config') or None))
     tool = apply_execution_tracking(tool, args.get('execution_mode','position'),
-                                    trajectory_reference=args['runtime_mode']=='real')
+                                    trajectory_reference=position_contract and args['runtime_mode']=='real')
     tool['urdf'] = str(robot.urdf)
     solver = BimanualQP(tool, robot.profile)
     solver.close()

@@ -355,7 +355,7 @@ def parse_args(argv=None):
     args.context_run_id=args.run_id
     args.run_id=args.run_id or 'vr_'+uuid.uuid4().hex[:12]
     from ament_index_python.packages import get_package_share_directory
-    from bindu_runtime.teleop_deployment import load_deployment
+    from bindu_runtime.teleop_deployment import load_deployment, execution_backend
     if args.config is None:
         args.config = package_share('snowbot_bringup')/'config/deployments/snowbot_vr_sim.json'
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
@@ -376,6 +376,8 @@ def parse_args(argv=None):
     if args.physics:
         if d.get('runtime_mode')!='simulation':parser.error('--physics 仅允许仿真配置')
         d['device_backend']='external_simulation'
+    if args.execution_mode or args.physics:
+        d['device_backend']=execution_backend(d['runtime_mode'],d['device_backend'],d.get('execution_mode','position'))
     if d.get('device_backend')=='external_simulation' and not d.get('physics_config'):
         d['physics_config']=str(package_share('snowbot_bringup')/'config/robots/snowbot/snowbot_shovel_physics.json')
     if (args.launch!='robot_teleop.launch.py' or
