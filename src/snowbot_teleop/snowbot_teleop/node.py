@@ -25,7 +25,7 @@ from snowbot_teleop.control import PicoControl, PicoFeedback, PICO_MAPPING, temp
 from bindu_kinematics.bimanual_worker import BimanualWorker
 from bindu_interfaces.msg import VRInput, ExecutionState, MotionCommand, TeleopModeState, RecorderHealth, RuntimeEvent
 from bindu_execution.interpolation import Curve, State
-from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, PicoContext
+from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, PicoContext, ResetToolReference
 from bindu_interfaces.action import SelectTeleopMode, TeleopSession
 from bindu_runtime.common import RuntimeNode, seconds, stamp, spin, joints_at_rest
 from bindu_runtime.stop_evidence import stop_feedback_matches, sampled_nominal_reference
@@ -213,6 +213,7 @@ class PicoNode(RuntimeNode):
         self.prepare_hold_client=(self.create_client(Trigger,'execution/held_reference')
                                   if self.position_contract and not self.simulation else None)
         self.ready_client=self.create_client(Trigger,'teleop/tool_ready')
+        self.grasp_reference_reset_client=self.create_client(ResetToolReference,'teleop/tool_reference_reset')
         self.arms_ready_client=self.create_client(Trigger,'teleop/arms_ready') if self.position_contract else None
         self.record_client=self.create_client(SetBool,'recorder/capture') if self.recording_enabled else None
         self.modes=ActionClient(self,SelectTeleopMode,'teleop/select_mode')
@@ -654,6 +655,19 @@ class PicoNode(RuntimeNode):
         await self.move(intent, dict(zip(plan.names, plan.points[-1])), plan.duration, replay=plan)
         return True
 
+    async def reset_grasp_reference(self,intent):
+        self.current(intent)
+        request=ResetToolReference.Request(execution_instance_id=self.state.instance_id,epoch=self.state.lease_epoch)
+        deadline=time.monotonic()+parameters_for(self,'pico')['rpc_timeout_s']
+        while True:
+            self.current(intent)
+            reply=await self.wait(self.grasp_reference_reset_client.call_async(request),max(0.,deadline-time.monotonic()))
+            self.current(intent)
+            if reply.ok:return
+            if reply.code!='BIMANUAL_REFERENCE_STATE_PENDING':raise RuntimeError(reply.code)
+            if time.monotonic()>=deadline:raise RuntimeError('PICO_RPC_TIMEOUT')
+            await self.pause()
+
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
@@ -742,6 +756,8 @@ class PicoNode(RuntimeNode):
                     candidate=Curve.between(0.,duration*.75,before,after)
                     if not candidate.valid(self.profile,self.names):break
                     duration*=.75;curve=candidate
+            if intent.operation=='prepare' and self.position_contract:
+                await self.reset_grasp_reference(intent)
             self.event('PICO_ACTUATOR_STARTED',json.dumps(dict(operation=intent.operation,
                 duration_s=duration,position_tolerance_rad=arrival_tolerance,
                 fit_duration=fit_duration,simulated_actuator=self.simulation)))
@@ -1120,6 +1136,7 @@ class PicoNode(RuntimeNode):
                              all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
                         self.event('PICO_PREPARE_ALREADY_REACHED',json.dumps(dict(max_joint_error_rad=error,
                             position_tolerance_rad=self.prepare_position_tolerance)))
+                        await self.reset_grasp_reference(intent)
                     else:
                         read_only=False
                         recovery=self.prepare_recovery

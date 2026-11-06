@@ -21,7 +21,7 @@ import math
 import rclpy
 from std_msgs.msg import String
 from bindu_interfaces.msg import VRInput, ExecutionState, MotionCommand, GripperState
-from bindu_interfaces.srv import Lease, SubmitMotion, PicoContext
+from bindu_interfaces.srv import Lease, SubmitMotion, PicoContext, ResetToolReference
 from bindu_runtime.common import stamp, seconds
 from bindu_contracts.teleoperation import VRFrame
 from bindu_teleoperation.vr.receiver import ButtonCounters
@@ -491,6 +491,21 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             assert any(e['state']=='BIMANUAL_CAPTURED' and 'independent:' in e['code'] for e in events)
             return dict(mode=mode,teleop_mode='independent_arms',checks=checks,accepted=len(accepted),vendor_packets=len(packets))
         assert views[-1]['load_state']=='unknown'
+        source['grip']=1.;phase('following');pump(.3)
+        source['grip']=0.;phase('tool_standby')
+        wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+        checks.append('capture at Push then release before A; preparation starts a new measured grasp scope')
+        before=len(accepted)
+        source['buttons'][1]=1
+        wait(lambda:len(accepted)>before+2)
+        source['buttons'][1]=0
+        wait(lambda:views[-1]['pending'] is None and not states[-1].lease_active and
+             states[-1].state not in ('RUNNING','STOPPING'))
+        assert not states[-1].stop_failures
+        source['grip']=1.;phase('following')
+        source['grip']=0.;phase('tool_standby')
+        wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
+        checks.append('releasing A cancels its admitted motion; a fresh clutch captures the measured stopped pose')
         before=len(accepted)
         source['buttons'][1]=1
         wait(lambda:views[-1]['pending'] is None and views[-1]['reason']=='PREPARED',40.)
@@ -500,6 +515,12 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert all(m.runtime_mode==mode for m in accepted)
         assert len(accepted)>before
         checks.append('optional A validates the path and measured arrival, returning standby without entering loading')
+        preparation=next(m for m in reversed(accepted) if m.task_id=='pico_prepare')
+        wait(lambda:not states[-1].lease_active and states[-1].lease_epoch>preparation.epoch)
+        reset=node.create_client(ResetToolReference,ns+'/teleop/tool_reference_reset')
+        stale=call(node,reset,ResetToolReference.Request(execution_instance_id=states[-1].instance_id,epoch=preparation.epoch))
+        assert not stale.ok and stale.code=='BIMANUAL_REFERENCE_SCOPE_CHANGED',stale
+        checks.append('a delayed preparation reference reset cannot cross its original execution epoch')
         before=len(accepted)
         for side,index in (('left',0),('right',1)):
             other='right' if side=='left' else 'left'

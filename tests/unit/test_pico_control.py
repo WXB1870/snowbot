@@ -263,14 +263,47 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             temporary_capture_refusal=temporary_capture_refusal,
             seconds=lambda stamp:stamp.sec+stamp.nanosec*1e-9,
             joints_at_rest=lambda joints,names,tol:all(abs(v)<=tol for n,v in zip(joints.name,joints.velocity) if n in names),
-            Trigger=S(Request=lambda:S()),Superseded=type('Superseded',(RuntimeError,),{}))
+            Trigger=S(Request=lambda:S()),ResetToolReference=S(Request=lambda **kw:S(**kw)),
+            Superseded=type('Superseded',(RuntimeError,),{}))
         helpers=[n for n in ast.parse(path.read_text()).body
                  if getattr(n,'name','') in ('prepare_reference','prepare_start_tolerance')]
         exec(compile(ast.Module(body=helpers,type_ignores=[]),str(path),'exec'),namespace)
         exec(compile(ast.fix_missing_locations(module),str(path),'exec'),namespace)
         actual=namespace['Actual']()
+        from unittest.mock import AsyncMock
+        if 'reset_grasp_reference' not in names:actual.reset_grasp_reference=AsyncMock()
         actual.position_contract=False  # Legacy-only cases opt in explicitly below.
         return actual
+
+    async def test_preparation_reference_reset_keeps_original_scope_while_waiting_for_state(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        owner=self.production('reset_grasp_reference')
+        state=S(instance_id='execution',lease_epoch=4)
+        replies=iter((S(ok=False,code='BIMANUAL_REFERENCE_STATE_PENDING'),S(ok=True,code='GRASP_REFERENCE_RESET_QUEUED')))
+        owner.state,owner.current=state,Mock()
+        owner.wait=AsyncMock(side_effect=lambda reply,timeout:reply)
+        owner.grasp_reference_reset_client=S(call_async=Mock(side_effect=lambda request:next(replies)))
+        async def pause():state.lease_epoch=5
+        owner.pause=pause
+        await owner.reset_grasp_reference(object())
+        requests=[call.args[0] for call in owner.grasp_reference_reset_client.call_async.call_args_list]
+        self.assertEqual([(r.execution_instance_id,r.epoch) for r in requests],[('execution',4)]*2)
+        owner.wait.assert_awaited()
+
+    async def test_superseded_preparation_does_not_accept_a_late_reference_reset(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        owner=self.production('reset_grasp_reference')
+        owner.state=S(instance_id='execution',lease_epoch=4)
+        owner.current=Mock(side_effect=(None,None,RuntimeError('SUPERSEDED')))
+        owner.wait=AsyncMock(return_value=S(ok=True,code='GRASP_REFERENCE_RESET_QUEUED'))
+        owner.grasp_reference_reset_client=S(call_async=Mock(return_value=object()))
+        owner.pause=AsyncMock()
+        with self.assertRaisesRegex(RuntimeError,'SUPERSEDED'):
+            await owner.reset_grasp_reference(object())
+        owner.grasp_reference_reset_client.call_async.assert_called_once()
+        owner.pause.assert_not_awaited()
 
     def test_display_keeps_fresh_coordinated_pair_during_one_hand_delivery(self):
         from types import SimpleNamespace as S
@@ -870,6 +903,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         async def wait(value):return value
         renewal=S(done=lambda:True,result=lambda:lease)
         node=S(current=Mock(),feedback=lambda:S(stopped=True),prepare_position_tolerance=.035,
+            reset_grasp_reference=AsyncMock(),
             leases=S(call_async=lambda r:lease if r.operation=='acquire' else renewal),wait=wait,instance_id='test',groups=('left_arm',),
             state=state,reading=reading,names=(joint,),position_contract=position_contract,profile=profile,
             event=Mock(),simulation=False,now=lambda:clock[0],runtime_mode='real',pause=pause,
