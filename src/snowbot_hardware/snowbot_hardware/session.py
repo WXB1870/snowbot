@@ -83,6 +83,27 @@ class SessionHealth:
         self.progress = None
         self.invalid = ''
         self.messages = {'servo': {}}
+        from collections import deque
+        self.observation_callback_count = 0
+        self.observation_callbacks = deque(maxlen=8)
+
+    def observation_diagnostic(self):
+        """Read-only timing evidence; format the bounded history only on failure."""
+        now, steady = self.now(), self.steady()
+        obs = self.observation
+        return dict(now_ros=now, now_steady=steady, limit_ms=ROS_FEEDBACK_TIMEOUT_S*1000,
+            pdo_sample=self.sample, progress_age_ms=None if self.progress is None else (steady-self.progress)*1000,
+            source_age_ms=None if obs is None else (now-(obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9))*1000,
+            measurement_age_ms=None if obs is None else (now-self.measurement_stamp)*1000,
+            pdo_age_ms=None if obs is None else obs.pdo_age*1000,
+            wkc=None if obs is None else obs.wkc, expected_wkc=None if obs is None else obs.expected_wkc,
+            invalid=self.invalid, callback_count=self.observation_callback_count,
+            callback_receive_age_ms=None if not self.observation_callbacks else (steady-self.observation_callbacks[-1][0])*1000,
+            callbacks=[dict(entered=t[0], finished=t[1], pdo_sample=t[2], source_stamp=t[3],
+                pdo_age_ms=t[4]*1000, identity_ms=t[5]*1000, duration_ms=(t[1]-t[0])*1000,
+                source_age_at_entry_ms=t[6]*1000, outcome=t[7],
+                gap_ms=None if i==0 else (t[0]-self.observation_callbacks[i-1][0])*1000)
+                for i,t in enumerate(self.observation_callbacks)])
 
     def observe(self, msg):
         try:

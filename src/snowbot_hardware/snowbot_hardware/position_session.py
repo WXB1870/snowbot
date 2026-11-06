@@ -206,7 +206,13 @@ class PositionSessionDevices:
         identity = getattr(self.io, 'pause_request', None) or self.io.captured_pause_request
         targets = self.health.confirmed_hold(identity)
         if targets is None:
-            raise RuntimeError('SNOWBOT_HELD_REFERENCE:'+self.health.hold_failure(identity))
+            reason = self.health.hold_failure(identity)
+            detail = json.dumps(dict(reason=reason, pause_request=identity,
+                **self.health.observation_diagnostic()), separators=(',', ':'))
+            self.node.event('HELD_REFERENCE_REJECTED', detail)
+            self.node.get_logger().warn('SNOWBOT_HELD_REFERENCE_DIAGNOSTIC:'+detail,
+                                       throttle_duration_sec=1.)
+            raise RuntimeError('SNOWBOT_HELD_REFERENCE:'+reason)
         if any(not self.io.profile.limits[n][0] <= q <= self.io.profile.limits[n][1] for n,q in targets.items()):
             raise RuntimeError('SNOWBOT_HELD_REFERENCE_LIMIT')
         if self.io.pause_targets is None:
@@ -286,10 +292,16 @@ class PositionSessionDevices:
             self.node.get_logger().warn(str(exc), throttle_duration_sec=1.)
 
     def receive(self, msg):
+        entered = self.health.steady()
+        source = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+        source_age = self.node.now()-source
+        self.health.observation_callback_count += 1
+        identity_finished, outcome = None, 'publisher_discovering'
         try:
             if not self.identity(self.feedback_topic, self.receivers['head'],
                                  'snowbot_ctl_msgs/msg/PositionObservation', discovering=True):
                 return
+            identity_finished = self.health.steady()
             q, v, stamp = self.health.observe(msg)
             if self.grippers and self.grippers.core and stamp > self.grippers.core.feedback_stamp:
                 try:
@@ -319,7 +331,9 @@ class PositionSessionDevices:
                         session=msg.session, sequence=msg.command_sequence,
                         sample_time_ns=msg.sample_time_ns), separators=(',', ':')),
                         command_id=source[2])
+            outcome = 'accepted'
         except (ValueError, RuntimeError) as exc:
+            outcome = str(exc)
             self.io.invalid = str(exc)
             detail=str(exc)
             if detail=='SNOWBOT_PDO_STALE':
@@ -328,6 +342,12 @@ class PositionSessionDevices:
                     pdo_age_ms=1000*msg.pdo_age,pdo_sample=msg.pdo_sample,
                     previous_sample=self.health.sample,wkc=msg.wkc,expected_wkc=msg.expected_wkc))
             self.node.get_logger().warn(detail, throttle_duration_sec=1.)
+        finally:
+            finished = self.health.steady()
+            self.health.observation_callbacks.append((entered, finished, msg.pdo_sample,
+                msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9, msg.pdo_age,
+                (finished if identity_finished is None else identity_finished)-entered,
+                source_age, outcome))
 
     def _check_session_health(self, groups, *, acquiring=False):
         obs = self.health.observation
