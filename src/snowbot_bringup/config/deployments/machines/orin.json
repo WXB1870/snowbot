@@ -1,0 +1,11 @@
+{
+  "ros_domain_id": 88,
+  "ethercat_interface": "enP5p5s0",
+  "arguments": {
+    "execution_mode": "impedance",
+    "host": "127.0.0.1",
+    "port": 8014,
+    "cert_file": "~/.local/share/snowbot-vr/tls/server.crt",
+    "key_file": "~/.local/share/snowbot-vr/tls/server.key"
+  }
+}

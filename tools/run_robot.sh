@@ -25,7 +25,7 @@ case "$mode" in
 esac
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
+# The deployment's selected machine profile supplies the domain in deploy.py.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 export FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
 source "$root/artifacts/robot/upper/env.sh"

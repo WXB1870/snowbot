@@ -280,6 +280,51 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_orin_profile_generates_versioned_site_and_vendor_defaults(self):
+        from tools.deployment import deploy
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace=Path(tmp);upper=workspace/'upper';upper.mkdir()
+            (upper/'deployment.json').write_text(json.dumps(dict(ros='humble',python=[3,10])))
+            (upper/'site.json').write_text(json.dumps(dict(arguments={
+                'port':9999,'command_enabled':True})))
+            (workspace/'vendor-position.yaml').write_text('old local parameters')
+            name,config=deploy.machine_config(workspace,'orin')
+            deploy.configure_machine(workspace,name,config)
+            selected,saved=deploy.machine_config(workspace)
+            self.assertEqual((selected,saved['ros_domain_id']),('orin',88))
+            args=json.loads((upper/'site.json').read_text())['arguments']
+            self.assertEqual((args['execution_mode'],args['host'],args['port']),
+                             ('impedance','127.0.0.1',8014))
+            self.assertFalse(args['command_enabled'])
+            self.assertEqual(args['trajectory_max_velocity'],1.0)
+            self.assertEqual(args['key_file'],str(Path.home()/'.local/share/snowbot-vr/tls/server.key'))
+            parameters=(workspace/'vendor-position.yaml').read_text()
+            common=(deploy.ASSETS/'target_stream.yaml').read_text().rstrip()+'\n'
+            self.assertEqual(parameters,common+'    ethercat_interface: "enP5p5s0"\n')
+
+    def test_unselected_machine_preserves_site_and_runtime_domain_overrides(self):
+        import contextlib,io
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace=Path(tmp);upper=workspace/'upper';upper.mkdir()
+            profile=upper/'deployment.json';profile.write_text('{}')
+            site=upper/'site.json';site.write_text('existing 118 site')
+            parameters=workspace/'vendor-position.yaml';parameters.write_text('existing 118 parameters')
+            name,config=deploy.machine_config(workspace)
+            deploy.configure_machine(workspace,name,config)
+            self.assertEqual(site.read_text(),'existing 118 site')
+            self.assertEqual(parameters.read_text(),'existing 118 parameters')
+            for selected,explicit,expected in ((None,None,'0'),('orin',None,'88'),('orin','42','42')):
+                profile.write_text(json.dumps({'machine_profile':selected}))
+                environment={} if explicit is None else {'ROS_DOMAIN_ID':explicit}
+                with patch.dict(os.environ,environment,clear=True), \
+                        patch.object(deploy,'locked_bindu',return_value=Path('/paired')), \
+                        patch.object(deploy,'git',return_value='revision'), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(deploy.main(['plan','--workspace',str(workspace)]),0)
+                    self.assertEqual(os.environ['ROS_DOMAIN_ID'],expected)
+
     def test_python310_process_group_preserves_session_and_accepts_sigint(self):
         import select
         import signal
@@ -745,5 +790,11 @@ class DeploymentEntryTests(unittest.TestCase):
                 self.assertEqual([c[0] for c in calls.mock_calls],['assemble','vendor','upper','receipt'])
                 calls.reset_mock();self.assertEqual(deploy.main(['start','--workspace',str(workspace),'--enable-commands']),0)
                 self.assertEqual(calls.mock_calls,[unittest.mock.call.upper('start')])
+                calls.reset_mock()
+                with patch.dict(os.environ,{},clear=True):
+                    self.assertEqual(deploy.main(['build','--workspace',str(workspace),'--machine','orin']),0)
+                    self.assertEqual(os.environ['ROS_DOMAIN_ID'],'88')
+                self.assertEqual([c[0] for c in calls.mock_calls],['assemble','vendor','upper','receipt'])
+                self.assertEqual(json.loads((workspace/'upper/deployment.json').read_text())['machine_profile'],'orin')
 
 if __name__=='__main__':unittest.main()

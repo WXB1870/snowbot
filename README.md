@@ -14,6 +14,8 @@ python3 -m tools.deployment.deploy prepare
 
 `prepare` 获取匹配的 Bindu，生成底层源码并构建底层和上层软件。后续更新使用 `python3 -m tools.deployment.deploy build`。
 
+Orin 首次选择 `python3 -m tools.deployment.deploy prepare --with-impedance --machine orin`；已有部署可在下一次 `build` 时指定 `--machine orin`。选择保存在生成的部署元数据中，后续构建和 `run_robot.sh` 自动复用。机器配方 [orin.json](src/snowbot_bringup/config/deployments/machines/orin.json) 固定网卡、默认 ROS 域 88、阻抗模式、VR 端口及 TLS 路径引用；证书与私钥内容留在机器上。显式设置的 `ROS_DOMAIN_ID` 仍优先。不选机器配方时沿用原现场配置。
+
 完成构建后，按[现场配置](docs/运行与验证.md#首次现场配置)设置设备、标定和 PICO 网络，再按[启动顺序](docs/运行与验证.md#日常启动)运行。开发和仿真见[仿真与浏览器操作台](docs/运行与验证.md#仿真与浏览器操作台)。
 
 终端2可选 `bash tools/run_robot.sh vr --home` 或 `bash tools/run_robot.sh replay --home`：先确认原位使能保持，再通过现有轨迹生成器平滑将双臂和腰部回关节零位，头部／夹爪不参与；到位、停稳后开放业务。回零使用现有默认慢速上限（速度≤0.25 rad/s、加速度≤0.5 rad/s²、jerk≤162 rad/s³，同时服从关节配置），不改业务限值。默认不回零，Ctrl+C继续走原有停止流程；replay随后仍执行原有Prepare。
@@ -83,7 +85,7 @@ snowbot/
 
 `teleop.json` 和 `grippers.json` 的公共字段位于顶层，`modes.real`／`modes.simulation` 保存各环境差异，运行时按配方的 `runtime_mode` 合并。
 
-资源使用 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 路径。机器配置保存在部署目录的 `upper/site.json`，底层参数保存在 `vendor-position.yaml`；配置方法见[运行指南](docs/运行与验证.md#首次现场配置)。
+资源使用 `package://snowbot_bringup/...` 和 `package://snowbot_description/...` 路径。选择机器配方后，每次 prepare/build 从 [真机模板](src/snowbot_bringup/config/deployments/snowbot_vr_real.json)、[公共底层参数](tools/deployment/snowbot_vendor/position_session/target_stream.yaml) 和机器覆盖值生成 `upper/site.json`、`vendor-position.yaml`，长期修改应进入这些维护源。上层 VR 限速 1.0 rad/s，replay 执行器与底层上限 1.25 rad/s，分别由模板和部署入口／公共底层参数维护；未改变现有配套值。生成文件、安装路径及证书密钥不入库。
 
 [D 型把手雪铲](src/snowbot_description/urdf/d_handle_snow_shovel.urdf)包含 28×45 cm 浅铲、22 cm 横把和名义间距 34 cm 的左右握点，右手握杆位置可用于不同握距评估。`left_grip_frame` 的 +Z 沿横把，`right_grip_frame` 的 +Z 沿杆。固定握点坐标用于标定，离线双轴握持通过 Bindu 的 `left_axial_grasp`、`right_axial_grasp` 求解，工具跟踪完整六维目标；CAD 与物理形状共用该 URDF。
 

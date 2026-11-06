@@ -13,6 +13,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = ROOT/'tools/deployment/snowbot_vendor/position_session'
+MACHINES = ROOT/'src/snowbot_bringup/config/deployments/machines'
 TARGETS = ('snowbot_servo_control', 'snowbot_dual_arm_control', 'robot_control')
 
 
@@ -22,6 +23,33 @@ def git(root, *args):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def machine_config(workspace, name=None):
+    if name is None:
+        profile = workspace/'upper/deployment.json'
+        if profile.exists():
+            name = json.loads(profile.read_text()).get('machine_profile')
+    return name, json.loads((MACHINES/(name+'.json')).read_text()) if name else {}
+
+
+def configure_machine(workspace, name, config):
+    if name is None:
+        return  # Existing deployments without a machine profile keep their site settings.
+    profile = workspace/'upper/deployment.json'
+    data = json.loads(profile.read_text())
+    data['machine_profile'] = name
+    profile.write_text(json.dumps(data, indent=2)+'\n')
+    site = json.loads((MACHINES.parent/'snowbot_vr_real.json').read_text())
+    arguments = site['arguments']
+    arguments.update(config['arguments'])
+    for key in ('cert_file', 'key_file'):
+        if arguments[key]:
+            arguments[key] = str(Path(arguments[key]).expanduser())
+    (workspace/'upper/site.json').write_text(json.dumps(site, indent=2)+'\n')
+    parameters = (ASSETS/'target_stream.yaml').read_text().rstrip()+'\n'
+    parameters += '    ethercat_interface: '+json.dumps(config['ethercat_interface'])+'\n'
+    (workspace/'vendor-position.yaml').write_text(parameters)
 
 
 def locked_bindu(destination, *, acquire=False):
@@ -571,6 +599,8 @@ def main(argv=None):
     parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
+    parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
+                        help='Select machine defaults; prepare/build remember the selection for later runs')
     parser.add_argument('--with-impedance', action='store_const', const=True, default=None,
                         help='Include the impedance backend during prepare/build; subsequent builds retain it')
     parser.add_argument('--no-impedance', action='store_true', help='Base startup only: select position control')
@@ -580,6 +610,8 @@ def main(argv=None):
     workspace = options.workspace.expanduser().resolve()
     existing = options.bindu_source.expanduser().resolve() if options.bindu_source else None
     try:
+        machine_name, machine = machine_config(workspace, options.machine)
+        os.environ.setdefault('ROS_DOMAIN_ID', str(machine.get('ros_domain_id', 0)))
         if extra and options.command != 'start':
             raise ValueError('Extra arguments are only accepted by start')
         if options.no_impedance and options.command != 'services':
@@ -613,6 +645,7 @@ def main(argv=None):
         if options.command == 'prepare':
             x86(bindu, workspace, 'prepare', '--vendor-setup', vendor/'install/local_setup.bash',
                 '--application-source', ROOT)
+        configure_machine(workspace, machine_name, machine)
         x86(bindu, workspace, 'build')
         receipt(bindu, workspace)
         print('Built without starting hardware. Site configuration: '+str(workspace/'upper/site.json'))
