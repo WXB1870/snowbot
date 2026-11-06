@@ -31,6 +31,27 @@ class RuntimeParameterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'REPLAY_TIMING'):
                 self.load({'replay': replay})
 
+    def test_startup_hold_confirmation_does_not_race_85ms_feedback(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        from snowbot_hardware.position_session import PositionSessionDevices
+        devices = PositionSessionDevices.__new__(PositionSessionDevices)
+        devices.runtime_parameters = load_parameters()
+        devices.node = S(now=Mock(return_value=100.085))
+        devices.envelopes = S(sequence=1)
+        devices.sent = {1: ({'operation': 1, 'expires_at_ns': round(
+            (100.+devices.runtime_parameters['execution']['startup_hold_ttl_s'])*1e9)}, None, 'startup_hold')}
+        engine = S(active=S(command_id='startup_hold'), stopping=False, halt=Mock())
+        # Field feedback arrived after the old 80ms fencing point. Keep the
+        # full 200ms confirmation budget, then retain the 120ms braking reserve.
+        for now in (100.085, 100.2, 100.279):
+            devices.node.now.return_value = now
+            devices.brake_before_source_expiry(engine)
+            engine.halt.assert_not_called()
+        devices.node.now.return_value = 100.281
+        devices.brake_before_source_expiry(engine)
+        engine.halt.assert_called_once_with(100.281, 'COMMAND_TIMEOUT', revoke=True)
+
     def test_comments_do_not_change_defaults_or_local_and_remote_overrides(self):
         self.assertNotIn('_comment', load_parameters()['pico'])
         for connection in ('local', 'remote'):
