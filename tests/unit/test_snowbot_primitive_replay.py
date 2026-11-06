@@ -1,6 +1,9 @@
 """Offline takeover and preset launch regression checks; no ROS or hardware."""
 import json
+import ast
+import math
 from pathlib import Path
+from types import SimpleNamespace as S
 import unittest
 
 from snowbot_teleop.replay import NAMES, Replay, run_replay
@@ -89,6 +92,103 @@ class ReplayTakeoverTests(unittest.TestCase):
             for argument in ('trajectory_max_velocity:=1.25',
                              'trajectory_max_acceleration:=4.5', 'trajectory_max_jerk:=259.2'):
                 self.assertIn(argument, command)
+
+
+class GripperOnlyTests(unittest.TestCase):
+    def setUp(self):
+        from bindu_contracts.profile import Profile
+        from snowbot_hardware.parameters import load_mode_config
+        from snowbot_hardware.gripper import GripperController, SIDES, GROUPS, JOINTS
+        root = Path(__file__).resolve().parents[2]
+        cfg = root/'src/snowbot_bringup/config/robots/snowbot'
+        self.profile = Profile.load(cfg/'snowbot_real_position.json')
+        config = load_mode_config(cfg/'grippers.json', 'real')
+        self.clock, self.sent, self.goals = 10., [], {}
+        self.q = {JOINTS[s]: config['grippers'][s]['closed'] for s in SIDES}
+        self.health = dict(sample=1, operation_enabled_mask=0xfffff)
+        def send(side, position, hold, sequence):
+            self.sent.append((side, position, hold))
+            self.goals[side] = position
+        self.core = GripperController(self.profile, config, send, lambda:self.health,
+            lambda:self.clock, lambda:True, enabled=True, steady=lambda:self.clock,
+            require_driver_ack=False)
+        self.observe()
+        self.node = S(grippers=S(core=self.core), snowbot_devices=S(health=S(progress=10.)),
+                      now=lambda:self.clock)
+        source = root/'src/snowbot_hardware/snowbot_hardware/gripper_node.py'
+        tree = ast.parse(source.read_text())
+        runner = next(n for n in tree.body if getattr(n, 'name', '') == 'run_gripper_open')
+        ns = dict(time=S(monotonic=lambda:self.clock), GROUPS=GROUPS, JOINTS=JOINTS, SIDES=SIDES)
+        exec(compile(ast.Module(body=[runner], type_ignores=[]), str(source), 'exec'), ns)
+        run_open = ns['run_gripper_open']
+        self.run_open = lambda spin:run_open(self.node, spin, lambda:self.clock)
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+        idle = next(n for n in cls.body if getattr(n, 'name', '') == 'arms_idle')
+        ns = dict(math=math, __package__='snowbot_hardware')
+        exec(compile(ast.Module(body=[idle], type_ignores=[]), str(source), 'exec'), ns)
+        self.arms_idle = ns['arms_idle']
+
+    def observe(self):
+        self.core.observe(self.q, dict.fromkeys(self.q, 0.), dict(left=0., right=0.), self.clock)
+
+    def step(self, track=True):
+        from snowbot_hardware.gripper import JOINTS
+        self.clock += .01
+        self.health['sample'] += 1
+        if track:
+            self.q.update({JOINTS[s]:q for s,q in self.goals.items()})
+        self.observe()
+        self.core.tick()
+
+    def test_open_confirms_measured_endpoints_and_releases_without_closing(self):
+        measured = self.run_open(self.step)
+        self.assertEqual(measured, {s:self.core.cfg['grippers'][s]['open'] for s in ('left', 'right')})
+        self.assertFalse(self.core.lease_id)
+        self.assertTrue(all(c['state'] != 'STOPPING' for c in self.core.channels.values()))
+        self.assertTrue(all(q == self.core.cfg['grippers'][s]['open'] for s,q,hold in self.sent))
+
+    def test_manual_endpoint_timeout_does_not_report_success(self):
+        with self.assertRaisesRegex(RuntimeError, 'MANUAL_ENDPOINT_STOPPED'):
+            self.run_open(lambda:self.step(track=False))
+        self.assertFalse(self.core.lease_id)
+
+    def test_cancel_releases_lease_and_confirms_gripper_stop(self):
+        first = [True]
+        def spin():
+            if first:
+                first.pop()
+                raise KeyboardInterrupt()
+            self.step()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_open(spin)
+        self.assertFalse(self.core.lease_id)
+        self.assertFalse(any(c['state'] == 'STOPPING' for c in self.core.channels.values()))
+
+    def test_stale_feedback_cannot_be_reported_as_open(self):
+        def spin():
+            self.clock += .01
+            self.core.tick()
+        with self.assertRaisesRegex(RuntimeError, 'GRIPPER_STOP_UNCONFIRMED'):
+            self.run_open(spin)
+        self.assertFalse(self.core.lease_id)
+
+    def test_gripper_only_requires_valid_stationary_arms_without_arm_lease(self):
+        from snowbot_hardware.session import CONTROL_NAMES, CONTROL_MASK
+        velocities = dict.fromkeys(CONTROL_NAMES, 0.)
+        obs = S(valid_mask=CONTROL_MASK)
+        engine = S(stop_fault='', lease_id='', active=None, stopping=None)
+        devices = S(health=S(require_observation=lambda:obs),
+                    io=S(last_feedback=S(joint_velocities=velocities)))
+        runtime = S(node=S(engine=engine, gripper_only=True, profile=self.profile), devices=devices)
+        self.assertTrue(self.arms_idle(runtime))
+        velocities[CONTROL_NAMES[0]] = self.profile.feedback_tolerances['joint_velocity']*2
+        self.assertFalse(self.arms_idle(runtime))
+        velocities[CONTROL_NAMES[0]] = 0.
+        obs.valid_mask = 0
+        self.assertFalse(self.arms_idle(runtime))
+        obs.valid_mask = CONTROL_MASK
+        engine.active = object()
+        self.assertFalse(self.arms_idle(runtime))
 
 
 if __name__ == '__main__':

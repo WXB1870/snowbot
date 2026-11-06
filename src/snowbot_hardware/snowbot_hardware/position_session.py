@@ -110,6 +110,8 @@ class PositionSessionDevices:
         self.runtime_parameters=load_parameters(node.declare_parameter('parameters_config','',descriptor=ParameterDescriptor(read_only=True)).value or None)
         node.device_backend = 'snowbot_vendor'
         node.declare_parameter('command_enabled', False, descriptor=ParameterDescriptor(read_only=True))
+        if getattr(node, 'gripper_only', False) and node.get_parameter('command_enabled').value:
+            raise ValueError('GRIPPER_ONLY_REQUIRES_ARM_COMMANDS_DISABLED')
         node.declare_parameter('vendor_namespace', '/', descriptor=ParameterDescriptor(read_only=True))
         if node.get_parameter('vendor_namespace').value != '/':
             raise ValueError('SNOWBOT_POSITION_SESSION_ROOT_NAMESPACE_REQUIRED')
@@ -162,6 +164,8 @@ class PositionSessionDevices:
         self.startup_hold_state = ('waiting' if self.io.command_enabled else 'disabled')
         self.startup_home = node.declare_parameter('startup_home', os.environ.get('SNOWBOT_STARTUP_HOME') == '1',
             descriptor=ParameterDescriptor(read_only=True)).value
+        if getattr(node, 'gripper_only', False) and self.startup_home:
+            raise ValueError('GRIPPER_ONLY_FORBIDS_HOME')
         self.io.after_capture = lambda: self.new_session()
         self.io.pause_feedback = self.health.confirmed_hold
         self.arm_type, self.array_type = PositionSessionCommand, Float64MultiArray
