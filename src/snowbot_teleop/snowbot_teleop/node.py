@@ -5,7 +5,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 from bindu_interfaces.msg import VRInput, RecorderHealth, RuntimeEvent, TeleopModeState
-from bindu_interfaces.srv import PicoContext
+from bindu_interfaces.srv import PicoContext, ResetToolReference
 from bindu_runtime.common import RuntimeNode, spin
 from bindu_runtime.execution_client import ExecutionClient
 from bindu_runtime.tool_session import ToolSession
@@ -28,6 +28,11 @@ class PicoNode(RuntimeNode):
             tool_config_loader=load_tool,
         )
         app.attach_tool(tool)
+        self.create_service(
+            ResetToolReference,
+            "teleop/tool_reference_reset",
+            tool.reset_grasp_reference,
+        )
         app.projected = self.create_publisher(VRInput, "teleop/vr/input", 10)
         app.gripper_projected = (
             self.create_publisher(VRInput, "teleop/vr/gripper_input", 10)
@@ -40,12 +45,16 @@ class PicoNode(RuntimeNode):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        app.mode_output = self.create_publisher(TeleopModeState, "teleop/mode_state", qos)
+        app.mode_output = self.create_publisher(
+            TeleopModeState, "teleop/mode_state", qos
+        )
         self.create_subscription(VRInput, "teleop/vr/raw", app.on_frame, 10)
         self.create_subscription(RuntimeEvent, "events", app.on_motion_event, 20)
         if app.recording_enabled:
             app.record_client = self.create_client(SetBool, "recorder/capture")
-            self.create_subscription(RecorderHealth, "recorder/health", self.on_recording, 5)
+            self.create_subscription(
+                RecorderHealth, "recorder/health", self.on_recording, 5
+            )
         self.create_service(PicoContext, "teleop/pico/context", app.on_context)
         app.publish_mode()
         self.create_timer(0.005, app.tick)

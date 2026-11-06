@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "source_host": "192.168.3.118",
+  "source_root": "/home/cc/snowbot_ws/src",
+  "captured_at": "2026-11-03T13:52:43.175684+00:00",
+  "role": "immutable_impedance_input",
+  "after_component": "deployed_vendor",
+  "patch": "tools/deployment/snowbot_vendor/position_session/joint_impedance_118.patch",
+  "patch_sha256": "fd977a3910550c48c3365c6163b4116458fbcfc3c13f7fb0d403bd01879ef6c3",
+  "baseline_manifest_sha256": "6299331c0c1eb178244dd1be96a17870ad4deb4b198ea8f4bdfd1541c0ec0d1f",
+  "deployed_vendor_patch_sha256": "8104f299a9bfa38997f471723690cdec30745f89560cff91ab3c110f5def1431",
+  "files": {
+    "servo_control/include/impedance/cartesian_impedance_controller.h": {
+      "input_sha256": "64df3263a526c67e237d89770c9294e441026722a5337db71cf8fbb7c60266d8",
+      "source_sha256": "d5a6869087466ad8af5e1cb61c7295a36719a75d2b5648e34bfbfbb5ee2c2f35"
+    },
+    "servo_control/src/impedance/cartesian_impedance_controller.cpp": {
+      "input_sha256": "5a33b958f6247cfd26a870b71a9a19f95f533e5b9677b56420f39a995bd2c707",
+      "source_sha256": "5222a5e10c6af79247bf2a6e6d7cdcc059dc413723e4180e35490cfa1a046cb5"
+    },
+    "ctl_msgs/config/impedance_params.yaml": {
+      "input_sha256": "e37a342071bb787371c53b36f1cd2d9473b49fe1148818901fb1754ad8bb2c0d",
+      "source_sha256": "86e96d6e8c2ce8d112104b90d418750f5ffab03beeb6f7779a5270e215cf00c7"
+    }
+  },
+  "unchanged_reference_message_sha256": "717dbe2961893c171120be2cdd808fdba9707812401fc1d92cb0d25a04ca9431",
+  "physical_validation": "not_performed"
+}

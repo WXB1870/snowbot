@@ -104,6 +104,18 @@ void check_bootstrap_interrupts(){
   inspect_hold=false;drain();
   if(scenario==3){assert(node.position_gate_.last().session==session&&enable_requests==enabled_before+16);continue;}
   assert(node.position_gate_.last().session!=session&&enable_requests==enabled_before&&!node.position_target_takeover_valid_);
+  if(scenario==4){
+   // A rejected takeover still authenticates its own cancellation. It must
+   // neither replace the adopted identity nor enable motors, even on repeats.
+   auto cancel=make(session,2,2),wrong=std::make_shared<Packet>(*cancel);
+   wrong->meta.lease_id="wrong-lease";const auto barrier=node.position_target_barrier_;
+   node.position_submit(wrong);assert(node.position_target_barrier_==barrier);
+   node.position_submit(cancel);assert(node.position_target_barrier_>barrier);
+   assert(node.position_acceptance_.rejected.blocks(meta(cancel->meta)));
+   assert(std::string(node.position_cycle_reason_)=="takeover_canceled_before_activation");
+   node.position_submit(cancel);assert(std::string(node.position_cycle_reason_)=="takeover_canceled_before_activation");
+   assert(node.position_gate_.last().session!=session&&enable_requests==enabled_before);
+  }
   node.position_submit(take);drain();assert(node.position_gate_.last().session!=session&&enable_requests==enabled_before);
   node.position_initialized_=true;node.position_submit(make(session+1,1,1));drain();assert(node.position_gate_.last().session==session+1&&enable_requests==enabled_before+16);
  }

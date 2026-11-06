@@ -13,11 +13,11 @@ import time
 import uuid
 
 from snowbot_hardware.session import (
-    REPLAY_GROUPS as GROUPS, REPLAY_NAMES as NAMES, checked_execution_state as checked_state,
+    REPLAY_GROUPS as GROUPS, REPLAY_NAMES as NAMES,
 )
 from snowbot_teleop.replay import (
-    kinematic_digest, load_library, load_prepare_return, load_replay,
-    plan_from_current, plan_prepare, replay_follow_limits, run_replay,
+    kinematic_digest, load_library, load_replay,
+    plan_from_current, plan_prepare, run_replay,
 )
 
 
@@ -35,10 +35,8 @@ def execute(args, plan):
     from rclpy.signals import SignalHandlerOptions
     from rclpy.qos import qos_profile_sensor_data
     from bindu_interfaces.msg import ExecutionState, MotionCommand, RuntimeEvent, GripperState
-    from bindu_interfaces.srv import Lease, SubmitMotion, GripperControl
+    from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, GripperControl
     from std_srvs.srv import Trigger
-    from bindu_runtime.stop_evidence import sampled_nominal_reference
-    from snowbot_ctl_msgs.msg import PositionObservation
     from bindu_runtime.robot_setup import RobotSetup
     from bindu_runtime.common import stamp
 
@@ -48,11 +46,6 @@ def execute(args, plan):
     robot = RobotSetup.load(args.robot_config)
     from snowbot_hardware.parameters import load_parameters, load_mode_config
     settings = load_parameters()
-    velocity_tolerance = max(settings['execution']['motion_arrival_velocity_tolerance_rad_s'],
-                             robot.profile.feedback_tolerances['joint_velocity'])
-    settle_time = settings['execution']['stop_confirmation_window_s']
-    settle_timeout = settings['pico']['motion_completion_grace_s']
-    prepare_tolerance = load_mode_config(robot.tool_config.with_name('teleop.json'), 'real')['prepare_position_tolerance_rad']
     from bindu_contracts.teleoperation import load_tool_config
     tool_config = load_tool_config(robot.tool_config)
     gripper_config = load_mode_config(robot.tool_config.with_name('grippers.json'), 'real')
@@ -61,19 +54,25 @@ def execute(args, plan):
         raise ValueError('REPLAY_REFERENCE_MARGIN_CONFIG_MISMATCH')
     if kinematic_digest(robot.urdf) != plan.kinematics:
         raise ValueError('REPLAY_KINEMATICS_MISMATCH')
-    empty_handed = args.action in ('Prepare', 'ReturnZero')
+    empty_handed = args.action == 'Prepare'
     if not empty_handed and args.tool_id != plan.tool_id:
         raise ValueError('REPLAY_TOOL_ID_MISMATCH')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    log = args.output.open('x')
+    from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
+    args.output.touch(exist_ok=False)
+    log = DiagnosticWriter(args.output, sampling=False)
     rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
     node = rclpy.create_node('snowbot_primitive_replay_'+uuid.uuid4().hex[:8])
     ns = '/'+args.namespace.strip('/')
-    topic = '/'+args.vendor_namespace.strip('/') if args.vendor_namespace.strip('/') else ''
     latest, task = {}, 'primitive-'+uuid.uuid4().hex
 
     def record(kind, **data):
-        log.write(json.dumps(dict(kind=kind, steady=time.monotonic(), **data), allow_nan=False)+'\n')
+        value = dict(kind=kind, steady=time.monotonic(), **data)
+        if kind == 'trajectory_sample':
+            # Bulk JSON encoding precedes the lease; disk I/O uses the existing writer.
+            log.write_text('diagnostics', json.dumps(value, allow_nan=False)+'\n')
+        else:
+            log.write_json_line('diagnostics', value)
 
     def receive(kind):
         def callback(msg):
@@ -89,17 +88,15 @@ def execute(args, plan):
         return callback
 
     node.create_subscription(ExecutionState, ns+'/execution/state', receive('state'), 10)
-    node.create_subscription(PositionObservation, topic+'/bindu/position/observation',
-                             receive('pdo'), qos_profile_sensor_data)
-    commands = set()
     def event(msg):
-        if msg.task_id == task or msg.command_id in commands:
+        if msg.task_id == task:
             record('event', state=msg.state, code=msg.code)
-            if msg.state in ('TARGET_REJECTED', 'REJECTED', 'FAILED'):
-                latest.setdefault('error', msg.code)
+            if msg.state == 'REPLAY_RESULT':
+                latest['result'] = json.loads(msg.code)
     node.create_subscription(RuntimeEvent, ns+'/events', event, 100)
     leases = node.create_client(Lease, ns+'/execution/lease')
     submit = node.create_client(SubmitMotion, ns+'/execution/submit')
+    control = node.create_client(ControlExecution, ns+'/execution/control')
     holds = node.create_client(Trigger, ns+'/execution/held_reference')
     gripper_leases = node.create_client(Lease, ns+'/gripper/lease')
     gripper_control = node.create_client(GripperControl, ns+'/gripper/control')
@@ -113,11 +110,11 @@ def execute(args, plan):
                 raise RuntimeError('REPLAY_WAIT_TIMEOUT')
             rclpy.spin_once(node, timeout_sec=.005)
 
-    def call(client, request):
+    def call(client, request, timeout=.25):
         if not client.service_is_ready():
             raise RuntimeError('REPLAY_SERVICE_UNAVAILABLE')
         future = client.call_async(request)
-        wait(future.done, .25)
+        wait(future.done, timeout)
         reply = future.result()
         if not (reply.ok if hasattr(reply, 'ok') else reply.accepted):
             raise RuntimeError(reply.code)
@@ -125,8 +122,6 @@ def execute(args, plan):
 
     class Port:
         lease = None
-        boot = None
-        instance = None
         @staticmethod
         def steady(): return time.monotonic()
         @staticmethod
@@ -134,10 +129,10 @@ def execute(args, plan):
 
         def grippers(self, operation):
             # Reuse the adapter's configured endpoints, leases and measured completion.
-            confirmed_at = self.ros()
+            confirmed_at, confirmed_steady = self.ros(), self.steady()
             wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= confirmed_at and
-                 latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= confirmed_at, 1.)
-            self.check(False)
+                 latest['state'][1] >= confirmed_steady, 1.)
+            self.state()
             lease = call(gripper_leases, Lease.Request(operation='acquire', owner=task,
                          resources=['left_tool_axis', 'right_tool_axis']))
             sequence = 0
@@ -154,7 +149,7 @@ def execute(args, plan):
                 renewed = self.steady()
                 end = renewed+gripper_config['motion_timeout']+gripper_config['stop_timeout']
                 while True:
-                    self.check(False)
+                    self.state()
                     if all('gripper_'+side in latest for side in ('left', 'right')):
                         states = [latest['gripper_'+side][0] for side in ('left', 'right')]
                         current = all(m.epoch == lease.epoch and m.control_sequence == sequence for m in states)
@@ -180,153 +175,123 @@ def execute(args, plan):
                      not latest['gripper_'+side][0].lease_active and
                      latest['gripper_'+side][0].state not in ('MOVING', 'STOPPING', 'FAILED')
                      for side in ('left', 'right')), gripper_config['stop_timeout'])
-            q, v = self.check(False)
+            q, v = self.state()
             record('grippers', operation=operation, measured_q_rad={n:q[n] for n in ('arm_l_joint_8', 'arm_r_joint_8')})
             if operation == 'close':
                 print('双爪关爪已停止，请现场确认雪铲已夹牢。')
         @staticmethod
         def wait_until(due): wait(lambda: time.monotonic() >= due, max(.1, due-time.monotonic()+.1))
-        def check(self, owned):
-            if 'state' not in latest or 'pdo' not in latest:
-                raise RuntimeError('REPLAY_FEEDBACK_MISSING')
-            s, received = latest['state']
-            now, steady = self.ros(), self.steady()
-            q, v = checked_state(s, now, received, steady, robot.profile.digest,
-                                 owned=owned, epoch=self.lease.epoch if self.lease else 0,
-                                 stationary=False, state_max_age=.2, feedback_max_age=.3)
-            if self.instance is None: self.instance = s.instance_id
-            if not self.instance or s.instance_id != self.instance:
-                raise RuntimeError('REPLAY_EXECUTOR_CHANGED')
-            p, _ = latest['pdo']
-            if self.boot is None: self.boot = p.boot_id
-            if not self.boot: raise RuntimeError('REPLAY_BOOT_MISSING')
-            if p.execution_mode != (1 if args.execution_mode == 'impedance' else 0):
-                raise RuntimeError('REPLAY_EXECUTION_MODE_MISMATCH:'+args.execution_mode)
-            if latest.get('error'):
-                raise RuntimeError(latest['error'])
-            return q, v
-        @staticmethod
-        def feedback_stamp():
-            stamp = latest['state'][0].feedback_stamp
-            return stamp.sec+stamp.nanosec*1e-9
+        def state(self):
+            state, received = latest['state']
+            source = state.stamp.sec+state.stamp.nanosec*1e-9
+            if not (0 <= self.steady()-received <= timing['state_max_age_s'] and
+                    0 <= self.ros()-source <= timing['state_max_age_s']):
+                raise RuntimeError('REPLAY_STATE_TIMEOUT')
+            return dict(zip(state.joints.name, state.joints.position)), dict(zip(state.joints.name, state.joints.velocity))
+
         def nominal_reference(self):
-            state = latest['state'][0]
-            if self.lease and getattr(self, 'commanded', False):
-                sample = sampled_nominal_reference(state, NAMES, self.lease.epoch,
-                    self.ros(), tool_config['feedback_max_age'],
-                    wait_until=getattr(self,'reference_ready_by',0.), steady_now=self.steady())
-                if sample is None: return None
-                self.reference_ready_by = 0.
-                return dict(zip(NAMES, sample[0]))
-            if not holds.service_is_ready():
-                raise RuntimeError('REPLAY_HELD_REFERENCE_UNAVAILABLE')
             future = holds.call_async(Trigger.Request())
             wait(future.done, .25)
             reply = future.result()
-            if not reply.success: raise RuntimeError(reply.message)
+            if not reply.success:
+                raise RuntimeError(reply.message)
             data = json.loads(reply.message)
-            state = latest['state'][0]
-            expected = self.lease.lease_id if self.lease else ''
-            epoch = self.lease.epoch if self.lease else state.lease_epoch
-            if (data['instance_id'] != self.instance or data['profile_hash'] != robot.profile.digest or
-                    data['lease_id'] != expected or data['epoch'] != epoch or data['revision'] != state.revision or
-                    data['boot_id'] != self.boot or not 0 <= self.ros()-data['stamp'] <= tool_config['feedback_max_age'] or
-                    set(data['positions']) != set(NAMES) or
-                    any(not math.isfinite(q) or not robot.profile.limits[n][0]<=q<=robot.profile.limits[n][1]
-                        for n,q in data['positions'].items())):
-                raise RuntimeError('REPLAY_HELD_REFERENCE_IDENTITY')
-            identity = (data['boot_id'], data['session'], data['sequence'], data['positions'])
-            if getattr(self,'held_identity',None) is not None and identity != self.held_identity:
-                raise RuntimeError('REPLAY_HELD_REFERENCE_CHANGED')
-            self.held_identity = identity
+            self.planning_revision = data['revision']
+            self.planning_context = data['instance_id']
             return data['positions']
 
-        def acquire(self):
-            self.lease = call(leases, Lease.Request(operation='acquire', owner=task, resources=list(GROUPS)))
-            if self.lease.profile_hash != robot.profile.digest:
-                # The acquired lease remains known so the outer cleanup can revoke it.
-                self.release_and_confirm_stop()
-                raise RuntimeError('REPLAY_LEASE_PROFILE_MISMATCH')
-            wait(lambda: latest['state'][0].lease_active, .25)
-        def renew(self):
-            call(leases, Lease.Request(operation='renew', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
-        def begin(self, plan, effective):
+        def prepare(self, plan):
             from trajectory_msgs.msg import JointTrajectoryPoint
             from builtin_interfaces.msg import Duration
-            source = self.ros()
             self.replay_identity = uuid.uuid4().hex
-            msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=self.replay_identity,
-                task_id=task, observation_id=str(latest['pdo'][0].pdo_sample),
-                profile_hash=robot.profile.digest, lease_id=self.lease.lease_id, epoch=self.lease.epoch,
-                mode='prepared_entry' if empty_handed else 'prepared_trajectory', resource_groups=list(GROUPS), joint_names=list(NAMES),
-                stamp=stamp(source), valid_for=.25)
-            for t,q,v,a in self.prepared:
-                at = stamp(effective-source+t)
-                msg.points.append(JointTrajectoryPoint(positions=list(q), velocities=list(v),
+            # Only the final planned trajectory is serialized and certified.
+            points = []
+            for t,q,v,a in plan.trajectory_knots():
+                at = stamp(t)
+                points.append(JointTrajectoryPoint(positions=list(q), velocities=list(v),
                     accelerations=list(a), time_from_start=Duration(sec=at.sec, nanosec=at.nanosec)))
-            commands.add(msg.command_id)
-            call(submit, SubmitMotion.Request(command=msg))
-            self.commanded = True
-            self.reference_ready_by = self.steady()+tool_config['feedback_max_age']
-            record('trajectory', identity=self.replay_identity, effective_stamp=effective,
-                   joint_names=list(NAMES), sample_period_s=.02, stage='final_accepted_reference')
-            for k in range(math.ceil(plan.duration/.02)+1):
-                t = min(k*.02, plan.duration)
+            record('trajectory', identity=self.replay_identity, joint_names=list(NAMES),
+                   sample_period_s=timing['period_s'], stage='prepared_reference')
+            for k in range(math.ceil(plan.duration/timing['period_s'])+1):
+                t = min(k*timing['period_s'], plan.duration)
                 q,v,a = plan.state(t)
                 record('trajectory_sample', t=t, q=q, qd=v, qdd=a)
+            # Slow preparation cannot turn queued observations into current data.
+            prepared_at = self.ros()
+            wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= prepared_at, 1.)
+            msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=self.replay_identity,
+                task_id=task, observation_id=getattr(self, 'planning_context', ''),
+                profile_hash=robot.profile.digest,
+                mode=('prepared_entry' if empty_handed else 'prepared_trajectory')+('_impedance' if args.execution_mode == 'impedance' else ''),
+                resource_groups=list(GROUPS), joint_names=list(NAMES), points=points,
+                expected_revision=self.planning_revision, stamp=stamp(self.ros()), valid_for=timing['command_ttl_s'])
+            call(submit, SubmitMotion.Request(command=msg), settings['pico']['validation_worker_timeout_s'])
 
-        def send(self, goal, source):
+        def acquire(self):
+            request = Lease.Request(operation='acquire_replay', owner=task, resources=list(GROUPS))
+            while True:
+                future = leases.call_async(request)
+                wait(future.done, .25)
+                reply = future.result()
+                if reply.ok:
+                    self.lease = reply
+                    return
+                if not reply.code.startswith('WAIT_REST'):
+                    raise RuntimeError(reply.code)
+                if not getattr(self, 'waiting', False):
+                    print(reply.code, flush=True)
+                self.waiting = True
+                self.wait_until(self.steady()+timing['period_s'])
+
+        def renew(self):
+            call(leases, Lease.Request(operation='renew', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
+
+        def send(self, source):
             msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=uuid.uuid4().hex,
-                task_id=task, observation_id=str(latest['pdo'][0].pdo_sample),
-                profile_hash=robot.profile.digest, lease_id=self.lease.lease_id, epoch=self.lease.epoch,
-                mode='joint_target', resource_groups=list(GROUPS), joint_names=list(NAMES),
-                positions=list(goal), stamp=stamp(source), valid_for=.25)
-            if self.prepared is not None:
-                msg.mode = 'trajectory_heartbeat'
-                msg.observation_id = self.replay_identity
-                msg.positions = []
-            commands.add(msg.command_id)
+                task_id=task, observation_id=self.replay_identity, profile_hash=robot.profile.digest,
+                lease_id=self.lease.lease_id, epoch=self.lease.epoch, mode='trajectory_heartbeat',
+                resource_groups=list(GROUPS), joint_names=list(NAMES), stamp=stamp(source), valid_for=timing['command_ttl_s'])
             call(submit, SubmitMotion.Request(command=msg))
-            if not getattr(self,'commanded',False):
-                self.reference_ready_by=self.steady()+tool_config['feedback_max_age']
-            self.commanded = True
-            record('target', source_stamp=source, q=list(goal))
-        @staticmethod
-        def arrival_tolerance(name):
-            tolerance = prepare_tolerance if args.action == 'Prepare' else robot.profile.stop_position_tolerances.get(
-                name, robot.profile.feedback_tolerances['joint_position'])
-            return max(math.radians(2), tolerance)
-        def release_and_confirm_stop(self):
-            if not self.lease: return False
-            call(leases, Lease.Request(operation='release', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
-            released = self.steady()
-            wait(lambda: latest['state'][1] > released and
-                 not latest['state'][0].lease_active and latest['state'][0].state != 'STOPPING',
-                 robot.profile.stop_timeout+.2)
-            self.check(False)
+            record('heartbeat', source_stamp=source)
+
+        def outcome(self):
+            if latest.get('result') is None:
+                self.state()
+            return latest.get('result')
+
+        def finish(self):
+            if self.lease is None:
+                return None
+            reply = call(control, ControlExecution.Request(operation='replay_stop',
+                lease_id=self.lease.lease_id, epoch=self.lease.epoch))
+            result = json.loads(reply.code)
+            end = self.steady()+robot.profile.stop_timeout+.2
+            while not result['final']:
+                if self.steady() >= end:
+                    raise RuntimeError('REPLAY_STOP_RESULT_TIMEOUT')
+                self.wait_until(self.steady()+timing['period_s'])
+                result = json.loads(call(control, ControlExecution.Request(operation='replay_result',
+                    lease_id=self.lease.lease_id, epoch=self.lease.epoch)).code)
             self.lease = None
-            return True
+            return result
 
     manifest = load_library(args.library.resolve())
     port = Port()
     try:
-        wait(lambda: 'state' in latest and 'pdo' in latest and leases.service_is_ready() and submit.service_is_ready(), 5.)
-        q, v = port.check(False)
+        wait(lambda: 'state' in latest and leases.service_is_ready() and submit.service_is_ready() and control.service_is_ready(), 5.)
+        timing = json.loads(call(leases, Lease.Request(operation='ready', resources=list(GROUPS))).code)
+        q, v = port.state()
+        port.planning_revision = latest['state'][0].revision
         if args.action == 'Prepare':
             initial = dict(q)
             record('prepare_start', measured_q_rad=initial)
-            reference = port.nominal_reference() if any(
+            reference = port.nominal_reference() if args.execution_mode == 'impedance' or any(
                 max(robot.profile.limits[n][0]-initial[n], initial[n]-robot.profile.limits[n][1], 0.)
                 > robot.profile.feedback_tolerances['joint_position'] for n in NAMES) else None
             plan = plan_prepare(args.library, robot, initial, args.speed, reference=reference)
             record('prepare_reference', source=plan.start_reference_source,
                    reference_q_rad=dict(zip(NAMES, plan.points[0])))
-            # Validation blocks callbacks; receipt time alone can admit queued old samples.
-            checked_at = port.ros()
-            wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= checked_at and
-                 latest['pdo'][0].header.stamp.sec+latest['pdo'][0].header.stamp.nanosec*1e-9 >= checked_at, 1.)
-            port.check(False)
-        elif args.action != 'ReturnZero':
+        else:
             if manifest.get('transition_validation_passed'):
                 anchor = port.nominal_reference() if args.execution_mode=='impedance' else q
                 plan = plan_from_current(args.library, args.action, anchor, args.speed, args.waist_lead,
@@ -335,11 +300,7 @@ def execute(args, plan):
         record('plan', execution_mode=args.execution_mode, tool_present=not empty_handed, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=plan.speed,
                profile_hash=robot.profile.digest, tool_id=plan.tool_id, waist_lead_s=plan.waist_lead_s,
                posture_reference_margin_rad=plan.reference_margin_rad)
-        segments = getattr(plan, 'segments', (plan,))
-        port.prepared = plan.trajectory_knots() if all(s.curves for s in segments) else None
-        result = run_replay(plan, port, execution_mode=args.execution_mode,
-                            velocity_tolerance=velocity_tolerance, settle_time=settle_time,
-                            settle_timeout=settle_timeout)
+        result = run_replay(plan, port, timing=timing)
         if args.action == 'Prepare':
             confirm_prepare_grippers(port, 'open')
             confirm_prepare_grippers(port, 'close')
@@ -349,10 +310,6 @@ def execute(args, plan):
         record('result', completed=False, error=str(exc) or type(exc).__name__)
         raise
     finally:
-        # Also cover acquisition that succeeded before its state-ACK wait failed.
-        if port.lease:
-            try: port.release_and_confirm_stop()
-            except Exception as exc: record('cleanup_stop_unconfirmed', error=str(exc))
         node.destroy_node()
         rclpy.shutdown()
         log.close()
@@ -368,8 +325,9 @@ def replay_action(args, parser):
                 goal_q_rad=dict(zip(plan.names, manifest['nodes'][manifest['preparation']['goal_node']])),
                 posture_reference_margin_rad=plan.reference_margin_rad,hardware_commands=False)))
             return
-    elif args.action == 'ReturnZero':
-        plan = load_prepare_return(args.library, args.prepare_log, args.speed)
+    elif args.execute and manifest.get('transition_validation_passed'):
+        # Execution selects the route once, from the executor's current snapshot.
+        plan = load_replay(args.library, manifest['home_node'].split(':')[0], args.speed, args.waist_lead)
     elif manifest.get('transition_validation_passed'):
         start = args.from_node or manifest['home_node']
         plan = plan_from_current(args.library, args.action, dict(zip(NAMES, manifest['nodes'][start])),
@@ -378,8 +336,8 @@ def replay_action(args, parser):
     else:
         plan = load_replay(args.library, args.action, args.speed, args.waist_lead)
     if args.execute:
-        if not args.output or (args.action not in ('Prepare', 'ReturnZero') and not args.tool_id):
-            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare/ReturnZero')
+        if not args.output or (args.action != 'Prepare' and not args.tool_id):
+            parser.error('--execute requires --output, and --tool-id except for empty-handed Prepare')
         execute(args, plan)
     else:
         print(json.dumps(dict(execution_mode=args.execution_mode, route=list(getattr(plan, 'route', (args.action,))), action=args.action, duration_s=plan.duration, speed=args.speed,
@@ -430,26 +388,22 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library', type=Path, required=True)
     selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare', 'ReturnZero'))
-    parser.add_argument('--prepare-log', type=Path, help='ReturnZero: old empty-hand Prepare JSONL')
+    selection.add_argument('--action', choices=('Push', 'SideScoop', 'Flip', 'Home', 'Prepare'))
     selection.add_argument('--interactive', action='store_true', help='Staged 1/2/3 actions; empty Enter returns after each action')
     parser.add_argument('--from-node', help='Offline route preview from a certified node; default home node')
     parser.add_argument('--speed', type=float, default=1., help='0 < speed <= 1; scales certified timing')
     parser.add_argument('--waist-lead', type=float, help='Waist command lead in real seconds; default from validated library')
     parser.add_argument('--execute', action='store_true')
-    parser.add_argument('--execution-mode', choices=('position',), default='position',
+    parser.add_argument('--execution-mode', choices=('position','impedance'), default='position',
                         help='Must match the already running backend; never switches its mode')
     parser.add_argument('--robot-config', type=Path)
     parser.add_argument('--tool-id')
     parser.add_argument('--namespace', default='bindu_snowbot')
-    parser.add_argument('--vendor-namespace', default='')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--output-dir', type=Path, help='Interactive mode: one new JSONL log per selected action')
     parser.add_argument('--start-tolerance', type=float, default=math.radians(2),
                         help='Start-node matching tolerance in rad; default/max 2 deg')
     args = parser.parse_args(argv)
-    if args.action == 'ReturnZero' and not args.prepare_log:
-        parser.error('ReturnZero requires --prepare-log')
     if args.interactive:
         if not args.execute or not args.tool_id or not args.output_dir or args.output:
             parser.error('--interactive requires --execute --tool-id --output-dir; omit --output')

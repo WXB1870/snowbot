@@ -326,7 +326,7 @@ def parse_args(argv=None):
     parser.add_argument('--check-robot', action='store_true', help='配合 --check，只读核对机器人端点、实测反馈和保护状态')
     parser.add_argument('--enable-commands', action='store_true',
                         help='为本次真机位置或阻抗会话开放运动写入；由实际节点检查就绪，不修改现场配方')
-    parser.add_argument('--execution-mode', choices=('position',),
+    parser.add_argument('--execution-mode', choices=('position', 'impedance'),
                         help='本次运行模式；由统一入口读取底层模式后传入')
     parser.add_argument('--robot-check-timeout', type=float, default=2., help='只读机器人检查时长，秒，最多30秒')
     parser.add_argument('--physics', action='store_true', help='启用Isaac物理反馈，保留浏览器显示；仅允许仿真配置')
@@ -357,7 +357,7 @@ def parse_args(argv=None):
     args.context_run_id=args.run_id
     args.run_id=args.run_id or 'vr_'+uuid.uuid4().hex[:12]
     from ament_index_python.packages import get_package_share_directory
-    from bindu_runtime.teleop_deployment import load_deployment, target_stream_limits
+    from bindu_runtime.teleop_deployment import load_deployment, execution_backend
     if args.config is None:
         args.config = package_share('snowbot_bringup')/'config/deployments/snowbot_vr_sim.json'
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
@@ -365,32 +365,32 @@ def parse_args(argv=None):
     d=args.deployment
     if args.execution_mode:
         d['execution_mode'] = args.execution_mode
-    from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, braking_lead, load_mode_config
+    from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, load_mode_config
     d['parameters_config']=d.get('parameters_config') or str(default_path())
     args.runtime_parameters=load_parameters(d['parameters_config'])
     if args.enable_commands:
         if (d.get('runtime_mode') != 'real' or d.get('device_backend') != 'snowbot_vendor' or
-                d.get('execution_mode', 'position') != 'position' or args.physics or args.declare_load):
-            parser.error('--enable-commands 仅用于真机位置会话，不能与 --physics/--declare-load 同用')
+                d.get('execution_mode', 'position') not in ('position','impedance') or args.physics or args.declare_load):
+            parser.error('--enable-commands 仅用于真机位置或阻抗会话，不能与 --physics/--declare-load 同用')
         d['command_enabled'] = 'true'
     if args.check_robot and d.get('runtime_mode') != 'real':
         parser.error('--check-robot 仅用于真实接口配方')
     if args.physics:
         if d.get('runtime_mode')!='simulation':parser.error('--physics 仅允许仿真配置')
         d['device_backend']='external_simulation'
+    if args.execution_mode or args.physics:
+        d['device_backend']=execution_backend(d['runtime_mode'],d['device_backend'],d.get('execution_mode','position'))
     if d.get('device_backend')=='external_simulation' and not d.get('physics_config'):
         d['physics_config']=str(package_share('snowbot_bringup')/'config/robots/snowbot/snowbot_shovel_physics.json')
-    if (args.launch!='robot_teleop.launch.py' or d.get('position_contract')!='true' or
+    if (args.launch!='robot_teleop.launch.py' or
             d.get('pico_enabled')!='true' or d.get('vr_enabled')!='true'):
-        parser.error('此入口要求启用 position_contract、PICO 和 VR 的部署配置')
+        parser.error('此入口要求启用 PICO 和 VR 的部署配置')
     pico=load_mode_config(d['pico_config'],d['runtime_mode'])
     if pico.get('tool_grasp_confirmation') not in ('calibrated','operator'):
         raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
     lead=0.
     if d.get('runtime_mode')=='real':
-        lead=braking_lead(args.runtime_parameters,d.get('target_stream_brake_lead_s'))
-        d['target_stream_brake_lead_s']=str(lead)
-        target_stream_limits(d)
+        lead=args.runtime_parameters['execution']['target_stream_brake_lead_s']
     validate_pico_timing(args.runtime_parameters,brake_lead_s=lead)
     for key,attribute,default in (('namespace','namespace','bindu_snowbot'),('host','host','127.0.0.1'),
             ('port','vr_port','8012'),('cert_file','cert_file',''),('key_file','key_file','')):

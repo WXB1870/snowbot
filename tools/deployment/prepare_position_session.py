@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a local position-only vendor session; never starts a device."""
+"""Prepare a local vendor session; optional impedance is never enabled here."""
 import argparse
 import hashlib
 import json
@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
-COMPONENTS=('observation','takeover','timing','session','receipt','target')
+COMPONENTS=('observation','takeover','timing','session')
 NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp','rigid_prediction.hpp')
 
 def contract_ttl_ms(name):
@@ -62,7 +62,7 @@ def source_identity(path):
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def prepare(source,output,*,observation_only=False,execution_source=None,prediction_urdf=None,prediction_tool=None,waist_velocity_ratio=None,waist_feedforward_gain=0.):
+def prepare(source,output,*,observation_only=False,with_impedance=False,execution_source=None,prediction_urdf=None,prediction_tool=None,waist_velocity_ratio=None,waist_feedforward_gain=0.):
     if (type(waist_feedforward_gain) not in (int,float) or not math.isfinite(waist_feedforward_gain)
             or not 0 <= waist_feedforward_gain <= .1):raise ValueError('WAIST_FEEDFORWARD_GAIN_INVALID')
     if waist_velocity_ratio is None:
@@ -70,9 +70,10 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
     else:
         if (not isinstance(waist_velocity_ratio,(tuple,list)) or len(waist_velocity_ratio)!=2 or any(type(x) not in (int,float) or not math.isfinite(x)
                 or not 1 <= x <= 200 for x in waist_velocity_ratio)):raise ValueError('WAIST_VELOCITY_RATIO_INVALID')
-        if observation_only:raise ValueError('WAIST_UNITS_REQUIRES_POSITION_SESSION')
+        if observation_only or with_impedance:raise ValueError('WAIST_UNITS_REQUIRES_POSITION_SESSION')
     if bool(prediction_urdf)!=bool(prediction_tool):raise ValueError('RIGID_PREDICTION_MODEL_AND_TOOL_REQUIRED')
-    if prediction_urdf and (observation_only):raise ValueError('RIGID_PREDICTION_REQUIRES_TARGET_STREAM')
+    if prediction_urdf and observation_only:raise ValueError('RIGID_PREDICTION_REQUIRES_TARGET_STREAM')
+    if observation_only and with_impedance:raise ValueError("IMPEDANCE_REQUIRES_FULL_SESSION")
     source,output=Path(source).resolve(),Path(output).absolute()
     if not source.is_dir() or source==output or source in output.parents or output in source.parents:
         raise ValueError('POSITION_SOURCE_OUTPUT_OVERLAP_OR_MISSING')
@@ -97,15 +98,13 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
     stage=Path(tempfile.mkdtemp(prefix='.position-',dir=output.parent))
     try:
         shutil.copytree(source,stage/'src')
-        patches=COMPONENTS[:1] if observation_only else COMPONENTS[:4]
+        patches=COMPONENTS[:1] if observation_only else COMPONENTS
         for name in patches:
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/(name+'.patch'))],cwd=stage/'src',check=True,capture_output=True,text=True)
         if not observation_only:
             for package in ('robot_control','dual_arm_control','servo_control'):
-                for name in ('position_session_contract.h','position_connection_diagnostics.h'):
+                for name in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h'):
                     shutil.copy2(ASSETS/name,stage/'src'/package/'include'/name)
-            for package in ('robot_control','dual_arm_control'):
-                shutil.copy2(ASSETS/'position_session_ros.h',stage/'src'/package/'include/position_session_ros.h')
         if not observation_only:
             shutil.copy2(ASSETS/'position_trajectory.h',stage/'src/servo_control/include/position_trajectory.h')
             for name in NATIVE_FILES:
@@ -114,13 +113,7 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
                 destination.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copy2(native/name,destination)
         if not observation_only:
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'receipt.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             shutil.copy2(ASSETS/'position_receipt.h',stage/'src/servo_control/include/position_receipt.h')
-            patches=(*patches,'receipt')
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'target.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'target')
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'pause_hold.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'pause_hold')
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'drive_maintenance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'drive_maintenance')
             if prediction_urdf:
@@ -152,8 +145,18 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'waist_feedback.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'waist_feedback')
         if not observation_only:
-            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'session_v3_only.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-            patches=(*patches,'session_v3_only')
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'deployed_vendor.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'deployed_vendor')
+        if with_impedance:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'joint_impedance_118.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'joint_impedance_118','impedance')
+        if not observation_only:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'shutdown.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'shutdown')
+            if with_impedance:
+                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'shutdown_impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                patches=(*patches,'shutdown_impedance')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
@@ -202,7 +205,8 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
             session_wire_version=None if observation_only else 5,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=contract_ttl_ms('maximum_target_ttl'),target_pause_ttl_ms=contract_ttl_ms('maximum_target_pause_ttl'),
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
-            native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},
+            native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,
+            impedance_source=json.loads((pairing_path.parent/'vendor/snowbot/impedance_118.json').read_text()) if with_impedance else None,
             source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
         (stage/'position_release.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
         stage.rename(output)
@@ -217,6 +221,7 @@ if __name__=='__main__':
     destination.add_argument('--release-id',help='Unique immutable candidate name under snowbot/releases; latest/current/final are rejected')
     destination.add_argument('--output',type=Path,help='Explicit output for temporary checks or externally managed assembly')
     p.add_argument('--observation-only',action='store_true')
+    p.add_argument('--with-impedance',action='store_true',help='Include optional backend; default execution mode remains position')
     p.add_argument('--execution-source',type=Path,help='Reviewed Bindu native execution source directory; copied and hashed, never built or started here')
     p.add_argument('--prediction-urdf',type=Path,help='Reviewed actual kinematic URDF for rigid prediction; local generation only')
     p.add_argument('--prediction-tool',type=Path,help='Reviewed tool config selecting the two end frames; must accompany prediction-urdf')
@@ -224,4 +229,4 @@ if __name__=='__main__':
     p.add_argument('--waist-feedforward-gain',type=float,default=0.,help='Optional waist CSP 0x60B1 gain, 0..0.1; requires explicit velocity ratios; default preserves 0x60FF')
     a=p.parse_args()
     output=release_output(a.release_id) if a.release_id is not None else a.output
-    print(prepare(a.source,output,observation_only=a.observation_only,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))
+    print(prepare(a.source,output,observation_only=a.observation_only,with_impedance=a.with_impedance,execution_source=a.execution_source,prediction_urdf=a.prediction_urdf,prediction_tool=a.prediction_tool,waist_velocity_ratio=a.waist_velocity_ratio,waist_feedforward_gain=a.waist_feedforward_gain))

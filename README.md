@@ -18,7 +18,9 @@ python3 -m tools.deployment.deploy prepare
 
 本地与远程 PICO 的运行参数集中在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。本地直连使用顶层参数，远程调试在此基础上读取 `remote_vr` 中的输入有效期、换源等待、发送频率、双手时间差和告警间隔。远程现场的 `arguments.parameters_config` 可继续指向[远程入口](src/snowbot_bringup/config/robots/snowbot/runtime_parameters_remote_vr.json)；已有现场参数文件时，在其顶层加 `"vr_connection": "remote"` 即可选择远程模式，需要覆盖的远程值写在该文件的 `remote_vr` 中。下次启动时读取。
 
-正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。当前main支持position；阻抗分支及现场版本不自动升级。
+正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。`main` 同时支持 `position` 与 `impedance`；编入阻抗后端仍由已有 `--with-impedance` 选择，现场版本不自动升级。
+
+`main` 维护公共集成版本，`xavier/session-v3-position-impedance` 承载持续精简与验证；Bindu 公共修改统一归入其 `main`，Snowbot 用依赖锁固定配套提交。
 
 ## 功能
 
@@ -65,7 +67,7 @@ PICO 配方由 `vr_input → pico_control → execution → 厂商 upper/middle/
 | [node.py](src/snowbot_teleop/snowbot_teleop/node.py) | ROS 发布、订阅、服务和组件装配 |
 | [application.py](src/snowbot_teleop/snowbot_teleop/application.py) | 准备、模式切换、跟随、取消及操作交接 |
 | [control.py](src/snowbot_teleop/snowbot_teleop/control.py) | PICO 按键状态机与操作意图 |
-| [preparation.py](src/snowbot_teleop/snowbot_teleop/preparation.py) | 准备路径、保持参考、目标生成及实测到位检查 |
+| [preparation.py](src/snowbot_teleop/snowbot_teleop/preparation.py) | 准备路径、保持参考、目标生成及名义／实测到达检查 |
 | [position.py](src/snowbot_teleop/snowbot_teleop/position.py) | 夹爪操作及夹爪反馈 |
 | [status.py](src/snowbot_teleop/snowbot_teleop/status.py) | 面向操作者的状态视图 |
 | Bindu `tool_session.py` / `tool_follow.py` | 会话就绪、输入映射、QP 事务、执行租约与清理 |
@@ -109,7 +111,7 @@ PICO 配方由 `vr_input → pico_control → execution → 厂商 upper/middle/
 
 通用契约、求解与执行逻辑在 Bindu 维护；型号配置、底层适配和操作流程在 Snowbot 维护。底层代码以 `vendor/snowbot/original/` 为基线，在 `tools/deployment/snowbot_vendor/position_session/` 维护补丁与公共头，通过 [prepare_position_session.py](tools/deployment/prepare_position_session.py) 生成构建源码。
 
-main 的准备器与运行入口保持位置模式；阻抗控制器、专属参数及构建选项在 `xavier/impedance-control` 分支维护。
+准备器显式传入 `--with-impedance` 时叠加已固定的118关节阻抗控制器与参数，来源和源码哈希见 [impedance_118.json](vendor/snowbot/impedance_118.json)。双臂阻抗复用会话目标流，腰部保持位置控制；上层与servo须配对选择 `execution_mode=impedance`，默认仍为位置模式、标定未确认。阻抗会话从本部署安装目录读取参数（可用已有 `IMPEDANCE_PARAMS_YAML` 显式覆盖），不读取同事工作区；独立参考、旧阻抗开关、双臂模式及直接力矩测试订阅不注册。导入参数未经本项目真机验收，真实标定完成后才能确认 `impedance_calibration_confirmed`；本地原生检查不代表完整ROS构建或实体跟踪／停止通过。
 
 应用测试从仓库根目录执行，例如 `python -m unittest tests.unit.test_pico_control`。ROS 与原生依赖的加载方式、仿真构建及集成检查见[运行指南](docs/运行与验证.md#仿真与浏览器操作台)。
 

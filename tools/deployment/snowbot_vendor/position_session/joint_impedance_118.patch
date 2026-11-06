@@ -1,0 +1,935 @@
+--- a/servo_control/include/impedance/cartesian_impedance_controller.h
++++ b/servo_control/include/impedance/cartesian_impedance_controller.h
+@@ -100,6 +100,8 @@
+   double s = v / v_safe;
+   return p_.Fc + (p_.Fs - p_.Fc) * std::exp(-s * s);
+ }
++
++enum class ImpedanceMode { CARTESIAN = 0, JOINT = 1 };
+ 
+ struct ImpedanceConfig {
+   std::string urdf_path;             // URDF 文件绝对路径
+@@ -214,7 +216,21 @@
+   //   实际滤波步长 step = 1 / (kappa * f + 1), kappa = -1/log(1-p)
+   double filter_params_pose{0.95};        // 末端位姿滤波
+   double filter_params_nullspace{0.95};  // 零空间构型滤波
+-  double update_frequency{1000.0};       // 控制频率 [Hz]
++
++  // === 控制模式 ===
++  //   CARTESIAN: 操作空间阻抗 (默认, 需要 FK/Jacobian/F/T 传感器)
++  //   JOINT:     关节空间阻抗 (仅需要关节状态, 上位机通过
++  //              q_d_nullspace 字段下发期望关节角)
++  ImpedanceMode mode{ImpedanceMode::CARTESIAN};
++
++  // === 关节空间阻抗参数 (mode=JOINT 时生效, 7 维逐关节) ===
++  std::vector<double> joint_stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};  // Nm/rad
++  std::vector<double> joint_damping  {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};  // Nm·s/rad
++  // 期望关节速度的一阶低通滤波微分系数 (rad/s per rad, 截止频率 fc = a/(2π))
++  //   a=30 → fc≈4.8Hz, a=50 → fc≈8Hz, a=100 → fc≈16Hz
++  //   算法: q_f = exp(-a*dt)*q_f + (1-exp(-a*dt))*q_d
++  //         dq_d = (q_d - q_f)*a  (比直接差分 (q_d[k]-q_d[k-1])/dt 抗噪好很多)
++  std::vector<double> joint_vel_filter_coeff{30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0};
+ 
+   /// 默认配置 (阻尼模式, 中等刚度).
+   /// @param side "left" 或 "right", 用于确定 ee_link 和关节名前缀.
+@@ -285,6 +301,29 @@
+   const VectorXd& computeGravityLive(const VectorXd& q_full,
+                                        const VectorXd& dq_full);
+ 
++  /// 强制调用 updateRobot() (computeAllTerms + updateFramePlacements).
++  ///   用于 rosLoop 层"双臂统一先算一次, 再由重力和阻抗 update 共享缓存"的
++  ///   优化场景, 避免每只手每帧 computeAllTerms 被调用两次.
++  void forceUpdateRobot(const VectorXd& q_full, const VectorXd& dq_full);
++
++  /// 让本 controller 不再持有自己独立的 robot_data_, 改为共享外部传入的 Data.
++  ///   双臂复用场景: 右臂绑定左臂的 robot_data_ (同一份 URDF, 同一份 q_full),
++  ///   computeAllTerms 只对左臂算一次, 双臂各读各的 g / oMf / J.
++  void shareRobotData(std::shared_ptr<pinocchio::Data> shared);
++
++  /// 暴露内部 robot_data_ 指针 (供 rosLoop 层外部绑定右臂).
++  std::shared_ptr<pinocchio::Data> getRobotData() const { return robot_data_; }
++
++  /// 从已 forceUpdateRobot 的缓存中直接取重力补偿 (n_dof_), 不重算 Pinocchio.
++  ///   必须在 forceUpdateRobot 之后调用, 否则返回值是上一次的残留.
++  const VectorXd& computeGravityCached();
++
++  /// 阻抗 update, 但跳过内部的 updateRobot() (假设外部已 forceUpdateRobot).
++  ///   rosLoop 优化场景使用, 每帧只算一次 computeAllTerms 供双臂共享.
++  void updateNoRobot(const VectorXd& q_full, const VectorXd& dq_full,
++                     const VectorXd& efforts_full, const Vector6d& sensor_wrench,
++                     double dt);
++
+   /// 获取该臂末端位姿偏差 (6 维, 用于调试/上限检测)
+   const Vector6d& getPoseDeviation() const { return pose_deviation_; }
+   const Vector6d& getTwistDeviation() const { return twist_deviation_; }
+@@ -322,6 +361,16 @@
+   ///   力位混合控制注入位置环时使用此值作为期望关节角,
+   ///   让位置环跟踪上位机/默认构型, 而不是把当前反馈当作目标 (避免漂移累积)
+   const VectorXd& getQDNullspaceFiltered() const { return q_d_nullspace_filtered_; }
++  void setNullspaceTarget(const VectorXd& q) { q_d_nullspace_target_ = q; }
++
++  /// 把零空间期望的 filtered 值瞬间同步为当前关节角 robot_q_.
++  /// target 保持原值不变, 后续 filtered 通过 updateFilteredReference
++  /// 的低通渐进向 target 靠近.
++  /// 用途: 切回单臂阻抗模式边界调用, 保证零空间力矩初始值为零,
++  ///       避免 OBJECT_IMPEDANCE 期间 robot_q_ 大幅演化而 target/filtered
++  ///       冻结导致的切回瞬间零空间阶跃冲击.
++  void snapNullspaceFilteredToActual() { q_d_nullspace_filtered_ = robot_q_; }
++
+   const Vector6d& getSensorOffset() const { return sensor_offset_; }
+ 
+   bool isInitialized() const { return initialized_; }
+@@ -342,6 +391,20 @@
+ 
+   /// 返回 pinocchio model.nq (完整 q_full 维度, 含所有 revolute 关节).
+   size_t getNqFull() const { return n_q_full_; }
++
++  // === 控制模式 (运行时可切换) ===
++  void setMode(ImpedanceMode mode);
++  ImpedanceMode getMode() const { return mode_; }
++
++  // === 全链路 Reset: 将 reference_/rt_reference_/本地 target/filtered
++  //     状态全部同步重置为当前实际 TCP 位姿 + 关节角, 并关闭外部输入闸门
++  //     rt_reference_valid_. 用于所有模式切换点 (setMode / OBJECT_IMPEDANCE 进出),
++  //     保证切换瞬间所有期望量 = 实际值, 零初始偏差, 零飞车风险.
++  void resetReferenceAndStateToActual();
++
++  // === 关节空间阻抗增益 (运行时可改, 7 维逐关节) ===
++  void setJointImpedanceGains(const std::vector<double>& K,
++                              const std::vector<double>& D);
+ 
+   /// 使能时刻的初始化: 捕获当前末端位姿作为默认参考, 当前 sensor
+   /// 读数作为重力/工具偏置 (在基坐标系下减去, 抵消末端工具重力).
+@@ -416,6 +479,8 @@
+   std::vector<int> controlled_v_idx_;  // 控制关节在 v (nv) 中的索引
+   size_t n_dof_{0};
+   size_t n_q_full_{0};
++  // 是否共享外部 robot_data_ (双臂复用场景下右臂设为 true, 跳过 computeAllTerms)
++  bool skip_compute_all_terms_{false};
+ 
+   // ROS 接口
+   rclcpp::Subscription<ReferenceType>::SharedPtr reference_sub_;
+@@ -498,6 +563,21 @@
+   //   用途: 当 pinocchio 模型与实物存在偏差时逐关节微调
+   Eigen::VectorXd kt_gravity_;
+ 
++  // === 控制模式 ===
++  ImpedanceMode mode_{ImpedanceMode::JOINT};
++
++  // === 关节空间阻抗 (mode=JOINT 时使用) ===
++  //   joint_stiffness_diag_:    (n_dof_,) 逐关节刚度 [Nm/rad]
++  //   joint_damping_diag_:      (n_dof_,) 逐关节阻尼 [Nm·s/rad]
++  //   joint_vel_filter_coeff_:  (n_dof_,) 逐关节期望速度滤波微分系数 a
++  //   q_d_filtered_prev_:       低通滤波后的 q_d 状态 (递推: q_f = exp(-a*dt)*q_f + (1-exp(-a*dt))*q_d)
++  //   dq_d_desired_:            期望关节速度 = (q_d - q_f) * a  (滤波微分, 比直接差分抗噪好)
++  Eigen::DiagonalMatrix<double, Eigen::Dynamic> joint_stiffness_diag_;
++  Eigen::DiagonalMatrix<double, Eigen::Dynamic> joint_damping_diag_;
++  Eigen::DiagonalMatrix<double, Eigen::Dynamic> joint_vel_filter_coeff_;
++  VectorXd q_d_filtered_prev_;
++  VectorXd dq_d_desired_;
++
+   // 零空间控制参数
+   double nullspace_stiffness_{0.0};
+   double nullspace_damping_{2.0};
+@@ -518,7 +598,6 @@
+   // 参考信号滤波参数
+   double filter_params_pose_{0.95};
+   double filter_params_nullspace_{0.95};
+-  double update_frequency_{1000.0};
+   // 末端位姿参考: target (上位机最新值), filtered (滤波后平滑值, 用于控制)
+   //   注意: default_position_/default_quaternion_ 是使能时捕获的 fallback
+   //         当上位机从未下发参考时, target 不会被更新, filtered 追随 default
+--- a/servo_control/src/impedance/cartesian_impedance_controller.cpp
++++ b/servo_control/src/impedance/cartesian_impedance_controller.cpp
+@@ -73,7 +73,6 @@
+   cfg.nullspace_damping = 2.0;
+   cfg.filter_params_pose = 0.95;
+   cfg.filter_params_nullspace = 0.95;
+-  cfg.update_frequency = 1000.0;
+   return cfg;
+ }
+ 
+@@ -272,9 +271,6 @@
+     cfg.filter_params_nullspace =
+         side_node["filter_params_nullspace"].as<double>();
+   }
+-  if (side_node["update_frequency"]) {
+-    cfg.update_frequency = side_node["update_frequency"].as<double>();
+-  }
+ 
+   // 静差消除参数 (可选, 缺省全零=禁用)
+   if (side_node["integral_gain_joint"]) {
+@@ -342,6 +338,31 @@
+     for (int i = 1; i <= 7; ++i) {
+       cfg.controlled_joint_names.push_back(prefix + std::to_string(i));
+     }
++  }
++
++  // === 控制模式 ===
++  // yaml 顶层: impedance: { mode: "joint"|"cartesian", left: {...}, right: {...} }
++  YAML::Node imp_node;
++  if (root["impedance"]) imp_node = root["impedance"];
++  if (imp_node["mode"]) {
++    std::string m = imp_node["mode"].as<std::string>("cartesian");
++    cfg.mode = (m == "joint") ? ImpedanceMode::JOINT
++                              : ImpedanceMode::CARTESIAN;
++  }
++
++  // === 关节空间阻抗参数 (逐 side 配置, 支持 joint_stiffness / joint_damping / joint_vel_filter_coeff) ===
++  if (side_node["joint_stiffness"]) {
++    cfg.joint_stiffness =
++        side_node["joint_stiffness"].as<std::vector<double>>();
++  }
++  if (side_node["joint_damping"]) {
++    cfg.joint_damping =
++        side_node["joint_damping"].as<std::vector<double>>();
++  }
++  // 期望关节速度滤波微分系数 (逐关节 a, 缺省 30.0 对应 fc≈4.8Hz)
++  if (side_node["joint_vel_filter_coeff"]) {
++    cfg.joint_vel_filter_coeff =
++        side_node["joint_vel_filter_coeff"].as<std::vector<double>>();
+   }
+ 
+   std::cout << "[ImpedanceConfig] 加载成功 (" << side << ") from "
+@@ -408,7 +429,6 @@
+   nullspace_damping_   = config.nullspace_damping;
+   filter_params_pose_ = config.filter_params_pose;
+   filter_params_nullspace_ = config.filter_params_nullspace;
+-  update_frequency_ = config.update_frequency;
+ 
+   // 静差消除参数加载 (标量参数先存, 向量参数在 n_dof_ 赋值后初始化)
+   integral_leakage_ = config.integral_leakage;
+@@ -440,8 +460,8 @@
+               nullspace_stiffness_, nullspace_damping_,
+               (nullspace_stiffness_ > 0.0 ? "enabled" : "disabled"));
+   RCLCPP_INFO(node_->get_logger(),
+-              "Reference filter: pose=%.3f, nullspace=%.3f (update_freq=%.0f Hz)",
+-              filter_params_pose_, filter_params_nullspace_, update_frequency_);
++              "Reference filter: pose=%.3f, nullspace=%.3f",
++              filter_params_pose_, filter_params_nullspace_);
+ 
+   // 1. 配置 URDF + 关节模型
+   if (!configureRobotModel()) {
+@@ -657,6 +677,24 @@
+   has_external_wrench_ = false;
+   estimated_wrench_.setZero();
+ 
++  // === 控制模式初始化 ===
++  mode_ = config_.mode;
++  joint_stiffness_diag_.resize(n_dof_);
++  joint_damping_diag_.resize(n_dof_);
++  joint_vel_filter_coeff_.resize(n_dof_);
++  q_d_filtered_prev_.resize(n_dof_);
++  dq_d_desired_.resize(n_dof_);
++  q_d_filtered_prev_.setZero();
++  dq_d_desired_.setZero();
++  for (size_t i = 0; i < n_dof_; ++i) {
++    double k = (i < config_.joint_stiffness.size()) ? config_.joint_stiffness[i] : 0.0;
++    double d = (i < config_.joint_damping.size())   ? config_.joint_damping[i]   : 0.0;
++    double a = (i < config_.joint_vel_filter_coeff.size()) ? config_.joint_vel_filter_coeff[i] : 30.0;
++    joint_stiffness_diag_.diagonal()(i)   = k;
++    joint_damping_diag_.diagonal()(i)     = d;
++    joint_vel_filter_coeff_.diagonal()(i) = a;
++  }
++
+   initialized_ = true;
+   RCLCPP_INFO(node_->get_logger(),
+               "CartesianImpedanceController initialized: nq=%zu, n_dof=%zu, ee=%s",
+@@ -790,6 +828,199 @@
+   return g_sub_live_;
+ }
+ 
++void CartesianImpedanceController::shareRobotData(
++    std::shared_ptr<pinocchio::Data> shared) {
++  robot_data_ = std::move(shared);
++  skip_compute_all_terms_ = true;
++}
++
++void CartesianImpedanceController::forceUpdateRobot(
++    const VectorXd& q_full, const VectorXd& dq_full) {
++  if (!initialized_) return;
++  q_full_cache_ = q_full;
++  dq_full_cache_ = dq_full;
++  if (efforts_full_cache_.size() < q_full.size()) {
++    efforts_full_cache_ = VectorXd::Zero(q_full.size());
++  }
++  // 无论是否共享 robot_data_, robot_q_/robot_dq_ 必须每帧更新
++  // (阻抗 Kp/Kd 反馈依赖它们). computeAllTerms+updateFramePlacements
++  // 只在非共享模式下执行 (左臂做一次, 右臂从共享 Data 读).
++  for (size_t i = 0; i < n_dof_; ++i) {
++    robot_q_(i) = q_full_cache_(controlled_q_idx_[i]);
++    robot_dq_(i) = dq_full_cache_(controlled_v_idx_[i]);
++    if (has_effort_states_) {
++      robot_efforts_(i) = efforts_full_cache_(controlled_v_idx_[i]);
++    }
++  }
++  if (skip_compute_all_terms_) {
++    return;
++  }
++  pinocchio::computeAllTerms(robot_model_, *robot_data_, q_full_cache_,
++                             dq_full_cache_);
++  robot_data_->M.triangularView<Eigen::StrictlyLower>() =
++      robot_data_->M.transpose().triangularView<Eigen::StrictlyLower>();
++  pinocchio::updateFramePlacements(robot_model_, *robot_data_);
++}
++
++const VectorXd& CartesianImpedanceController::computeGravityCached() {
++  if (!initialized_) {
++    if (g_sub_live_.size() != n_dof_) g_sub_live_.setZero(n_dof_);
++    return g_sub_live_;
++  }
++  if (g_sub_live_.size() != n_dof_) g_sub_live_.resize(n_dof_);
++  for (size_t i = 0; i < n_dof_; ++i) {
++    g_sub_live_(i) = kt_gravity_(i) * robot_data_->g(controlled_v_idx_[i]);
++  }
++  return g_sub_live_;
++}
++
++void CartesianImpedanceController::updateNoRobot(
++    const VectorXd& q_full, const VectorXd& dq_full,
++    const VectorXd& efforts_full, const Vector6d& sensor_wrench,
++    double dt) {
++  if (!initialized_) return;
++  // 跳过 updateRobot(), 假设外部已 forceUpdateRobot() 更新过缓存.
++  delta_t_ = (dt > 1e-6) ? dt : 0.001;
++
++  ee_rotation_in_base_ = robot_data_->oMf[ee_frame_].rotation();
++
++  Vector6d wrench_in_base;
++  const Eigen::Matrix3d R_sensor_base = ee_rotation_in_base_ * R_sensor_to_ee_;
++  const Eigen::Vector3d F_in_base = R_sensor_base * sensor_wrench.head<3>();
++  const Eigen::Vector3d M_in_base = R_sensor_base * sensor_wrench.tail<3>();
++  const Eigen::Vector3d r_sensor_in_base = ee_rotation_in_base_ * t_sensor_in_ee_;
++  wrench_in_base.head<3>() = F_in_base;
++  wrench_in_base.tail<3>() = M_in_base + r_sensor_in_base.cross(F_in_base);
++
++  wrench_in_base -= computeToolGravityInBase();
++
++  if (has_sensor_bias_) {
++    wrench_in_base -= sensor_wrench_bias_in_base_;
++  }
++  sensor_wrench_ = wrench_in_base;
++
++  updateDeviationAndReference();
++  updateEffortCommands();
++  publishStatus();
++}
++
++void CartesianImpedanceController::setMode(ImpedanceMode mode) {
++  if (!initialized_) return;
++  if (mode_ == mode) return;
++  mode_ = mode;
++
++  // 双向切换通用: 全链路 reset reference + 本地状态 → 当前实际值,
++  // 关闭外部输入闸门, 零初始偏差, 零飞车风险.
++  // resetReferenceAndStateToActual() 内部已处理:
++  //   - position/quaternion/twist/accel target+filtered → 当前实际
++  //   - q_d_nullspace_target/filtered → robot_q_
++  //   - reference_ 本体 → 同步
++  //   - rt_reference_ (加锁) → 同步
++  //   - rt_reference_valid_ = false → 关闭 trajectory_planner 覆盖
++  resetReferenceAndStateToActual();
++
++  if (mode == ImpedanceMode::CARTESIAN) {
++    // JOINT → CARTESIAN 独有: JOINT 模式下积分器/哈密顿量/实际加速度
++    // 没在笛卡尔空间使用过, 切回 CARTESIAN 时清零防止残留尖峰.
++    q_integral_accum_.setZero();
++    clearExternalWrench();
++    hamiltonian_ = 0;
++    hamiltonian_filtered_ = 0;
++    hamiltonian_last_ = 0;
++    hamiltonian_derivative_ = 0;
++    actual_accel_.setZero();
++    actual_twist_last_.setZero();
++  }
++
++  RCLCPP_INFO(node_->get_logger(),
++              "[Impedance] %s switched to %s mode",
++              config_.ee_link.c_str(),
++              mode == ImpedanceMode::JOINT ? "JOINT" : "CARTESIAN");
++}
++
++void CartesianImpedanceController::resetReferenceAndStateToActual() {
++  // ① 计算当前实际 TCP 位姿: 直接从 robot_data_->oMf[ee_frame_] 算,
++  //    比缓存 p_tcp_in_base_ 更及时 (缓存在 updateDeviationAndReference 里
++  //    才更新, 比 forceUpdateRobot 晚一拍).
++  //    注: 若本函数在 forceUpdateRobot 之前被异步调用 (ROS2 callback),
++  //    robot_data_->oMf 是上一帧的值, 误差 ≤ 1ms 运动, 完全可接受.
++  const Eigen::Vector3d p_ee_now = robot_data_->oMf[ee_frame_].translation();
++  const Eigen::Matrix3d& R_ee_now = robot_data_->oMf[ee_frame_].rotation();
++  const Eigen::Vector3d p_tcp_now = p_ee_now + R_ee_now * t_ee_in_tcp_;
++  Eigen::Quaterniond q_tcp_now(R_ee_now * R_ee_to_tcp_);
++  q_tcp_now.normalize();
++
++  // ② 本地 target/filtered → 当前实际值
++  position_d_target_    = p_tcp_now;
++  position_d_filtered_  = p_tcp_now;
++  orientation_d_target_  = q_tcp_now;
++  orientation_d_filtered_ = q_tcp_now;
++  desired_twist_target_.setZero();
++  desired_twist_filtered_.setZero();
++  desired_pose_accel_target_.setZero();
++  desired_pose_accel_filtered_.setZero();
++
++  q_d_nullspace_target_   = robot_q_;
++  q_d_nullspace_filtered_ = robot_q_;
++  q_d_filtered_prev_      = robot_q_;
++  dq_d_desired_.setZero();
++
++  // ③ 同步 reference_ 本体 (当前帧 updateDeviationAndReference 会读它)
++  reference_.pose.position.x = p_tcp_now.x();
++  reference_.pose.position.y = p_tcp_now.y();
++  reference_.pose.position.z = p_tcp_now.z();
++  reference_.pose.orientation.w = q_tcp_now.w();
++  reference_.pose.orientation.x = q_tcp_now.x();
++  reference_.pose.orientation.y = q_tcp_now.y();
++  reference_.pose.orientation.z = q_tcp_now.z();
++  reference_.pose_twist.linear.x  = 0.0;
++  reference_.pose_twist.linear.y  = 0.0;
++  reference_.pose_twist.linear.z  = 0.0;
++  reference_.pose_twist.angular.x = 0.0;
++  reference_.pose_twist.angular.y = 0.0;
++  reference_.pose_twist.angular.z = 0.0;
++  reference_.pose_accel.linear.x  = 0.0;
++  reference_.pose_accel.linear.y  = 0.0;
++  reference_.pose_accel.linear.z  = 0.0;
++  reference_.pose_accel.angular.x = 0.0;
++  reference_.pose_accel.angular.y = 0.0;
++  reference_.pose_accel.angular.z = 0.0;
++  const size_t n = std::min(static_cast<size_t>(n_dof_), size_t{7});
++  for (size_t i = 0; i < n; ++i) {
++    reference_.q_d_nullspace[i] = (i < robot_q_.size()) ? robot_q_(i) : 0.0;
++  }
++
++  // ④ 同步 rt_reference_ + 关闭闸门 (同一把锁内原子完成, 缩小与
++  //    reference_sub_ 回调的 race 窗口). 即使回调在本锁释放后立即
++  //    抢锁写回旧 trajectory_planner 消息并 store(true), updateDeviation
++  //    在当前帧内仍会读到本地 target/default (已重置), 飞车风险被
++  //    else 分支彻底阻断 (else 分支不读 rt_reference_).
++  {
++    std::lock_guard<std::mutex> lock(rt_reference_mutex_);
++    rt_reference_.pose = reference_.pose;
++    rt_reference_.pose_twist = reference_.pose_twist;
++    rt_reference_.pose_accel = reference_.pose_accel;
++    for (size_t i = 0; i < n; ++i) {
++      rt_reference_.q_d_nullspace[i] = reference_.q_d_nullspace[i];
++    }
++    rt_reference_valid_.store(false, std::memory_order_release);
++    blank_reference_ = true;
++  }
++
++  // ⑥ 同步重置 default_ (使能时刻的基准位姿也得更新, 否则 else 分支会用旧 default_)
++  default_position_  = p_tcp_now;
++  default_quaternion_ = q_tcp_now;
++}
++
++void CartesianImpedanceController::setJointImpedanceGains(
++        const std::vector<double>& K, const std::vector<double>& D) {
++  if (!initialized_) return;
++  for (size_t i = 0; i < n_dof_ && i < K.size(); ++i)
++    joint_stiffness_diag_.diagonal()(i) = K[i];
++  for (size_t i = 0; i < n_dof_ && i < D.size(); ++i)
++    joint_damping_diag_.diagonal()(i) = D[i];
++}
++
+ void CartesianImpedanceController::updateRobot() {
+   // 提取控制关节子集到 robot_q_, robot_dq_, robot_efforts_
+   // 注意: pinocchio 的 q 索引按 idx_qs, dq 按 idx_v. 单 DoF revolute 关节 q_idx == v_idx
+@@ -912,6 +1143,76 @@
+ }
+ 
+ void CartesianImpedanceController::updateEffortCommands() {
++  // ================================================================
++  // === JOINT 空间阻抗路径 (mode=JOINT, 早返回, 跳过全部 J/FK/惯量整形) ===
++  // ================================================================
++  if (mode_ == ImpedanceMode::JOINT) {
++    // ① 重力补偿 (pinocchio 已在 updateRobot() 里 computeAllTerms)
++    for (size_t i = 0; i < n_dof_; ++i) {
++      g_sub_(i) = kt_gravity_(i) * robot_data_->g(controlled_v_idx_[i]);
++    }
++
++    // ② LuGre 摩擦前馈 (与 cartesian 路径完全同构, 共享 friction_torques_)
++    if (lugre_friction_.size() == n_dof_) {
++      const double alpha = config_.lugre_friction.dq_lpf_alpha;
++      const double dt_lugre = delta_t_;
++      for (size_t i = 0; i < n_dof_; ++i) {
++        if (i < lugre_enabled_.size() && !lugre_enabled_[i]) {
++          friction_torques_(i) = 0.0;
++          dq_filt_(i) = 0.0;
++          continue;
++        }
++        const double dq_raw = robot_dq_(i);
++        dq_filt_(i) = alpha * dq_raw + (1.0 - alpha) * dq_filt_(i);
++        friction_torques_(i) = lugre_friction_[i].step(dq_filt_(i), dt_lugre);
++      }
++    } else {
++      friction_torques_.setZero();
++    }
++
++    // ③ 关节空间阻抗: tau = K*(q_d - q) + D*(dq_d - dq)
++    VectorXd q_err  = q_d_nullspace_filtered_ - robot_q_;
++    VectorXd dq_err = dq_d_desired_ - robot_dq_;
++    VectorXd tau_imp_joint =
++        joint_stiffness_diag_ * q_err + joint_damping_diag_ * dq_err;
++
++    // ④ 摩擦补偿方向 (意图力矩 = tau_imp_joint)
++    Eigen::VectorXd intent_tau = tau_imp_joint;
++    for (size_t i = 0; i < n_dof_; ++i) {
++      const double th = (i < config_.lugre_friction.comp_torque_threshold.size())
++          ? config_.lugre_friction.comp_torque_threshold[i] : 0.0;
++      const double vs = (i < config_.lugre_friction.vs.size())
++          ? config_.lugre_friction.vs[i] : 0.01;
++      const double Fs = (i < config_.lugre_friction.Fs.size())
++          ? config_.lugre_friction.Fs[i] : 1.5;
++      const double abs_fric = std::abs(friction_torques_(i));
++      if (th > 0.0 && abs_fric > 1e-9) {
++        if (std::abs(robot_dq_(i)) < vs) {
++          friction_applied_(i) = Fs * std::tanh(th * robot_dq_(i) + intent_tau(i));
++        } else {
++          friction_applied_(i) = friction_torques_(i);
++        }
++      } else {
++        friction_applied_(i) = friction_torques_(i);
++      }
++    }
++
++    // ⑤ 合成 + 低通 + 力矩限幅
++    tau_desired_ = tau_imp_joint + g_sub_ + friction_applied_;
++    effort_commands_ = cmd_lpf_alpha_ * tau_desired_
++                     + (1.0 - cmd_lpf_alpha_) * effort_commands_;
++    for (size_t i = 0; i < n_dof_; ++i) {
++      double lim = effort_limit_per_joint_(i);
++      if (lim > 0.0)
++        effort_commands_(i) = std::clamp(effort_commands_(i), -lim, lim);
++    }
++    return;
++  }
++
++  // ================================================================
++  // === CARTESIAN 空间阻抗路径 (现有代码原样不动) ===
++  // ================================================================
++
+   // 雅克比阻尼伪逆 (DLS / Tikhonov):
+   //   J 是 (6, n_dof_), pinv(J) 是 (n_dof_, 6)
+   //   对 7DoF 冗余臂, J 是 6x7, pinv(J) 是 7x6
+@@ -967,7 +1268,7 @@
+   //   输出: 摩擦力矩估计 (正号: 抵消摩擦, 即 tau_desired_ += friction_torques_)
+   if (lugre_friction_.size() == n_dof_) {
+     const double alpha = config_.lugre_friction.dq_lpf_alpha;
+-    const double dt = 1.0 / config_.update_frequency;
++    const double dt_lugre = delta_t_;
+     for (size_t i = 0; i < n_dof_; ++i) {
+       if (i < lugre_enabled_.size() && !lugre_enabled_[i]) {
+         friction_torques_(i) = 0.0;
+@@ -977,7 +1278,7 @@
+       const double dq_raw = robot_dq_(i);
+       // 一阶低通: dq_filt = alpha*dq_raw + (1-alpha)*dq_filt
+       dq_filt_(i) = alpha * dq_raw + (1.0 - alpha) * dq_filt_(i);
+-      friction_torques_(i) = lugre_friction_[i].step(dq_filt_(i), dt);
++      friction_torques_(i) = lugre_friction_[i].step(dq_filt_(i), dt_lugre);
+     }
+   } else {
+     friction_torques_.setZero();
+@@ -1234,16 +1535,63 @@
+   effort_commands_ = cmd_lpf_alpha_ * tau_desired_ + (1.0 - cmd_lpf_alpha_) * effort_commands_;
+ 
+   // 关节力矩限幅 (对称限幅: |tau| <= effort_limit_per_joint_)
+-  //   防止阻抗在偏差突增 (如碰撞, 参考位姿突变) 时输出过大力矩
+-  //   限幅在低通滤波之后做, 确保注入到 EtherCAT 的最终值不超限
+   for (size_t i = 0; i < n_dof_; ++i) {
+     const double lim = effort_limit_per_joint_(i);
+-    if (lim > 0.0) {  // lim=0 视为不限制
++    if (lim > 0.0) {
+       double& v = effort_commands_(i);
+       if (v > lim)       v = lim;
+       else if (v < -lim) v = -lim;
+     }
+   }
++
++  // {
++  //   static int ctrl_tick2 = 0;
++  //   ctrl_tick2++;
++  //   if (ctrl_tick2 % 50 == 0) {
++  //     auto vstr = [](const Eigen::VectorXd& v) {
++  //       std::string s = "[";
++  //       for (int i = 0; i < v.size(); ++i) {
++  //         if (i > 0) s += ",";
++  //         char buf[32]; snprintf(buf, sizeof(buf), "%.3f", v(i));
++  //         s += buf;
++  //       }
++  //       s += "]";
++  //       return s;
++  //     };
++  //     RCLCPP_INFO(node_->get_logger(),
++  //       "\n===== [CtrlDiag %s tick=%d] =====\n"
++  //       "  has_ext=%d  pose_dev_rot_norm=%.4f  twist_dev_rot_norm=%.4f\n"
++  //       "  ext_wrench=[%.2f,%.2f,%.2f | %.2f,%.2f,%.2f]\n"
++  //       "  tau_imp=%s\n"
++  //       "  tau_ns=%s\n"
++  //       "  tau_integral=%s\n"
++  //       "  tau_accel_ff=%s\n"
++  //       "  tau_twist_comp=%s\n"
++  //       "  tau_grav=%s\n"
++  //       "  tau_fric_applied=%s\n"
++  //       "  >>> tau_desired=%s\n"
++  //       "  >>> effort_cmds=%s\n",
++  //       config_.ee_link.c_str(), ctrl_tick2,
++  //       has_external_wrench_ ? 1 : 0,
++  //       pose_deviation_.tail<3>().norm(), twist_deviation_.tail<3>().norm(),
++  //       has_external_wrench_ ? external_wrench_(0) : 0.0,
++  //       has_external_wrench_ ? external_wrench_(1) : 0.0,
++  //       has_external_wrench_ ? external_wrench_(2) : 0.0,
++  //       has_external_wrench_ ? external_wrench_(3) : 0.0,
++  //       has_external_wrench_ ? external_wrench_(4) : 0.0,
++  //       has_external_wrench_ ? external_wrench_(5) : 0.0,
++  //       vstr(impedance_torques_).c_str(),
++  //       vstr(nullspace_torques_).c_str(),
++  //       vstr(tau_integral_).c_str(),
++  //       vstr(accel_feedforward_).c_str(),
++  //       vstr(twist_compensation_).c_str(),
++  //       vstr(g_sub_).c_str(),
++  //       vstr(friction_applied_).c_str(),
++  //       vstr(tau_desired_).c_str(),
++  //       vstr(effort_commands_).c_str()
++  //     );
++  //   }
++  // }
+ 
+   computeHamiltonian();
+ }
+@@ -1339,10 +1687,14 @@
+     //        [3n..4n-1]=tau_integral_ (关节空间积分力矩, n_dof_ 维),
+     //        [4n..5n-1]=tau_desired_ (滤波前的期望力矩, n_dof_ 维),
+     //        [5n..5n+5]=impedance_wrench_ (笛卡尔阻抗 wrench, 6 维: Fx,Fy,Fz,Mx,My,Mz),
+-    //        [5n+6..6n+5]=lugre_z_ (LuGre bristle 变形状态 z, n_dof_ 维)
++    //        [5n+6..6n+5]=lugre_z_ (LuGre bristle 变形状态 z, n_dof_ 维),
++    //        [6n+6..7n+5]=q_d_nullspace_target_ (零空间关节目标, n_dof_ 维),
++    //        [7n+6..8n+5]=dq_d_desired_ (关节空间期望关节速度, n_dof_ 维)
+     const size_t off_wrench = 5 * n_dof_;
+     const size_t off_lugre_z = off_wrench + 6;
+-    effort_msg_.data.resize(off_lugre_z + n_dof_);
++    const size_t off_nullspace = off_lugre_z + n_dof_;
++    const size_t off_dq_d = off_nullspace + n_dof_;
++    effort_msg_.data.resize(off_dq_d + n_dof_);
+     for (size_t i = 0; i < n_dof_; ++i) {
+       effort_msg_.data[i]                 = effort_commands_(i);
+       effort_msg_.data[n_dof_ + i]        = friction_applied_(i);
+@@ -1350,6 +1702,8 @@
+       effort_msg_.data[3 * n_dof_ + i]    = tau_integral_(i);
+       effort_msg_.data[4 * n_dof_ + i]    = tau_desired_(i);
+       effort_msg_.data[off_lugre_z + i]   = (i < lugre_friction_.size()) ? lugre_friction_[i].z() : 0.0;
++      effort_msg_.data[off_nullspace + i] = q_d_nullspace_target_(i);
++      effort_msg_.data[off_dq_d + i]      = dq_d_desired_(i);
+     }
+     for (int i = 0; i < 6; ++i) {
+       effort_msg_.data[off_wrench + i] = impedance_wrench_(i);
+@@ -1577,6 +1931,14 @@
+   // 清除外部 wrench 注入, 恢复为内部 K*dx+D*dv 阻抗模式
+   clearExternalWrench();
+ 
++  // === 关节空间阻抗状态重置 (无论之前是否切过 mode, enable 后都从干净状态开始) ===
++  //   enable 已将 q_d_nullspace_filtered_ 重置为 robot_q_, 这里同步:
++  //   q_d_filtered_prev_ = q_d_nullspace_filtered_  → 上一帧 = 当前实际关节角
++  //   dq_d_desired_ = 0                              → 期望速度初值 = 0
++  //   这样无论 setMode 在 enable 之前还是之后调用, 第一帧都不会出现速度尖峰
++  q_d_filtered_prev_ = q_d_nullspace_filtered_;
++  dq_d_desired_.setZero();
++
+   RCLCPP_INFO(node_->get_logger(),
+               "Impedance enabled: ee_pos=[%.3f, %.3f, %.3f], "
+               "residual_bias_base=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+@@ -1700,10 +2062,8 @@
+     ref.pose_twist = geometry_msgs::msg::Twist{};
+   }
+   ref.pose_accel = geometry_msgs::msg::Accel{};
+-  VectorXd q_ik_result;
+-  computeIk(T_desired, q_ik_last_, q_ik_result);
+   for (size_t i = 0; i < n_dof_ && i < 7; ++i) {
+-    ref.q_d_nullspace[i] = q_ik_result(i);
++    ref.q_d_nullspace[i] = q_d_nullspace_filtered_(i);
+   }
+   setReference(ref);
+ }
+@@ -1769,7 +2129,7 @@
+     desired_twist_filtered_ = desired_twist_target_;
+     desired_pose_accel_filtered_ = desired_pose_accel_target_;
+   } else {
+-    const double step = computeFilterStep(filter_params_pose_, update_frequency_);
++    const double step = computeFilterStep(filter_params_pose_, 1.0 / delta_t_);
+ 
+     position_d_filtered_.x() =
+         filteredUpdate(position_d_target_.x(), position_d_filtered_.x(), filter_params_pose_/*step*/);
+@@ -1795,12 +2155,27 @@
+     q_d_nullspace_filtered_ = q_d_nullspace_target_;
+   } else {
+     const double step =
+-        computeFilterStep(filter_params_nullspace_, update_frequency_);
++        computeFilterStep(filter_params_nullspace_, 1.0 / delta_t_);
+     for (size_t i = 0; i < n_dof_; ++i) {
+       q_d_nullspace_filtered_(i) = filteredUpdate(
+           q_d_nullspace_target_(i), q_d_nullspace_filtered_(i), filter_params_pose_/*step*/);
+     }
+   }
++
++  // === 关节空间期望速度 (mode=JOINT 时使用) ===
++  //   滤波微分 (比直接差分抗噪好很多):
++  //     q_f[k]  = exp(-a*dt) * q_f[k-1] + (1 - exp(-a*dt)) * q_d[k]    // 一阶低通
++  //     dq_d[k] = (q_d[k] - q_f[k]) * a                                // ≈ dq/dt
++  //   截止频率 fc = a / (2π)，a=30 → fc≈4.8Hz, a=50 → fc≈8Hz
++  if (mode_ == ImpedanceMode::JOINT && delta_t_ > 1e-6) {
++    for (size_t i = 0; i < n_dof_; ++i) {
++      const double a = joint_vel_filter_coeff_.diagonal()(i);
++      const double exp_decay = std::exp(-a * delta_t_);
++      q_d_filtered_prev_(i) = exp_decay * q_d_filtered_prev_(i)
++                            + (1.0 - exp_decay) * q_d_nullspace_filtered_(i);
++      dq_d_desired_(i) = (q_d_nullspace_filtered_(i) - q_d_filtered_prev_(i)) * a;
++    }
++  }
+ }
+ 
+ }  // namespace snowbot_impedance
+--- a/ctl_msgs/config/impedance_params.yaml
++++ b/ctl_msgs/config/impedance_params.yaml
+@@ -39,11 +39,21 @@
+ #   nullspace_damping        标量, 零空间阻尼 [Nm*s/rad]
+ #   零空间期望构型在使能时自动捕获当前关节角, 上位机可通过话题覆盖
+ #
++# 控制模式 (impedance 顶层字段, 运行时也可通过 ~/impedance_mode 话题切换):
++#   mode: "cartesian"   操作空间阻抗 (默认, 需要 FK / Jacobian / F/T 传感器)
++#         "joint"      关节空间阻抗 (仅需关节状态, 期望关节角复用 q_d_nullspace,
++#                      期望关节速度通过离散微分自动计算; 跳过所有 J/FK/F/T 处理)
++#
++# 关节空间阻抗参数 (mode=joint 时生效, 逐 side 配置):
++#   joint_stiffness  7 维, 关节刚度 [Nm/rad], 如 [50.0, 50.0, 50.0, 50.0, 30.0, 30.0, 30.0]
++#   joint_damping    7 维, 关节阻尼 [Nm·s/rad], 如 [5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 3.0]
++#   未配置时默认全 0 (纯位置保持, 无阻抗)
++#
+ # 参考信号滤波 (匹配上位机低频下发与 1kHz 控制周期):
+ #   filter_params_pose        0~1, 末端位姿滤波百分比 (越大跟随越快, 1=不滤波)
+ #   filter_params_nullspace  0~1, 零空间构型滤波百分比
+ # 实际滤波步长 step = 1 / (kappa * f + 1), kappa = -1/log(1-p),
+-# 其中 f=update_frequency, p=filter_params_xxx.
++# 其中 f = 控制循环实际频率 (由 servo_node 时间戳自适应, 非硬编码).
+ # 经验值: 上位机 50 Hz, 控制器 1 kHz, filter=0.95 时对应截止频率约 6 Hz.
+ #
+ # 工具重力实时补偿:
+@@ -70,6 +80,10 @@
+ #      D = 2*sqrt(M*K) * damping_ratio (代码内会自动计算阻尼比);
+ 
+ impedance:
++  # 控制模式: "cartesian" (默认, 操作空间阻抗) | "joint" (关节空间阻抗)
++  # 运行时也可通过 ROS 话题 ~/impedance_mode 切换 (双臂同步)
++  mode: joint
++
+   left:
+     # 可选: 在此处覆盖 URDF 路径和 link 名 (默认值见 makeDefault)
+     # urdf_path: /path/to/snowbot.urdf
+@@ -135,9 +149,9 @@
+     #   禁用: enable 设为 0 或所有参数填 0
+     lugre_friction:
+       enable:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # 逐关节开关 (>0.5 启用)
+-      sigma0:  [3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3]
++      sigma0:  [1.0e3, 1.0e3, 1.0e3, 1.0e3, 1.0e3, 1.0e3, 1.0e3]
+       sigma1:  [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
+-      sigma2:  [12.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
++      sigma2:  [8.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
+       Fs: [13.0, 8.0, 7.0, 8.0, 4.0, 4.0, 4.0]   # 7 维: 逐关节静摩擦
+       Fc: [12.0, 7.5, 6.5, 7.5, 3.5, 3.5, 3.5]   # 7 维: 逐关节库仑摩擦
+       vs: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]  # 7 维: 逐关节 Stribeck 速度
+@@ -152,12 +166,25 @@
+     # nullspace_damping:   10.0
+ 
+     # 参考信号滤波 (0~1, 1=不滤波, 越小越平滑但跟随延迟越大)
+-    filter_params_pose:       0.1   # 末端位姿
+-    filter_params_nullspace:  0.1   # 零空间构型
+-    # 控制器实际运行频率 [Hz] 
+-    #   必须与 servo_node 实际控制周期一致, 否则滤波系数与采样率不匹配
+-    #   1000 Hz = 1ms 周期 (servo_node 默认)
+-    update_frequency: 1000.0
++    filter_params_pose:       0.2   # 末端位姿
++    filter_params_nullspace:  0.2   # 零空间构型
++
++    # === 关节空间阻抗参数 (mode=joint 时生效) ===
++    #   joint_stiffness: 7 维逐关节刚度 [Nm/rad]
++    #   joint_damping:   7 维逐关节阻尼 [Nm·s/rad]
++    #   joint_vel_filter_coeff: 7 维逐关节期望速度滤波微分系数 a
++    #     a=30 → fc≈4.8Hz, a=50 → fc≈8Hz, a=100 → fc≈16Hz (缺省 30.0)
++    #   未配置时 stiffness/damping 默认全 0, coeff 默认 30.0
++    # joint_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
++    # joint_damping:   [0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
++    # joint_stiffness: [400.0, 400.0, 400.0, 400.0, 400.0, 400.0, 400.0]
++    # joint_damping:   [40.0,  40.0,  40.0,  40.0,  40.0,  40.0,  40.0]
++    joint_stiffness: [1200.0, 1200.0, 1200.0, 1200.0, 400.0, 400.0, 400.0]
++    joint_damping:   [120.0,  120.0,  120.0,  120.0,  40.0,  40.0,  40.0]
++    joint_vel_filter_coeff: [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
++    # joint_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
++    # joint_damping:   [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
++    # joint_vel_filter_coeff: [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
+ 
+     # === 静差消除 === (左臂 stiffness=0, 积分和力闭环也禁用)
+     integral_gain_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+@@ -209,24 +236,37 @@
+     # LuGre 动态摩擦补偿 (见左臂说明)
+     lugre_friction:
+       enable:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+-      sigma0:  [3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3, 3.0e3]
++      sigma0:  [1.0e3, 1.0e3, 1.0e3, 1.0e3, 1.0e3, 1.0e3, 1.0e3]
+       sigma1:  [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
+-      sigma2:  [12.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
++      sigma2:  [8.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
+       Fs: [13.0, 8.0, 8.0, 8.0, 4.0, 4.0, 4.0]
+       Fc: [12.0, 7.5, 7.5, 7.5, 3.5, 3.5, 3.5]
+       vs: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+       dq_lpf_alpha: 0.3
+       # comp_torque_threshold: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+-      comp_torque_threshold: [150.0, 200.0, 200.0, 200.0, 150.0, 150.0, 150.0]
++      comp_torque_threshold: [150.0, 200.0, 200.0, 200.0, 150.0, 150.0, 200.0]
+     nullspace_stiffness: 100.0
+     nullspace_damping:   20.0
+     # nullspace_stiffness: 30.0
+     # nullspace_damping:   10.0
+     # nullspace_stiffness: 0.0
+     # nullspace_damping:   0.0
+-    filter_params_pose:       0.1
+-    filter_params_nullspace:  0.1
+-    update_frequency:         1000.0
++    filter_params_pose:       0.2
++    filter_params_nullspace:  0.2
++
++    # === 关节空间阻抗参数 (mode=joint 时生效) ===
++    #   joint_stiffness: 7 维逐关节刚度 [Nm/rad]
++    #   joint_damping:   7 维逐关节阻尼 [Nm·s/rad]
++    #   joint_vel_filter_coeff: 7 维逐关节期望速度滤波微分系数 a
++    #     a=30 → fc≈4.8Hz, a=50 → fc≈8Hz, a=100 → fc≈16Hz (缺省 30.0)
++    #   未配置时 stiffness/damping 默认全 0, coeff 默认 30.0
++    # joint_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
++    # joint_damping:   [0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
++    # joint_stiffness: [400.0, 400.0, 400.0, 400.0, 400.0, 400.0, 400.0]
++    # joint_damping:   [40.0,  40.0,  40.0,  40.0,  40.0,  40.0,  40.0]
++    joint_stiffness: [1200.0, 1200.0, 1200.0, 1200.0, 400.0, 400.0, 400.0]
++    joint_damping:   [120.0,  120.0,  120.0,  120.0,  40.0,  40.0,  40.0]
++    joint_vel_filter_coeff: [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
+ 
+     # === 静差消除 ===
+     # 方案1: 关节空间泄漏积分 (对常值扰动零静差, 仅自由空间开启)
+@@ -316,21 +356,54 @@
+ #   stiffness: [fx fy fz mx my mz] (N/m, N·m/rad)
+ #   damping:   [fx fy fz mx my mz] (N·s/m, N·m·s/rad)
+ #
++# 物体重力补偿 (可选, 默认 mass=0 → 关闭):
++#   mass:       被抓物体总质量 [kg], 0 或省略 = 不补偿 (向后兼容旧配置)
++#   com_in_trp: 物体质心在 TRP 局部坐标系下的固定位置 [m], 默认 [0,0,0] (质心与 TRP 重合)
++#
++#   物理原理 (牛顿第二定律, base frame, TRP 点定义 wrench):
++#     双臂施加力 F_arms + 重力 F_g = 阻抗要求的净力 F_obj (= m·a)
++#     → F_arms = F_obj - F_g
++#     即阻抗控制器的 F_obj 是"物体需要的净力", 重力自然帮忙了一部分,
++#     双臂只需补齐剩下的 (补偿后的 F_obj 就是双臂应施加的净力).
++#
++#     F_g (base 下永远向下) = [0, 0, -m*g]
++#     r_com_base = R_trp * com_in_trp (质心相对 TRP 在 base 下的位置)
++#     M_g = r_com_base × F_g (重力绕 TRP 的力矩, 手臂倾斜时自动产生反扭力矩)
++#
++#   示例 (夹持 1.5kg 物体, TRP 选在物体中心, 质心在 TRP 正下方 5cm):
++#     object_impedance:
++#       stiffness: [200.0, 200.0, 200.0, 20.0, 20.0, 20.0]
++#       damping:   [20.0, 20.0, 20.0, 5.0, 5.0, 5.0]
++#       mass: 1.5
++#       com_in_trp: [0.0, 0.0, -0.05]    # TRP 局部系下, 质心在 TRP 正下方 5cm
++#
+ # Step 5 - internal_force (可选, 默认全零 → 关闭, 纯对称分配 = Step 4 行为):
+-#   Full 3D PD 控制器, 监测双臂相对位姿/速度偏差 (运动学代理).
+-#   叠加后合力恒为零, 不影响物体级阻抗的平移/旋转.
+-#   比 1D PI 更优: 检测全方向相对滑移/漂移 (刚体夹持假设完整相对位姿恒定).
+-#
++#   Full 6D PD 控制器, 监测双臂相对位姿 (位置 + 姿态) / 速度偏差.
++#   叠加后合力/合力矩恒为零, 不影响物体级阻抗的平移/旋转.
++#   比 1D PI 更优: 检测全方向相对滑移/漂移 + 相对扭转.
++#
++#   === 平移部分 ===
+ #   kp:          P 增益 (N/m), 逐轴独立. 建议远小于 object_stiffness (<20).
+ #                支持标量 [5.0] 或三维 [5.0 5.0 5.0].
+ #   kd:          D 增益 (N·s/m), 抑制相对运动振荡. 建议 kp 的 1/5 ~ 1/3.
+-#   max_wrench:  每轴输出限幅 (N), 防内力过大挤坏物体.
+-#
+-#   示例 (软夹持小物体, 保持轻握 + 抗滑移):
++#
++#   === 旋转部分 (可选) ===
++#   kp_rot:      扭转 P 增益 (N·m/rad), 逐轴独立. 默认零 → 旋转内力关闭.
++#   kd_rot:      扭转 D 增益 (N·m·s/rad), 抑制相对角速度振荡.
++#
++#   === 输出限幅 ===
++#   max_force:   每轴力限幅 (N), 防内力过大挤坏物体. 优先于 max_wrench.
++#   max_torque:  每轴力矩限幅 (N·m), 防扭转力矩过大.
++#   max_wrench:  旧字段别名 (= max_force), 向后兼容.
++#
++#   示例 (软夹持小物体, 保持轻握 + 抗滑移 + 抗扭转):
+ #     internal_force:
+-#       kp: [5.0, 5.0, 5.0]   # 或直接 5.0 (各轴相同)
+-#       kd: [1.5, 1.5, 1.5]
+-#       max_wrench: 10.0
++#       kp: [5.0, 5.0, 5.0]             # 平移刚度
++#       kd: [1.5, 1.5, 1.5]             # 平移阻尼
++#       kp_rot: [2.0, 2.0, 2.0]         # 扭转刚度 (可选)
++#       kd_rot: [0.5, 0.5, 0.5]         # 扭转阻尼 (可选)
++#       max_force: 10.0                  # 力限幅 N
++#       max_torque: 5.0                  # 力矩限幅 N·m
+ #
+ # 目标位姿: 通过 ROS 话题下发 (可选)
+ #   ~/dual_arm/trp_reference  (geometry_msgs/PoseStamped)
+@@ -342,18 +415,46 @@
+   max_grasp_deviation: 0.4    # ±2cm 刚性夹持安全阈值, 软体可调大
+   # 以下默认全注释 / 零 → Step 5 内力控制关闭, 纯对称分配 (Step 4 行为)
+   internal_force:
+-    kp: [100.0, 100.0, 100.0]     # Full 3D PD (或标量 5.0 各轴相同)
+-    kd: [20.0, 20.0, 20.0]     # 约 kp 的 1/3, 抑制相对振荡
+-    max_wrench: 20.0        # 每轴限幅 (N)
++    # kp: [100.0, 100.0, 100.0]     # 平移 P (N/m)
++    # kd: [20.0, 20.0, 20.0]        # 平移 D (N·s/m)
++    # kp_rot: [50.0, 50.0, 50.0]       # 扭转 P (N·m/rad, 默认零=关闭旋转内力)
++    # kd_rot: [10.0, 10.0, 10.0]       # 扭转 D (N·m·s/rad)
++    kp: [1.0, 1.0, 1.0]     # 平移 P (N/m)
++    kd: [1.0, 1.0, 1.0]        # 平移 D (N·s/m)
++    kp_rot: [1.0, 1.0, 1.0]       # 扭转 P (N·m/rad, 默认零=关闭旋转内力)
++    kd_rot: [1.0, 1.0, 1.0]       # 扭转 D (N·m·s/rad)
++    # kp: [0.0, 0.0, 0.0]     # 平移 P (N/m)
++    # kd: [0.0, 0.0, 0.0]        # 平移 D (N·s/m)
++    # kp_rot: [0.0, 0.0, 0.0]       # 扭转 P (N·m/rad, 默认零=关闭旋转内力)
++    # kd_rot: [0.0, 0.0, 0.0]       # 扭转 D (N·m·s/rad)
++    max_force: 20.0               # 力限幅 (N)
++    max_torque: 20.0              # 力矩限幅 (N·m)
+   object_impedance:
+     trp_geometry:
++      # left_tcp_to_trp:
++      #   position: [0.0, -0.25, 0.0]
++      #   orientation: [0.0, 0.0, 0.0]
++      # right_tcp_to_trp:
++      #   position: [0.0,  0.25, 0.0]
++      #   orientation: [0.0, 0.0, 0.0]
+       left_tcp_to_trp:
+-        position: [0.0, 0.0, 0.0]
+-        orientation: [0.0, 0.0, 0.0]
++        position: [0.0, 0.0, -0.25]
++        orientation: [1.570, 0.0, 0.0]
+       right_tcp_to_trp:
+-        position: [0.0, 0.0, 0.0]
+-        orientation: [0.0, 0.0, 0.0]
++        position: [0.0,  0.0, -0.25]
++        orientation: [-1.570, 0.0, 0.0]
+     # stiffness: [200.0, 200.0, 200.0, 20.0, 20.0, 20.0]
+     # damping:   [20.0,  20.0,  20.0,  5.0,  5.0,  5.0]
+-    stiffness: [2.0, 2.0, 2.0, 0.20, 0.20, 0.20]
+-    damping:   [2.0,  2.0,  2.0,  0.50,  0.50,  0.50]
++    # stiffness: [2.0, 2.0, 2.0, 0.20, 0.20, 0.20]
++    # damping:   [2.0,  2.0,  2.0,  0.50,  0.50,  0.50]
++    # stiffness: [200.0, 200.0, 200.0, 20.0, 20.0, 20.0]
++    # damping:   [30.0,  30.0,  30.0,  10.0,  10.0,  10.0]
++    # stiffness: [2000.0, 2000.0, 2000.0, 0.0, 0.0, 0.0]
++    # damping:   [200.0,  200.0,  200.0,  0.0,  0.0,  0.0]
++    # stiffness: [20.0, 20.0, 20.0, 200.0, 200.0, 200.0]
++    # damping:   [10.0,  10.0,  10.0,  30.0,  30.0,  30.0]
++    stiffness: [2000.0, 2000.0, 2000.0, 200.0, 200.0, 200.0]
++    damping:   [200.0,  200.0,  200.0,  30.0,  30.0,  30.0]
++    # 物体重力补偿 (可选, 默认 mass=0 → 关闭)
++    mass: 0.0                        # 被抓物体总质量 [kg], 0 = 不补偿
++    com_in_trp: [0.0, 0.0, 0.0]     # 物体质心在 TRP 局部系下的位置 [m], 默认与 TRP 重合

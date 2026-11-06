@@ -1,0 +1,861 @@
+--- a/servo_control/include/position_trajectory.h
++++ b/servo_control/include/position_trajectory.h
+@@ -409,3 +409,3 @@
+ public:
+- struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;double prepare_us=0.;};
++ struct Result {typename Packet::SharedPtr packet,origin,retired_packet;AdmissionContext context{};ServoCommand command{};std::unique_ptr<TrajectoryQueue::Prepared> prepared;TargetSnapshot snapshot{};std::string error;double prepare_us=0.;bool shutdown=false;int64_t completed_ns=0;};
+ private:
+@@ -416,2 +416,3 @@
+  std::array<typename Packet::SharedPtr,64> deferred_{};std::atomic<unsigned> deferred_read_{0},deferred_write_{0};
++ bool shutdown_=false;double shutdown_timeout_=0.;
+  std::thread worker_;
+@@ -429,9 +430,16 @@
+    }
+-   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;
++   auto result=new Result;result->packet=std::move(input_);result->origin=std::move(origin_);result->context=context_;result->snapshot=snapshot_;result->shutdown=shutdown_;
+    const auto began=std::chrono::steady_clock::now();
+-   try{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());}}
++   try{if(result->shutdown){
++    using namespace bindu::execution;
++    JointLimits limits;for(unsigned i=0;i<joint_count;++i)limits.push_back({lower[i],upper[i],limits_[0],limits_[1],limits_[2]});
++    JointState seed;seed.q.assign(snapshot_.q.begin(),snapshot_.q.end());seed.v.assign(snapshot_.v.begin(),snapshot_.v.end());seed.a.assign(snapshot_.a.begin(),snapshot_.a.end());seed.j.assign(joint_count,0.);
++    result->prepared=std::make_unique<TrajectoryQueue::Prepared>();
++    result->prepared->segment=std::make_unique<const PreparedSegment>(PreparedSegment::stop(limits,seed,0.,shutdown_timeout_));
++   }else{if(inspect_)inspect_(*result);if(!result->command.derived){if(result->packet->trajectory.version>=4)result->prepared=TrajectoryQueue::prepare_replay(result->packet->trajectory,meta(result->packet->meta),result->snapshot,limits_[0],limits_[1],limits_[2]);else result->prepared=TrajectoryQueue::prepare_target(result->packet->trajectory,meta(result->packet->meta),result->snapshot,result->command.target,limits_[0],limits_[1],limits_[2],queue_.tuning());}}}
+    catch(const std::exception& e){result->error=e.what();}catch(...){result->error="trajectory_import_exception";}
++   result->completed_ns=steady_ns();
+    result->prepare_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-began).count();
+    // Observation-only callback; its failure cannot alter control acceptance.
+-   if(report_)try{report_(*result);}catch(...){}
++   if(report_ && !result->shutdown)try{report_(*result);}catch(...){}
+    completed_.store(result,std::memory_order_release);
+@@ -445,3 +453,9 @@
+   if(busy_.exchange(true,std::memory_order_acq_rel))return false;
+-  input_=std::move(packet);origin_=std::move(origin);context_=context;snapshot_=snapshot;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
++  shutdown_=false;input_=std::move(packet);origin_=std::move(origin);context_=context;snapshot_=snapshot;limits_={velocity,acceleration,jerk};ready_.store(true,std::memory_order_release);return true;
++ }
++ bool submit_shutdown(const TargetSnapshot& seed,
++   double velocity,double acceleration,double jerk,double timeout)noexcept{
++  if(busy_.exchange(true,std::memory_order_acq_rel))return false;
++  shutdown_=true;snapshot_=seed;shutdown_timeout_=timeout;limits_={velocity,acceleration,jerk};
++  ready_.store(true,std::memory_order_release);return true;
+  }
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -165,2 +165,3 @@
+         void run();
++        int exit_code() const { return shutdown_exit_code_; }
+
+@@ -220,2 +221,14 @@
+         position_session::Output position_output_;
++        // Local shutdown reuses the existing admission worker.
++        enum ShutdownPhase { ShutdownIdle,ShutdownPlanning,ShutdownStopping,ShutdownDisabling,ShutdownDone };
++        ShutdownPhase shutdown_phase_=ShutdownIdle;
++        position_session::TargetSnapshot shutdown_seed_;
++        bool shutdown_requested_=false;
++        int64_t shutdown_start_=0,shutdown_deadline_=0,shutdown_settled_=0;
++        std::unique_ptr<const bindu::execution::PreparedSegment> shutdown_brake_;
++        std::string shutdown_error_;
++        int shutdown_exit_code_=0;
++        void position_startup();
++        bool position_shutdown_tick();
++        bool position_shutdown_control(double dt);
+         uint64_t position_frame_=0;
+@@ -334,3 +347,2 @@
+         //回零控制变量
+-        JointPos_Init retZero_Init;
+
+@@ -383,3 +395,2 @@
+
+-        bool ifShallInit = true;
+
+--- a/servo_control/include/servo_control/ethercat_driver.h
++++ b/servo_control/include/servo_control/ethercat_driver.h
+@@ -198,3 +198,3 @@
+     int cycle_count_;
+-    std::atomic<bool> motor_enable_{true};  // 电机使能: true=使能, false=抱闸
++    std::atomic<bool> motor_enable_{false};  // 默认不请求使能；实际抱闸状态另行确认
+     std::atomic<bool> motor_enable_mask_[TOTAL_SLAVES]{};  // 单电机使能 mask
+--- a/servo_control/include/servo_control/position_observation.h
++++ b/servo_control/include/servo_control/position_observation.h
+@@ -31,2 +31,3 @@
+ struct Observation {
++ bool shutdown_disabled=false;
+  CycleFault cycle_fault{};
+--- a/servo_control/include/servo_control/position_watchdog.h
++++ b/servo_control/include/servo_control/position_watchdog.h
+@@ -4,2 +4,3 @@
+ struct Output {
++ bool shutdown=false,shutdown_disable=false;int64_t shutdown_deadline=0;
+  CycleFault cycle_fault{};
+@@ -54,3 +55,3 @@
+    (!input.trajectory || input.rt_deadline>now);
+-  if(takeover){first_cycle_fault={};latched_failure=OK;reason=OK;disabled=false;captured=false;nominal_pause=false;}
++  if(takeover && !input.shutdown){first_cycle_fault={};latched_failure=OK;reason=OK;disabled=false;captured=false;nominal_pause=false;}
+   if(input.selected)seen_admission=std::max(seen_admission,input.admission_generation);
+@@ -60,2 +61,3 @@
+   }
++  if(input.shutdown && !output.shutdown && !latched_failure)nominal_pause=false;
+   const bool new_pause=input.operation==2 && (input.session!=session || input.sequence>sequence);
+@@ -66,4 +68,7 @@
+   const bool local=nominal_matches(input);
++  bool lost_enable=false;
++  if(input.shutdown && !input.shutdown_disable)for(unsigned i=0;i<joint_count;++i)lost_enable|=(obs.status[position_slot(i)]&0x6f)!=0x27;
+   uint8_t failure=OK;
+   if(input.policy==0)failure=UNCONFIRMED_POLICY;
++  else if(input.shutdown && now>=input.shutdown_deadline)failure=CYCLE_OR_TRACKING_ERROR;
+   else if(input.failure_reason>=CONTROL_SOURCE_CONFLICT)failure=input.failure_reason;
+@@ -71,2 +76,3 @@
+   else if(!measured(obs,now))failure=FEEDBACK_INVALID;
++  else if(lost_enable)failure=DRIVE_FAULT;
+   else if(fault_mask(obs)&controlled_mask)failure=DRIVE_FAULT;
+@@ -88,3 +94,4 @@
+   }
+-  if(nominal_matches(input))reason=PAUSED;
++  if(input.shutdown)reason=OK;
++  else if(nominal_matches(input))reason=PAUSED;
+   else if(now>=input.deadline)reason=EXPIRED;
+--- a/servo_control/src/main.cpp
++++ b/servo_control/src/main.cpp
+@@ -63,3 +63,3 @@
+
+-    return 0;
++    return node->exit_code();
+ }
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -24,8 +24,2 @@
+ };
+-constexpr float kRetzeroTrimLimit = 10.0f;
+-constexpr float kRetzeroTimeoutAcceptError = 0.01f; // timeout放行的最大残差(rad)
+-constexpr int kRetzeroTimeoutCycles = 10000; // 10 s @ 1 kHz
+-constexpr auto kShutdownTrajectoryDuration = std::chrono::seconds(3);
+-constexpr auto kShutdownSettleDelay = std::chrono::milliseconds(3200);
+-constexpr auto kShutdownSettleDuration = std::chrono::milliseconds(500);
+ constexpr auto kShutdownTimeout = std::chrono::seconds(8);
+@@ -180,3 +174,3 @@
+         else if(!ready)m.state="waiting_feedback_or_fault";
+-        if(!ready && (position_gate_.selected()||position_target_takeover_valid_)){position_interrupt();position_pending_=false;}
++        if(!shutdown_mode_ && !ready && (position_gate_.selected()||position_target_takeover_valid_)){position_interrupt();position_pending_=false;}
+         const std::string report=ready?(position_cycle_reason_?position_cycle_reason_:position_rejection_):position_wait_reason_;
+@@ -312,15 +306,5 @@
+     yaml_path_zeroPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/zeropos.yaml";
+-    yaml_path_shutdownPos = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/shutdownpos.yaml";
+     yaml_path_initialPD = ament_index_cpp::get_package_share_directory("snowbot_ctl_msgs") + "/config/initialPD.yaml";
+     loadZeroPosFromYaml(yaml_path_zeroPos);
+-    loadShutdownPosFromYaml(yaml_path_shutdownPos);
+-    loadInitialPDFromYaml(yaml_path_initialPD, "high");     // 回零用高刚度抵抗重力
+-
+-    // 关机位置配置缺失时退回零位
+-    if(lArm_shutdownPos.size() < LARMDOF){
+-        lArm_shutdownPos = lArm_zeroPos;
+-    }
+-    if(rArm_shutdownPos.size() < RARMDOF){
+-        rArm_shutdownPos = rArm_zeroPos;
+-    }
++    loadInitialPDFromYaml(yaml_path_initialPD, "high");     // 加载既有参数；启动不使能
+
+@@ -994,3 +978,3 @@
+
+-    ifRunin = true;
++    ifRunin = false;
+
+@@ -1110,322 +1094,8 @@
+
+-    //-----------------------------------------------
+-    // 初始使能: 跑 200 个空指令周期让 CiA402 使能序列完成 (200ms)
+-    {
+-        auto zero_cmd = JntDesMsg_inContainer_Outp_v1();
+-        for(int i = 0; i < 200; i++){
+-            servo_retMsg = runImpl(zero_cmd);
+-            rclcpp::sleep_for(std::chrono::milliseconds(1));
+-        }
+-        retMsg_unpack_func();
+-    }
+-
+-    //-----------------------------------------------
+-    //检查是否有电机反馈
+-    bool hasFeedback = false;
+-    for(int i = 0; i < RARMDOF; i++){
+-        std::cout << "  电机 " << i
+-                  << " pos=" << std::fixed << servo_retMsg_unpacked[i + LARMDOF].joint_posRet
+-                  << " spd=" << std::fixed << servo_retMsg_unpacked[i + LARMDOF].joint_spdRet
+-                  << " cur=" << std::fixed << servo_retMsg_unpacked[i + LARMDOF].joint_currentRet << std::endl;
+-        if(std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet) > 1e-6){
+-            hasFeedback = true;
+-        }
+-    }
+-    if(!hasFeedback){
+-        std::cout << "警告：所有电机反馈为0，跳过回零控制。" << std::endl;
+-    }
+-
+-    //回零控制
+-    // Position feedback can legitimately be all zero when the robot is already
+-    // at its mechanical zero. EtherCAT OP state is the hardware-ready check.
+-    bool arm_startup_ready = EtherCAT_isOperational();
+-    bool needRetZero = false;
+-    if(hasFeedback){
+-        for(int i = 0; i < LARMDOF; i++){
+-            if(std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_zeroPos[i]) > ZERO_POS_THRESHOLD){
+-                needRetZero = true;
+-                break;
+-            }
+-        }
+-        for(int i = 0; i < RARMDOF; i++){
+-            if(std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet - rArm_zeroPos[i]) > ZERO_POS_THRESHOLD){
+-                needRetZero = true;
+-                break;
+-            }
+-        }
+-    }
+-
+-    //若达成回零控制条件，则开启回零控制
+-    bool arm_shutdown_handoff_pending = false;
+-    if(needRetZero){
+-        std::cout << "检测到关节偏离零点，开始回零控制..." << std::endl;
+-
+-        //提取当前双臂位置
+-        std::vector<double> lArm_stPos(LARMDOF), rArm_stPos(RARMDOF);
+-        for(int i = 0; i < LARMDOF; i++){
+-            lArm_stPos[i] = servo_retMsg_unpacked[i].joint_posRet;
+-        }
+-        for(int i = 0; i < RARMDOF; i++){
+-            rArm_stPos[i] = servo_retMsg_unpacked[i + LARMDOF].joint_posRet;
+-        }
+-
+-        // 回零前只使能偏离零点的关节
+-        bool retzero_mask[TOTAL_SLAVES] = {};
+-        for (int i = 0; i < LARMDOF; i++) {
+-            if (std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_zeroPos[i]) > ZERO_POS_THRESHOLD)
+-                retzero_mask[i] = true;
+-        }
+-        for (int i = 0; i < RARMDOF; i++) {
+-            if (std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet - rArm_zeroPos[i]) > ZERO_POS_THRESHOLD)
+-                retzero_mask[8 + i] = true;
+-        }
+-        EtherCAT_setMotorEnable(true);
+-        EtherCAT_setPerMotorEnable(retzero_mask);
+-        std::cout << "回零使能关节: ";
+-        for (int i = 0; i < LARMDOF; i++) if (retzero_mask[i]) std::cout << "L" << i+1 << " ";
+-        for (int i = 0; i < RARMDOF; i++) if (retzero_mask[8+i]) std::cout << "R" << i+1 << " ";
+-        std::cout << std::endl;
+-
+-        //初始化回零插补轨迹（S型加减速，retZeroTime=2.0s）
+-        retZero_Init.retZero_runin(lArm_stPos, rArm_stPos);
+-        std::cout << "回零轨迹生成完毕，开始执行回零..." << std::endl;
+-
+-        //执行回零控制循环 (重力前馈 + 小范围积分修正, 最长10s超时)
+-        bool retZero_done = false;
+-        float retzero_integral[14] = {0};
+-        bool traj_ended = false;
+-        int retzero_timeout = 0;
+-        while(!retZero_done && rclcpp::ok() && !sigInterrupt.load() &&
+-              retzero_timeout < kRetzeroTimeoutCycles){
+-            float l_des[LARMDOF], r_des[RARMDOF];
+-            float l_Kp[LARMDOF], r_Kp[RARMDOF], l_Kd[LARMDOF], r_Kd[RARMDOF];
+-
+-            if (!traj_ended) {
+-                TrajCtlOutp retZero_outp = retZero_Init.retZero_trajOutp();
+-                for (int i = 0; i < LARMDOF; i++) {
+-                    l_des[i] = retZero_outp.lArm_desPos[i];
+-                    l_Kp[i]  = retZero_outp.lArm_Kp[i]; l_Kd[i] = retZero_outp.lArm_Kd[i];
+-                }
+-                for (int i = 0; i < RARMDOF; i++) {
+-                    r_des[i] = retZero_outp.rArm_desPos[i];
+-                    r_Kp[i]  = retZero_outp.rArm_Kp[i]; r_Kd[i] = retZero_outp.rArm_Kd[i];
+-                }
+-                if (retZero_outp.ifOutpReachEnd) {
+-                    traj_ended = true;
+-                    for (int i = 0; i < 14; ++i) retzero_integral[i] = 0.0f;
+-                }
+-            } else {
+-                for (int i = 0; i < LARMDOF; i++) {
+-                    l_des[i] = (float)lArm_zeroPos[i];
+-                    l_Kp[i]  = lArm_defaultKp[i]; l_Kd[i] = lArm_defaultKd[i];
+-                }
+-                for (int i = 0; i < RARMDOF; i++) {
+-                    r_des[i] = (float)rArm_zeroPos[i];
+-                    r_Kp[i]  = rArm_defaultKp[i]; r_Kd[i] = rArm_defaultKd[i];
+-                }
+-            }
+-
+-            for(int i = 0; i < LARMDOF; i++){
+-                servo_desMsg_orig[i].transMod = 1;
+-                servo_desMsg_orig[i].joint_pos = l_des[i];
+-                servo_desMsg_orig[i].joint_spd = 0.0;
+-                servo_desMsg_orig[i].joint_tor =
+-                    kLeftArmRetzeroGravityTorque[i] + retzero_integral[i];
+-                servo_desMsg_orig[i].joint_Kp  = l_Kp[i];
+-                servo_desMsg_orig[i].joint_Kd  = l_Kd[i];
+-            }
+-            for(int i = 0; i < RARMDOF; i++){
+-                servo_desMsg_orig[i + LARMDOF].transMod = 1;
+-                servo_desMsg_orig[i + LARMDOF].joint_pos = r_des[i];
+-                servo_desMsg_orig[i + LARMDOF].joint_spd = 0.0;
+-                servo_desMsg_orig[i + LARMDOF].joint_tor =
+-                    kRightArmRetzeroGravityTorque[i] + retzero_integral[7 + i];
+-                servo_desMsg_orig[i + LARMDOF].joint_Kp  = r_Kp[i];
+-                servo_desMsg_orig[i + LARMDOF].joint_Kd  = r_Kd[i];
+-            }
+-
+-            EtherCATrun();
+-            rclcpp::sleep_for(std::chrono::milliseconds(1));
+-
+-            // 积分修正 (Ki=500, 左右臂统一限幅±10Nm)
+-            for (int i = 0; i < LARMDOF; i++) {
+-                float err = l_des[i] - servo_retMsg_unpacked[i].joint_posRet;
+-                retzero_integral[i] += err * 0.001f * 500.0f;
+-                if (retzero_integral[i] > kRetzeroTrimLimit) retzero_integral[i] = kRetzeroTrimLimit;
+-                if (retzero_integral[i] < -kRetzeroTrimLimit) retzero_integral[i] = -kRetzeroTrimLimit;
+-            }
+-            for (int i = 0; i < RARMDOF; i++) {
+-                float err = r_des[i] - servo_retMsg_unpacked[i + LARMDOF].joint_posRet;
+-                retzero_integral[7 + i] += err * 0.001f * 500.0f;
+-                if (retzero_integral[7 + i] > kRetzeroTrimLimit) retzero_integral[7 + i] = kRetzeroTrimLimit;
+-                if (retzero_integral[7 + i] < -kRetzeroTrimLimit) retzero_integral[7 + i] = -kRetzeroTrimLimit;
+-            }
+-
+-            retzero_timeout++;
+-
+-            msg_publish();
+-
+-            if (traj_ended) {
+-                bool all_reached = true;
+-                for (int i = 0; i < LARMDOF; i++)
+-                    if (retzero_mask[i] && std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_zeroPos[i]) > ZERO_POS_EXIT_THRESH)
+-                        all_reached = false;
+-                for (int i = 0; i < RARMDOF; i++)
+-                    if (retzero_mask[8+i] && std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet - rArm_zeroPos[i]) > ZERO_POS_EXIT_THRESH)
+-                        all_reached = false;
+-                static int settle_cnt = 0;
+-                if (all_reached) settle_cnt++; else settle_cnt = 0;
+-                if (settle_cnt > 500) retZero_done = true;
+-            }
+-        }
+-
+-        // 无论严格完成还是超时，都先失能并等待实时 PDO 线程下发失能控制字。
+-        bool all_off_mask[TOTAL_SLAVES] = {};
+-        EtherCAT_setPerMotorEnable(all_off_mask);
+-        EtherCAT_setMotorEnable(false);
+-        rclcpp::sleep_for(std::chrono::milliseconds(20));
+-        EtherCATmsg_Get();
+-
+-        bool residual_within_startup_tolerance = EtherCAT_communicationHealthy();
+-        for (int i = 0; i < LARMDOF; ++i) {
+-            if (retzero_mask[i] &&
+-                std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_zeroPos[i]) >
+-                    kRetzeroTimeoutAcceptError) {
+-                residual_within_startup_tolerance = false;
+-            }
+-        }
+-        for (int i = 0; i < RARMDOF; ++i) {
+-            if (retzero_mask[8 + i] &&
+-                std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet - rArm_zeroPos[i]) >
+-                    kRetzeroTimeoutAcceptError) {
+-                residual_within_startup_tolerance = false;
+-            }
+-        }
+-
+-        if (retZero_done) {
+-            std::cout << "回零控制完成，关节已到达严格零位，手臂电机已失能锁死。" << std::endl;
+-        } else {
+-            std::cout << "回零超时，手臂电机已失能锁死。" << std::endl;
+-        }
+-
+-        arm_startup_ready = residual_within_startup_tolerance;
+-        if (!arm_startup_ready) {
+-            std::cerr << "回零后残差超过 " << kRetzeroTimeoutAcceptError
+-                      << " rad 或 EtherCAT WKC 异常，后续控制节点不会启动。" << std::endl;
+-        }
+-    }else{
+-        std::cout << "关节已在零点附近，跳过回零控制。" << std::endl;
+-    }
+-
+-    // Ctrl+C 在双臂开机回零期间到来时，锁住双臂输出，直到关机目标
+-    // 已经写入命令缓存后再交给关机回零接管。
+-    if (sigInterrupt.load()) {
+-        EtherCAT_BeginArmShutdownHandoff();
+-        EtherCAT_setMotorEnable(false);
+-        arm_shutdown_handoff_pending = true;
+-        std::cout << "双臂启动回零已停止，等待关机回零目标接管。" << std::endl;
+-    }
+-
+-    //-----------------------------------------------
+-    // 头部与腰部 CSP 模式启动回零 (Alias 17~18: 头部, 19~20: 躯干)
+-    bool head_torso_startup_ready = true;
+-    if (!sigInterrupt.load()) {
+-        bool head_torso_need_homing = false;
+-        float h_fb[HEAD_MOTORS] = {0}, t_fb[TORSO_MOTORS] = {0};
+-        float cur_p, cur_s, cur_c; uint16_t cur_st;
+-
+-        for (int i = 0; i < HEAD_MOTORS; i++) {
+-            getMotorFb_head(i, cur_p, cur_s, cur_c, cur_st);
+-            h_fb[i] = cur_p;
+-            if (std::abs(cur_p) > 0.01f) head_torso_need_homing = true;
+-        }
+-        for (int i = 0; i < TORSO_MOTORS; i++) {
+-            getMotorFb_torso(i, cur_p, cur_s, cur_c, cur_st);
+-            t_fb[i] = cur_p;
+-            if (std::abs(cur_p) > 0.01f) head_torso_need_homing = true;
+-        }
+-
+-        if (head_torso_need_homing) {
+-            std::cout << "检测到头/腰电机偏离零位，开始 CSP 并行回零..." << std::endl;
+-            // 使能头腰电机 (Slot 16~19)
+-            bool ht_mask[TOTAL_SLAVES] = {};
+-            for (int i = 16; i <= 19; i++) ht_mask[i] = true;
+-            EtherCAT_setMotorEnable(true);
+-            EtherCAT_setPerMotorEnable(ht_mask);
+-
+-            // 斜坡步进回零 (1kHz 周期，每周期最大变化 0.001 rad，相当于 1.0 rad/s)
+-            const float MAX_STEP = 0.001f;
+-            float h_tgt[HEAD_MOTORS], t_tgt[TORSO_MOTORS];
+-            for (int i = 0; i < HEAD_MOTORS; i++) h_tgt[i] = h_fb[i];
+-            for (int i = 0; i < TORSO_MOTORS; i++) t_tgt[i] = t_fb[i];
+-
+-            int ht_timeout = 0;
+-            bool ht_done = false;
+-            while (!ht_done && rclcpp::ok() && !sigInterrupt.load() && ht_timeout < 10000) {
+-                bool all_zero = true;
+-                for (int i = 0; i < HEAD_MOTORS; i++) {
+-                    if (h_tgt[i] > MAX_STEP) { h_tgt[i] -= MAX_STEP; all_zero = false; }
+-                    else if (h_tgt[i] < -MAX_STEP) { h_tgt[i] += MAX_STEP; all_zero = false; }
+-                    else { h_tgt[i] = 0.0f; }
+-                    setHeadMotorCmd(i, h_tgt[i], 0.0, 0.0, 0.0, 0.0);
+-                }
+-                for (int i = 0; i < TORSO_MOTORS; i++) {
+-                    if (t_tgt[i] > MAX_STEP) { t_tgt[i] -= MAX_STEP; all_zero = false; }
+-                    else if (t_tgt[i] < -MAX_STEP) { t_tgt[i] += MAX_STEP; all_zero = false; }
+-                    else { t_tgt[i] = 0.0f; }
+-                    setTorsoMotorCmd(i, t_tgt[i], 0.0, 0.0, 0.0, 0.0);
+-                }
+-
+-                EtherCATrun();
+-                rclcpp::sleep_for(std::chrono::milliseconds(1));
+-                ht_timeout++;
+-
+-                if (all_zero) {
+-                    // 确认当前反馈是否稳定在零点附近
+-                    bool stable = true;
+-                    for (int i = 0; i < HEAD_MOTORS; i++) {
+-                        getMotorFb_head(i, cur_p, cur_s, cur_c, cur_st);
+-                        if (std::abs(cur_p) > 0.01f) stable = false;
+-                    }
+-                    for (int i = 0; i < TORSO_MOTORS; i++) {
+-                        getMotorFb_torso(i, cur_p, cur_s, cur_c, cur_st);
+-                        if (std::abs(cur_p) > 0.01f) stable = false;
+-                    }
+-                    static int ht_settle = 0;
+-                    if (stable) ht_settle++; else ht_settle = 0;
+-                    if (ht_settle > 200) ht_done = true;
+-                }
+-            }
+-            if (ht_done) {
+-                std::cout << "头/腰电机 CSP 回零完成 (耗时 " << ht_timeout << " ms)。" << std::endl;
+-            } else {
+-                head_torso_startup_ready = false;
+-                std::cout << "头/腰电机 CSP 回零超时，后续控制节点不会启动。" << std::endl;
+-            }
+-        } else {
+-            std::cout << "头/腰电机已在零位附近，跳过 CSP 回零。" << std::endl;
+-        }
+-    } else {
+-        head_torso_startup_ready = false;
+-        std::cout << "检测到退出请求，跳过头/腰启动回零，直接进入关机回零。" << std::endl;
+-    }
+-
+-    if (arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load()) {
+-        notify_systemd("READY=1\nSTATUS=Startup homing complete; arm brakes engaged");
+-        std::cout << "[systemd] Servo startup ready; downstream services may start." << std::endl;
+-    } else {
+-        notify_systemd("STATUS=Startup homing failed; downstream services blocked");
+-        std::cerr << "[systemd] Servo startup is not ready; downstream services are blocked." << std::endl;
+-    }
+-
+-    //-----------------------------------------------
+-    // 关机回零状态变量 (Ctrl+C 后按 shutdownpos.yaml 回零)
+-    bool shutdown_need[TOTAL_SLAVES] = {};
+-    std::vector<double> lArm_shutdown_start(LARMDOF, 0.0), rArm_shutdown_start(RARMDOF, 0.0);
+-    std::chrono::steady_clock::time_point shutdown_start_time;
+-    std::chrono::steady_clock::time_point shutdown_settle_start_time;
+-
+-    position_initialized_=true;position_init_error_.clear();
+-    position_startup_complete_=arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load();
+-    drive_startup_finished_=!sigInterrupt.load();
++    position_startup();
++    if(position_startup_complete_){
++        notify_systemd("READY=1\nSTATUS=PDO feedback ready; enable requests off");
++        std::cout << "[systemd] 通信与反馈初始化完成；默认不请求使能，无自动回零。" << std::endl;
++    }else notify_systemd("STATUS=PDO feedback unavailable; downstream services blocked");
++
+     //开启ros2循环
+@@ -1434,96 +1104,9 @@
+         position_loop_timing_.mark(position_session::LoopTiming::Prepare,position_session::steady_ns());
+-        //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
+-        if (sigInterrupt.load() && !shutdown_mode_) {
+-            shutdown_mode_ = true;
+-            shutdown_start_time = std::chrono::steady_clock::now();
+-            shutdown_settle_start_time = {};
+-            std::cout << "收到中断信号，进入关机回零模式..." << std::endl;
+-
+-            const double SHUTDOWN_DELTA = 0.05;
+-            // 双臂: 偏离关机位置的关节才使能
+-            for (int i = 0; i < LARMDOF; i++) {
+-                shutdown_need[i] = std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_shutdownPos[i]) > SHUTDOWN_DELTA;
+-                EtherCAT_setSingleMotorEnable(i, shutdown_need[i]);
+-            }
+-            for (int i = 0; i < RARMDOF; i++) {
+-                shutdown_need[8 + i] = std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet - rArm_shutdownPos[i]) > SHUTDOWN_DELTA;
+-                EtherCAT_setSingleMotorEnable(8 + i, shutdown_need[8 + i]);
+-            }
+-            // 夹爪 (槽位 7/15)
+-            shutdown_need[7]  = std::abs(getGripperFbPos(0) - lGripper_shutdownPos) > SHUTDOWN_DELTA;
+-            shutdown_need[15] = std::abs(getGripperFbPos(1) - rGripper_shutdownPos) > SHUTDOWN_DELTA;
+-            EtherCAT_setSingleMotorEnable(7, shutdown_need[7]);
+-            EtherCAT_setSingleMotorEnable(15, shutdown_need[15]);
+-            // 头腰 (槽位 16~19, CSP 回零到 0)
+-            {
+-                float p = 0.0f, sp = 0.0f, c = 0.0f; uint16_t stt = 0;
+-                for (int i = 0; i < HEAD_MOTORS; i++) {
+-                    getMotorFb_head(i, p, sp, c, stt);
+-                    shutdown_need[16 + i] = std::abs(p) > 0.01f;
+-                    EtherCAT_setSingleMotorEnable(16 + i, shutdown_need[16 + i]);
+-                }
+-                for (int i = 0; i < TORSO_MOTORS; i++) {
+-                    getMotorFb_torso(i, p, sp, c, stt);
+-                    shutdown_need[18 + i] = std::abs(p) > 0.01f;
+-                    EtherCAT_setSingleMotorEnable(18 + i, shutdown_need[18 + i]);
+-                }
+-            }
+-            EtherCAT_setMotorEnable(true);
+-            std::cout << "关机回零使能关节: ";
+-            for (int i = 0; i < LARMDOF; i++) if (shutdown_need[i]) std::cout << "L" << i+1 << " ";
+-            for (int i = 0; i < RARMDOF; i++) if (shutdown_need[8+i]) std::cout << "R" << i+1 << " ";
+-            if (shutdown_need[7])  std::cout << "GL ";
+-            if (shutdown_need[15]) std::cout << "GR ";
+-            if (shutdown_need[16] || shutdown_need[17] || shutdown_need[18] || shutdown_need[19]) std::cout << "HT ";
+-            std::cout << std::endl;
+-
+-            // 手臂插补起点: 当前反馈
+-            for (int i = 0; i < LARMDOF; i++) lArm_shutdown_start[i] = servo_retMsg_unpacked[i].joint_posRet;
+-            for (int i = 0; i < RARMDOF; i++) rArm_shutdown_start[i] = servo_retMsg_unpacked[i + LARMDOF].joint_posRet;
+-
+-            // 夹爪/头腰目标: 复用主循环现有的平滑插补器
+-            g_left_pos_curr  = getGripperFbPos(0);
+-            g_left_pos_start = g_left_pos_curr;
+-            g_left_pos_target = lGripper_shutdownPos;
+-            g_left_winlen = 3000; g_left_step = 0; g_left_ifRunin = true;
+-            g_left_spd = 0.0; g_left_tor = 0.0;   // 清零残留速度, 否则 KD*spd 产生零位偏差
+-            g_right_pos_curr  = getGripperFbPos(1);
+-            g_right_pos_start = g_right_pos_curr;
+-            g_right_pos_target = rGripper_shutdownPos;
+-            g_right_winlen = 3000; g_right_step = 0; g_right_ifRunin = true;
+-            g_right_spd = 0.0; g_right_tor = 0.0;
+-            {
+-                float p = 0.0f, sp = 0.0f, c = 0.0f; uint16_t stt = 0;
+-                for (int i = 0; i < TORSO_MOTORS; i++) {
+-                    getMotorFb_torso(i, p, sp, c, stt);
+-                    t_pos_curr[i] = p; t_pos_start[i] = p; t_pos_target[i] = 0.0;
+-                }
+-                t_winlen = 3000; t_step = 0; t_ifRunin = true;
+-                for (int i = 0; i < HEAD_MOTORS; i++) {
+-                    getMotorFb_head(i, p, sp, c, stt);
+-                    h_pos_curr[i] = p; h_pos_start[i] = p; h_pos_target[i] = 0.0;
+-                }
+-                h_winlen = 3000; h_step = 0; h_ifRunin = true;
+-            }
+-
+-            // 刷新手臂插补器: 以当前反馈为起点
+-            if_useret_to_start_runin = 1;
+-            if_runin_renew = 1;
+-            // 跳过滤波器初始化段, 避免覆盖关机目标
+-            ftrInitOutpCount = ftrInitOutpTimes;
+-        }
+-
+-        //第一轮控制，先直接获取一下反馈值
+-        if(ifShallInit){
+-            for(int i = 0; i < 10; i++){
+-                EtherCATmsg_Get();
+-            }
+-
+-            //初始化目标位置
+-            for(int i = 0; i < SINGLEARMJNTNUM; i++){
+-                servo_desMsg_orig[i].joint_pos = servo_retMsg_unpacked[i].joint_posRet;
+-                servo_desMsg_orig[i + LARMDOF].joint_pos = servo_retMsg_unpacked[i + LARMDOF].joint_posRet;
+-            }
+-
+-            ifShallInit = false;
++        if(sigInterrupt.load()){
++            shutdown_mode_=true;
++            // Drain no external callbacks after shutdown takes ownership.
++            // Feedback publication and the RT watchdog continue independently.
++            EtherCATmsg_Get();msg_publish();
++            if(position_shutdown_tick())break;
++            loop_rate.sleep();continue;
+         }
+@@ -1539,64 +1122,2 @@
+
+-        //----- 关机回零: 覆盖上位机目标, 走同一套插补链路 (像上位机下发一样) -----
+-        if (shutdown_mode_) {
+-            const auto shutdown_now = std::chrono::steady_clock::now();
+-            const auto shutdown_elapsed = shutdown_now - shutdown_start_time;
+-            double u = std::chrono::duration<double>(shutdown_elapsed).count() /
+-                       std::chrono::duration<double>(kShutdownTrajectoryDuration).count();
+-            if (u > 1.0) u = 1.0;
+-            double s = 3.0 * u * u - 2.0 * u * u * u;
+-            for (int i = 0; i < LARMDOF; i++) {
+-                lArm_pos_receive[i] = lArm_shutdown_start[i] + (lArm_shutdownPos[i] - lArm_shutdown_start[i]) * s;
+-            }
+-            for (int i = 0; i < RARMDOF; i++) {
+-                rArm_pos_receive[i] = rArm_shutdown_start[i] + (rArm_shutdownPos[i] - rArm_shutdown_start[i]) * s;
+-            }
+-            lArm_vel_receive.assign(LARMDOF, 0.0);
+-            rArm_vel_receive.assign(RARMDOF, 0.0);
+-            lArm_torComp_feedforward_receive.assign(LARMDOF, 0.0);
+-            lArm_torComp_grav_receive.assign(LARMDOF, 0.0);
+-            lArm_torComp_interia_receive.assign(LARMDOF, 0.0);
+-            rArm_torComp_feedforward_receive.assign(RARMDOF, 0.0);
+-            rArm_torComp_grav_receive.assign(RARMDOF, 0.0);
+-            rArm_torComp_interia_receive.assign(RARMDOF, 0.0);
+-            lArm_Kp_receive = lArm_defaultKp;
+-            lArm_Kd_receive = lArm_defaultKd;
+-            rArm_Kp_receive = rArm_defaultKp;
+-            rArm_Kd_receive = rArm_defaultKd;
+-            lArm_transMod.assign(LARMDOF, 1);
+-            rArm_transMod.assign(RARMDOF, 1);
+-            ifRunin = true;   // 保证每周期都执行插补
+-
+-            // 到位判定 (斜坡结束后)
+-            if (shutdown_elapsed > kShutdownSettleDelay) {
+-                bool reached = true;
+-                for (int i = 0; i < LARMDOF; i++)
+-                    if (shutdown_need[i] && std::abs(servo_retMsg_unpacked[i].joint_posRet - lArm_shutdownPos[i]) > 0.02) reached = false;
+-                for (int i = 0; i < RARMDOF; i++)
+-                    if (shutdown_need[8+i] && std::abs(servo_retMsg_unpacked[i + LARMDOF].joint_posRet - rArm_shutdownPos[i]) > 0.02) reached = false;
+-                if (shutdown_need[7]  && std::abs(getGripperFbPos(0) - lGripper_shutdownPos) > 0.02) reached = false;
+-                if (shutdown_need[15] && std::abs(getGripperFbPos(1) - rGripper_shutdownPos) > 0.02) reached = false;
+-                if (shutdown_need[16] || shutdown_need[17]) {
+-                    float p = 0.0f, sp = 0.0f, c = 0.0f; uint16_t stt = 0;
+-                    for (int i = 0; i < HEAD_MOTORS; i++) { getMotorFb_head(i, p, sp, c, stt); if (std::abs(p) > 0.01f) reached = false; }
+-                }
+-                if (shutdown_need[18] || shutdown_need[19]) {
+-                    float p = 0.0f, sp = 0.0f, c = 0.0f; uint16_t stt = 0;
+-                    for (int i = 0; i < TORSO_MOTORS; i++) { getMotorFb_torso(i, p, sp, c, stt); if (std::abs(p) > 0.01f) reached = false; }
+-                }
+-                if (!reached) {
+-                    shutdown_settle_start_time = {};
+-                } else if (shutdown_settle_start_time == std::chrono::steady_clock::time_point{}) {
+-                    shutdown_settle_start_time = shutdown_now;
+-                } else if (shutdown_now - shutdown_settle_start_time >= kShutdownSettleDuration) {
+-                    std::cout << "关机回零完成，已到达设定姿态。" << std::endl;
+-                    break;
+-                }
+-            }
+-            if (shutdown_elapsed >= kShutdownTimeout) {
+-                std::cout << "关机回零超时 (8s)，强制失能退出。" << std::endl;
+-                break;
+-            }
+-        }
+-
+         //-----轨迹计算-----
+@@ -1604,6 +1125,2 @@
+         ctlMsg_runin();
+-        // 关机回零只以当前反馈初始化一次插补器，后续周期持续追踪同一个关机目标。
+-        if (shutdown_mode_) {
+-            if_runin_renew = 0;
+-        }
+
+@@ -1710,3 +1227,3 @@
+                 for(int i = 0; i < LARMDOF; i++){
+-                    servo_desMsg_orig[i].joint_pos = lArm_zeroPos[i];
++                    servo_desMsg_orig[i].joint_pos = lArm_pos_receive[i];
+                     servo_desMsg_orig[i].joint_spd = 0.0;
+@@ -1715,3 +1232,3 @@
+                 for(int i = 0; i < RARMDOF; i++){
+-                    servo_desMsg_orig[i + LARMDOF].joint_pos = rArm_zeroPos[i];
++                    servo_desMsg_orig[i + LARMDOF].joint_pos = rArm_pos_receive[i];
+                     servo_desMsg_orig[i + LARMDOF].joint_spd = 0.0;
+@@ -1733,3 +1250,3 @@
+
+-                servo_desMsg_orig[i].joint_pos = lArm_zeroPos[i];
++                servo_desMsg_orig[i].joint_pos = lArm_pos_receive[i];
+                 servo_desMsg_orig[i].joint_spd = 0.0;
+@@ -1744,3 +1261,3 @@
+
+-                servo_desMsg_orig[i + LARMDOF].joint_pos = rArm_zeroPos[i];
++                servo_desMsg_orig[i + LARMDOF].joint_pos = rArm_pos_receive[i];
+                 servo_desMsg_orig[i + LARMDOF].joint_spd = 0.0;
+@@ -1837,9 +1354,2 @@
+         EtherCATrun();
+-        if(shutdown_mode_)EtherCAT_positionBypass(); // Hand back only after original exit target cache is written.
+-        if (arm_shutdown_handoff_pending && shutdown_mode_) {
+-            EtherCAT_EndArmShutdownHandoff();
+-            arm_shutdown_handoff_pending = false;
+-            std::cout << "关机回零目标已写入，双臂控制权完成切换。" << std::endl;
+-        }
+-
+         //发布六维力传感器数据
+@@ -1860,4 +1370,125 @@
+     EtherCAT_setMotorEnable(false);
+-    std::cout << "机械臂电机已失能，EtherCAT驱动安全停机。" << std::endl;
+-    RCLCPP_INFO(this->get_logger(), "程序已安全退出");
++    std::cout << "退出流程结束；驱动抱闸状态未确认。exit_code=" << shutdown_exit_code_ << std::endl;
++}
++
++
++// No enable, homing or zero targets during servo initialization.
++void ServoNode::position_startup(){
++    position_session::Observation obs;
++    for(unsigned i=0;i<200 && !sigInterrupt.load();++i){
++        obs=EtherCAT_positionObservation();
++        if(position_session::measured(obs,position_session::steady_ns()))break;
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    position_startup_complete_=position_session::measured(obs,position_session::steady_ns()) && !sigInterrupt.load();
++    position_initialized_=position_startup_complete_;drive_startup_finished_=!sigInterrupt.load();
++    position_init_error_=position_initialized_?"":"pdo_feedback_unavailable";
++    if(!position_initialized_)return;
++    EtherCATmsg_Get();
++    for(unsigned i=0;i<7;++i){
++        servo_desMsg_orig[i].joint_pos=lArm_pos_receive[i]=obs.position[i];
++        servo_desMsg_orig[i+7].joint_pos=rArm_pos_receive[i]=obs.position[i+8];
++    }
++    g_left_pos_curr=obs.position[7];g_right_pos_curr=obs.position[15];
++    for(unsigned i=0;i<2;++i){h_pos_curr[i]=obs.position[16+i];t_pos_curr[i]=obs.position[18+i];}
++}
++
++// A local shutdown action keeps the admitted mode, controller state and masks.
++// Only this node's SIGINT/SIGTERM handler can select it; no client TTL is renewed.
++bool ServoNode::position_shutdown_control(double dt){
++    (void)dt;return true;
++}
++bool ServoNode::position_shutdown_tick(){
++    using namespace position_session;
++    const auto now=steady_ns();const auto obs=EtherCAT_positionObservation();
++    const bool fresh=now-obs.sampled_ns<=20000000;
++    const int64_t timeout=std::chrono::duration_cast<std::chrono::nanoseconds>(kShutdownTimeout).count();
++    const auto disable=[&](const std::string& reason){
++        if(!reason.empty())shutdown_error_=reason;
++        if(shutdown_phase_!=ShutdownDisabling){shutdown_phase_=ShutdownDisabling;shutdown_deadline_=now+timeout;}
++    };
++    if(shutdown_phase_==ShutdownIdle){
++        std::cout << "收到退出请求：保留当前控制模式，停止后失能，不自动回位。" << std::endl;
++        shutdown_deadline_=now+timeout;shutdown_phase_=ShutdownPlanning;
++        if(!position_startup_complete_ || !position_output_.selected || !obs.reference_valid)
++            disable(position_output_.selected?"shutdown_not_ready_or_faulted":"");
++    }
++    // Consume the RT watchdog result and cached observation age, without
++    // repeating drive/fault scans or clearing its latch.
++    if(shutdown_phase_<ShutdownDisabling && (!obs.output_valid || !fresh))
++        disable("shutdown_feedback_or_latched_fault");
++    if(shutdown_phase_==ShutdownPlanning){
++        if(auto result=position_admission_->poll()){
++            if(result->shutdown){
++                if(!result->error.empty())disable(result->error);
++                else if(result->completed_ns>shutdown_seed_.effective_steady)disable("shutdown_plan_late");
++                else{
++                    shutdown_brake_=std::move(result->prepared->segment);
++                    shutdown_start_=shutdown_seed_.effective_steady;shutdown_phase_=ShutdownStopping;
++                    shutdown_deadline_=shutdown_start_+int64_t(shutdown_brake_->end()*1e9)+timeout;
++                }
++            }
++            position_admission_->release(result);
++        }
++        if(shutdown_phase_==ShutdownPlanning && !shutdown_requested_ && !position_admission_->busy()){
++            bool seeded=position_trajectory_.snapshot(this->now().nanoseconds(),now,2,position_target_prepare_ns_,position_feedback_.q,shutdown_seed_);
++            if(!seeded && position_local_hold_){
++                shutdown_seed_.q=obs.reference_position;shutdown_seed_.v=obs.reference_speed;shutdown_seed_.a=obs.reference_acceleration;
++                shutdown_seed_.effective_steady=now+position_target_prepare_ns_;seeded=true;
++            }
++            if(!seeded)disable("shutdown_reference_unavailable");
++            else shutdown_requested_=position_admission_->submit_shutdown(shutdown_seed_,
++                trajectory_max_velocity_,trajectory_max_acceleration_,trajectory_max_jerk_,timeout*1e-9);
++        }
++        if(shutdown_phase_==ShutdownPlanning && shutdown_requested_ && now>=shutdown_seed_.effective_steady)
++            disable("shutdown_plan_late");
++    }
++    if(shutdown_phase_<ShutdownDisabling && now>=shutdown_deadline_)disable("shutdown_timeout");
++    auto& output=position_output_;
++    output.shutdown=true;output.nominal_hold=false;
++    if(shutdown_phase_<ShutdownDisabling){
++        if(shutdown_phase_==ShutdownPlanning || now<shutdown_start_){
++            if(!position_local_hold_){
++                position_trajectory_.sample(now);
++                output.reference_position=position_trajectory_.q;output.reference_speed=position_trajectory_.v;output.reference_acceleration=position_trajectory_.a;
++            }
++        }else{
++            const auto& curve=shutdown_brake_;
++            const auto elapsed=std::min((now-shutdown_start_)*1e-9,curve->end());
++            std::array<double,joint_count> jerk{};
++            curve->sample_into(elapsed,output.reference_position.data(),output.reference_speed.data(),output.reference_acceleration.data(),jerk.data(),joint_count);
++            output.operation=0;output.trajectory=true;output.trajectory_phase=elapsed<curve->end()?3:4;
++            bool resting=elapsed>=curve->end();
++            for(unsigned i=0;i<joint_count;++i){const auto slot=position_slot(i);
++                resting=resting && std::abs(obs.position[slot]-output.reference_position[i])<=(i<14?.02:.01) &&
++                    std::abs(obs.speed[slot])<=position_trajectory_.tuning().takeover_velocity_tolerance_rad_s;
++            }
++            if(!resting)shutdown_settled_=0;
++            else if(!shutdown_settled_)shutdown_settled_=now;
++            else if(now-shutdown_settled_>=500000000LL){
++                disable("");
++            }
++        }
++        // Curves are already certified. Only following error and the actual
++        // control-loop interval need checking again during execution.
++        bool tracking=true;
++        for(unsigned i=0;i<joint_count;++i){
++            if(std::abs(output.reference_position[i]-obs.position[position_slot(i)])>.5)tracking=false;
++            output.q[i]=float(output.reference_position[i]);output.v[i]=float(output.reference_speed[i]);
++        }
++        const auto dt=position_interval_.tick(now);
++        if(!tracking || dt<=0 || dt>.01 || !position_shutdown_control(dt)){
++            output.failure_reason=CYCLE_OR_TRACKING_ERROR;disable("shutdown_tracking_or_control_failed");
++        }
++    }
++    output.shutdown_disable=shutdown_phase_==ShutdownDisabling;output.shutdown_deadline=shutdown_deadline_;output.rt_deadline=now+20000000;
++    EtherCAT_positionOutput(output);
++    if(shutdown_phase_!=ShutdownDisabling)return false;
++    if(obs.shutdown_disabled && fresh)shutdown_phase_=ShutdownDone;
++    else if(now>=shutdown_deadline_){shutdown_error_="shutdown_disable_unconfirmed";shutdown_phase_=ShutdownDone;}
++    if(shutdown_phase_!=ShutdownDone)return false;
++    shutdown_exit_code_=!shutdown_error_.empty();
++    std::cout << "关机结果: " << (shutdown_error_.empty()?"shutdown_complete":shutdown_error_)
++              << "; disable=" << (obs.shutdown_disabled?"confirmed":"unconfirmed") << "; brake=unverified" << std::endl;
++    return true;
+ }
+@@ -1910,5 +1541,5 @@
+     // Target-stream mode is session-only, including before the first takeover.
+-    // Startup can queue legacy messages while homing; neither old nor fresh
++    // Base startup can queue legacy messages; neither old nor fresh
+     // legacy traffic may change enable masks, targets, gains or interpolation.
+-    // Internal startup/shutdown homing does not enter this callback.
++    // Only an admitted business session can enable the controlled group.
+     if (position_reference_mode_ == 2) {
+@@ -2441,2 +2072,3 @@
+ void ServoNode::position_submit(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
++ if(shutdown_mode_ || sigInterrupt.load()){position_rejection_="shutdown_in_progress";return;}
+  const auto source=position_session::meta(packet->meta);
+@@ -2507,2 +2139,3 @@
+ void ServoNode::position_poll(){
++ if(shutdown_mode_ || sigInterrupt.load())return;
+  if(!position_admission_)return;
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -705,2 +705,7 @@
+     for (int m = 0; m < TOTAL_SLAVES; m++) {
++        if(session_packet.shutdown_disable){
++            if(is_csp_motor_[m]){if(csp_rx_[m]){csp_rx_[m]->controlword=0x0006;csp_rx_[m]->velocity=0;csp_rx_[m]->torque=0;}}
++            else if(m_rx_[m]){m_rx_[m]->controlword=0x0006;m_rx_[m]->KP=0;m_rx_[m]->KD=0;m_rx_[m]->target_speed=0;m_rx_[m]->target_torque=0;}
++            enable_step[m]=0;enable_hold_captured[m]=false;continue;
++        }
+         if(reset_override) {
+@@ -851,3 +856,3 @@
+     uint32_t position_written=0;
+-    if(session_packet.selected && !session_watchdog_.disabled){
++    if(session_packet.selected && !session_watchdog_.disabled && !session_packet.shutdown_disable){
+         const auto& cmd=session_watchdog_.output;
+@@ -972,2 +977,4 @@
+     }
++    obs.shutdown_disabled=session_packet.shutdown_disable && position_session::measured(obs,obs.attempted_ns,0xfffff);
++    for(unsigned m=0;m<20;++m)if((obs.status[m]&0x6f)==0x27 || motor_sent_cw_[m].load()!=0x0006)obs.shutdown_disabled=false;
+     obs.session=session_watchdog_.session;obs.sequence=session_watchdog_.sequence;

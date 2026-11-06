@@ -5,7 +5,7 @@ import math
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
 from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
-from .parameters import load_parameters, parameters_for, braking_lead
+from .parameters import load_parameters, parameters_for
 
 
 from bindu_runtime.stop_evidence import sampled_nominal_reference
@@ -20,6 +20,7 @@ class PositionSessionIO(SnowbotIO):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.pause_targets = None
         self.writable_groups = CONTROL_GROUPS
         self.coupled_group_sets = (CONTROL_GROUPS,)
         # One atomic envelope and one PAUSE identity for waist and both arms.
@@ -40,7 +41,7 @@ class PositionSessionIO(SnowbotIO):
         previous_pause = getattr(self, 'pause_request', None) or self.captured_pause_request
         super().capture(groups)
         self.captured_pause_request = previous_pause
-        self.pause_request = self.pause_targets = None
+        self.pause_request = None
         self.servo_reference = None
         self.after_capture()
 
@@ -111,6 +112,8 @@ class PositionSessionDevices:
         node.declare_parameter('vendor_namespace', '/', descriptor=ParameterDescriptor(read_only=True))
         if node.get_parameter('vendor_namespace').value != '/':
             raise ValueError('SNOWBOT_POSITION_SESSION_ROOT_NAMESPACE_REQUIRED')
+        if 'target_stream_brake_lead_s' in node._parameter_overrides:
+            raise ValueError('SNOWBOT_BRAKE_LEAD_MOVED: set execution.target_stream_brake_lead_s in parameters_config')
         for key in ('arm_receiver_node', 'mid_receiver_node', 'servo_receiver_node'):
             node.declare_parameter(key, '', descriptor=ParameterDescriptor(read_only=True))
         self.receivers = {key: node.get_parameter(parameter).value or default for key, parameter, default in (
@@ -119,10 +122,9 @@ class PositionSessionDevices:
             ('head', 'servo_receiver_node', '/servo_node'))}
         self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode)
         self.trajectory_limits = target_stream_limits({
-            key: node.declare_parameter(key, braking_lead(self.runtime_parameters) if key=='target_stream_brake_lead_s' else default,
+            key: node.declare_parameter(key, default,
                                         descriptor=ParameterDescriptor(read_only=True)).value
             for key, default in TARGET_STREAM_LIMIT_DEFAULTS.items()})
-        braking_lead(self.runtime_parameters,self.trajectory_limits['target_stream_brake_lead_s'])
         self.envelopes = SourceEnvelope(new_session_id(node.now()), node.now)
         self.sent = {}
         self.target_instance = None
@@ -139,6 +141,20 @@ class PositionSessionDevices:
         self.io.target_stream = True
         self.io.supports_rigid_reference = True
         self.io.supports_prepared_replay = True
+        self.io.execution_mode = node.snowbot_execution_mode
+        self.io.replay_timing = dict(self.runtime_parameters['replay'],
+            completion_timeout_s=self.runtime_parameters['pico']['motion_completion_grace_s'],
+            settle_time_s=self.runtime_parameters['execution']['stop_confirmation_window_s'],
+            velocity_tolerance_rad_s=max(self.runtime_parameters['execution']['motion_arrival_velocity_tolerance_rad_s'],
+                                         profile.feedback_tolerances['joint_velocity']))
+        self.io.replay_position_tolerances = {n:max(math.radians(2), profile.stop_position_tolerances.get(
+            n, profile.feedback_tolerances['joint_position'])) for n in CONTROL_NAMES}
+        from pathlib import Path
+        from .parameters import load_mode_config
+        self.io.replay_prepare_tolerance = load_mode_config(Path(node.profile_path).with_name('teleop.json'),
+                                                          'real')['prepare_position_tolerance_rad']
+        self.io.held_reference = self.held_reference
+        self.io.prepare_replay = self.prepare_replay
         self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s']
         self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
         self.io.stop_requires_arrival = False
@@ -167,32 +183,50 @@ class PositionSessionDevices:
         """Read the confirmed PAUSE point without acquiring or sending anything."""
         engine = self.node.engine
         try:
-            if (self.node.closing or engine.active or
-                    engine.stopping or engine.stop_fault or self.io.stop_failures):
-                raise RuntimeError('SNOWBOT_HELD_REFERENCE_REQUIRES_STOPPED_LEASE')
-            identity = getattr(self.io, 'pause_request', None) or self.io.captured_pause_request
-            targets = self.health.confirmed_hold(identity)
-            if targets is None:
-                raise RuntimeError('SNOWBOT_HELD_REFERENCE:'+self.health.hold_failure(identity))
-            if any(not self.io.profile.limits[n][0] <= q <= self.io.profile.limits[n][1]
-                   for n, q in targets.items()):
-                raise RuntimeError('SNOWBOT_HELD_REFERENCE_LIMIT')
+            instance, boot, session, sequence, positions = self.held_reference()
+            targets = dict(positions)
             obs = self.health.observation
-            # A may inspect a completed PAUSE before acquiring its own lease.
-            # This remains a read-only snapshot, not an ownership grant.
-            from snowbot_hardware.session import SLOTS
-            if any(not math.isfinite(obs.speed[SLOTS.index(n)]) or abs(obs.speed[SLOTS.index(n)])>parameters_for(self,'execution')['held_reference_velocity_tolerance_rad_s']
-                   for n in CONTROL_NAMES):
-                raise RuntimeError('SNOWBOT_HELD_REFERENCE_NOT_STATIONARY')
             reply.success, reply.message = True, json.dumps(dict(
-                instance_id=self.node.instance_id, profile_hash=self.io.profile.digest,
+                instance_id=instance, profile_hash=self.io.profile.digest,
                 lease_id=engine.lease_id, epoch=engine.epoch, revision=engine.revision,
                 stamp=obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9-obs.pdo_age,
-                positions=targets, boot_id=obs.boot_id, session=obs.session,
-                sequence=obs.command_sequence))
+                positions=targets, boot_id=boot, session=session, sequence=sequence))
         except RuntimeError as exc:
             reply.success, reply.message = False, str(exc)
         return reply
+
+    def held_reference(self):
+        """Authenticate one fixed PAUSE reference; acquisition owns measured rest."""
+        engine = self.node.engine
+        if (self.node.closing or engine.active or engine.stopping or engine.stop_fault or self.io.stop_failures):
+            raise RuntimeError('SNOWBOT_HELD_REFERENCE_REQUIRES_STOPPED_LEASE')
+        identity = getattr(self.io, 'pause_request', None) or self.io.captured_pause_request
+        targets = self.health.confirmed_hold(identity)
+        if targets is None:
+            raise RuntimeError('SNOWBOT_HELD_REFERENCE:'+self.health.hold_failure(identity))
+        if any(not self.io.profile.limits[n][0] <= q <= self.io.profile.limits[n][1] for n,q in targets.items()):
+            raise RuntimeError('SNOWBOT_HELD_REFERENCE_LIMIT')
+        if self.io.pause_targets is None:
+            self.io.pause_targets = targets
+        elif targets != self.io.pause_targets:
+            raise RuntimeError('SNOWBOT_HELD_REFERENCE_CHANGED')
+        obs = self.health.observation
+        return self.node.instance_id, obs.boot_id, obs.session, obs.command_sequence, tuple(sorted(targets.items()))
+
+    def prepare_replay(self, prepared):
+        """Populate the bulk ROS arrays before acquiring the lease."""
+        wire = self.arm_type().trajectory
+        wire.version = 4 if prepared.inner_reference else 5
+        order = [prepared.motion.names.index(n) for n in CONTROL_NAMES]
+        for start, duration, source_duration, elapsed, controls in prepared.description:
+            wire.piece_start.append(start)
+            wire.duration.append(duration)
+            wire.source_duration.append(source_duration)
+            wire.source_elapsed.append(elapsed)
+            for i in order:
+                wire.control_count.append(len(controls[i]))
+                wire.controls.extend(controls[i])
+        self.replay_wire = wire
 
     def receive_receipt(self, msg):
         """Takeover ACK opens its initial barrier; ordinary targets/PAUSE never wait."""
@@ -222,9 +256,8 @@ class PositionSessionDevices:
         except (ValueError, RuntimeError) as exc:
             self.node.get_logger().warn(str(exc), throttle_duration_sec=1.)
 
-    def identity(self, topic, expected, kind, *, subscription=False, discovering=False):
-        method = self.graph.get_subscriptions_info_by_topic if subscription else self.graph.get_publishers_info_by_topic
-        infos = method(topic)
+    def identity(self, topic, expected, kind, *, discovering=False):
+        infos = self.graph.get_publishers_info_by_topic(topic)
         # Fast DDS may deliver samples before its graph resolves the node name.
         # Before the first measured frame, discard these samples and keep waiting.
         if discovering and self.health.observation is None and (not infos or
@@ -233,7 +266,7 @@ class PositionSessionDevices:
                  infos[0].node_namespace == '_NODE_NAMESPACE_UNKNOWN_')):
             return False
         matched = [i for i in infos if i.node_namespace.rstrip('/')+'/'+i.node_name == expected and i.topic_type == kind]
-        if len(matched) != 1 or not subscription and len(infos) != 1:
+        if len(matched) != 1 or len(infos) != 1:
             found = [dict(node=i.node_namespace.rstrip('/')+'/'+i.node_name, type=i.topic_type) for i in infos]
             raise RuntimeError('SNOWBOT_SESSION_ENDPOINT:'+topic+';expected='+expected+
                                ';type='+kind+';found='+json.dumps(found, separators=(',', ':')))
@@ -294,27 +327,29 @@ class PositionSessionDevices:
             self.node.get_logger().warn(detail, throttle_duration_sec=1.)
 
     def _check_session_health(self, groups, *, acquiring=False):
-        self.health.require(groups, acquiring=(acquiring or self.io.requesting_pause or bool(self.io.stop_targets)))
         obs = self.health.observation
+        waiting = obs is not None and self._waiting_for_takeover_pdo(obs)
+        self.health.require(groups, acquiring=(acquiring or waiting or self.io.requesting_pause or bool(self.io.stop_targets)))
         if obs.session_selected and obs.session != self.envelopes.session:
             # A paused/expired session can be explicitly replaced after capture.
             # During a pending stop, ignore its delayed observation and wait for
             # the exact new PAUSE identity; it cannot confirm this stop.
             if not (acquiring or self.io.requesting_pause or self.io.stop_targets or
-                    self._waiting_for_takeover_pdo(obs)) or obs.session_reason < 1:
+                    waiting) or obs.session_reason < 1:
                 raise RuntimeError('SNOWBOT_SESSION_OWNER_CONFLICT')
 
     def _waiting_for_takeover_pdo(self, obs):
-        # ACK may arrive before PDO changes owner. Allow only the captured old
-        # hold, until actual adoption or the original TAKEOVER deadline.
+        # ACK may precede PDO adoption. Only the captured old hold/stop may
+        # remain until adoption or the original TAKEOVER deadline.
         previous = self.takeover_previous_hold
         return bool(previous is not None and
             (obs.boot_id, obs.session, obs.command_sequence,
              self.health.states['servo'][1].instance_id) == previous[:4] and
             round(self.node.now()*1e9) < previous[4] and
-            obs.session_reason == 1 and obs.hold_valid and
-            getattr(obs, 'trajectory_phase', 0) == 4 and
-            getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False))
+            obs.session_reason == previous[5] and
+            (obs.session_reason >= 2 or obs.hold_valid and
+             getattr(obs, 'trajectory_phase', 0) == 4 and
+             getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False)))
 
     def check_health(self, groups, *, acquiring=False):
         self._check_session_health(groups, acquiring=acquiring)
@@ -401,18 +436,9 @@ class PositionSessionDevices:
                 raise RuntimeError('SNOWBOT_PAUSE_AUTHORITY_UNAVAILABLE')
         else:
             self.check_health(groups, acquiring=True)
-        for topic, kind, writer, reader in (
-            ('command', 'PositionSessionCommand', None, 'arms'),
-            ('upper', 'PositionSessionUpper', 'arms', 'middle'),
-            ('servo', 'PositionSessionServo', 'middle', 'head')):
-            name = '/bindu/position/'+topic
-            self.identity(name, self.receivers[reader], 'snowbot_ctl_msgs/msg/'+kind, subscription=True)
-            if writer:
-                self.identity(name, self.receivers[writer], 'snowbot_ctl_msgs/msg/'+kind)
-            elif self.graph.count_publishers(name) != 1:
-                raise RuntimeError('SNOWBOT_COMMAND_PUBLISHER_CONFLICT:'+name)
-        if any(self.graph.count_publishers(t) for t in ('/joint_position_cmd', '/body/motor_cmd')):
-            raise RuntimeError('SNOWBOT_LEGACY_SOURCE_CONFLICT')
+            for layer, (_, state) in self.health.states.items():
+                if state.reason in ('command_source_discovering', 'command_source_conflict', 'legacy_source_conflict'):
+                    raise RuntimeError('SNOWBOT_COMMAND_ENDPOINT:'+layer+':'+state.reason)
 
     def advance_startup_hold(self, engine):
         """One write-enabled startup, using the normal lease/command/ACK path.
@@ -477,8 +503,7 @@ class PositionSessionDevices:
         if not engine.active or engine.stopping:
             return
         sent = self.sent.get(self.envelopes.sequence)
-        lead_ns = round(self.trajectory_limits.get('target_stream_brake_lead_s',
-            TARGET_STREAM_LIMIT_DEFAULTS['target_stream_brake_lead_s'])*1e9)
+        lead_ns = round(self.runtime_parameters['execution']['target_stream_brake_lead_s']*1e9)
         if sent and sent[0]['operation'] != 2:
             # Keep the ordinary execution path to one tick. The extra dispatch
             # is needed only when the preceding packet is about to be fenced.
@@ -552,16 +577,8 @@ class PositionSessionDevices:
             msg.trajectory.effective_at_ns = round(prepared.effective*1e9)
             if self.io.source_motion.mode != 'trajectory_heartbeat':
                 self.replay_segment_id = metadata['sequence']
-                # Existing Bernstein wire representation; never refit q.
-                order = [self.io.source_motion.names.index(n) for n in CONTROL_NAMES]
-                for start, duration, source_duration, elapsed, controls in prepared.description:
-                    msg.trajectory.piece_start.append(start)
-                    msg.trajectory.duration.append(duration)
-                    msg.trajectory.source_duration.append(source_duration)
-                    msg.trajectory.source_elapsed.append(elapsed)
-                    for i in order:
-                        msg.trajectory.control_count.append(len(controls[i]))
-                        msg.trajectory.controls.extend(controls[i])
+                msg.trajectory = self.replay_wire
+                msg.trajectory.effective_at_ns = round(prepared.effective*1e9)
             msg.trajectory.segment_id = self.replay_segment_id
         for field, getter, ceiling in (('max_velocity', self.io.profile.speed, self.trajectory_limits['trajectory_max_velocity']),
                 ('max_acceleration', self.io.profile.acceleration, self.trajectory_limits['trajectory_max_acceleration']),
@@ -576,11 +593,11 @@ class PositionSessionDevices:
             self.takeover_pending = (dict(metadata), instance)
             obs = self.health.observation
             self.takeover_previous_hold = (
-                (obs.boot_id, obs.session, obs.command_sequence, instance, metadata['expires_at_ns'])
-                if obs.session_selected and obs.session != metadata['session'] and
-                obs.session_reason == 1 and obs.hold_valid and
+                (obs.boot_id, obs.session, obs.command_sequence, instance, metadata['expires_at_ns'], obs.session_reason)
+                if obs.session != metadata['session'] and (obs.session_reason >= 2 or
+                obs.session_selected and obs.session_reason == 1 and obs.hold_valid and
                 getattr(obs, 'trajectory_phase', 0) == 4 and
-                getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False)
+                getattr(obs, 'reference_valid', False) and getattr(obs, 'output_valid', False))
                 else None)
         elif metadata['operation'] == 2:
             self.takeover_pending = None

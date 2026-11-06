@@ -1,10 +1,3 @@
---- a/servo_control/include/ros_controller/rosLoopMsgDefine.h
-+++ b/servo_control/include/ros_controller/rosLoopMsgDefine.h
-@@ -16,2 +16,2 @@
--#define ZERO_POS_THRESHOLD    (0.001) //回零触发阈值 (rad)
--#define ZERO_POS_EXIT_THRESH  (0.001) //回零退出阈值 (rad)
-+#define ZERO_POS_THRESHOLD    (0.008726646259971648) //双臂回零触发容差：0.5° (rad)
-+#define ZERO_POS_EXIT_THRESH  ZERO_POS_THRESHOLD //双臂回零完成容差：0.5° (rad)
 --- a/servo_control/include/ros_controller/rosLoop.h
 +++ b/servo_control/include/ros_controller/rosLoop.h
 @@ -1,3 +1,4 @@
@@ -21,7 +14,20 @@
 +        rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr drive_diagnostics_service_,drive_reset_service_;
          std::string position_stop_policy_;
          void position_step();
- 
+
+--- a/servo_control/include/ros_controller/rosLoopMsgDefine.h
++++ b/servo_control/include/ros_controller/rosLoopMsgDefine.h
+@@ -13,8 +13,8 @@
+ #define LARMDOF (7)
+ #define RARMDOF (7)
+
+-#define ZERO_POS_THRESHOLD    (0.001) //回零触发阈值 (rad)
+-#define ZERO_POS_EXIT_THRESH  (0.001) //回零退出阈值 (rad)
++#define ZERO_POS_THRESHOLD    (0.008726646259971648) //双臂回零触发容差：0.5° (rad)
++#define ZERO_POS_EXIT_THRESH  ZERO_POS_THRESHOLD //双臂回零完成容差：0.5° (rad)
+
+ //网卡名称定义
+ extern std::string netCard_name;
 --- a/servo_control/include/servo_control/drive_maintenance.h
 +++ b/servo_control/include/servo_control/drive_maintenance.h
 @@ -0,0 +1,66 @@
@@ -99,7 +105,7 @@
  #include "servo_control/position_observation.h"
 +#include "servo_control/drive_maintenance.h"
  #include "servo_control/position_watchdog.h"
- 
+
  #include <inttypes.h>
 @@ -110,6 +111,9 @@
      position_session::Observation observation() { return observation_cache_.read(); }
@@ -113,7 +119,7 @@
      void stop();
 @@ -151,6 +155,7 @@
      void printCommunicationStatus() const; // Cached values only; call outside RT thread.
- 
+
  private:
 +    drive_maintenance::Reset drive_reset_;
      void realtimeLoop();
@@ -131,7 +137,7 @@
 +bool EtherCAT_driveResetBusy();
  #ifndef TRANSMIT_H
  #define TRANSMIT_H
- 
+
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
 @@ -78,6 +78,22 @@
@@ -147,7 +153,7 @@
 +    drive_reset_service_=create_service<std_srvs::srv::Trigger>("~/reset_drive_faults",
 +        [this](const std_srvs::srv::Trigger::Request::SharedPtr, std_srvs::srv::Trigger::Response::SharedPtr reply){
 +            if(!drive_startup_finished_ || shutdown_mode_ || sigInterrupt.load() || impedance_enable_ ||
-+               position_reference_mode_!=2 || position_gate_.selected() || position_pending_ ||
++               position_gate_.selected() || position_pending_ ||
 +               position_target_pending_ || position_target_takeover_valid_ || (position_admission_&&position_admission_->busy())) {
 +                reply->success=false;reply->message="rejected_startup_shutdown_session_or_mode";return;
 +            }
@@ -157,7 +163,7 @@
      //反馈值发送器初始化
      RetData_pub = this->create_publisher<snowbot_ctl_msgs::msg::RetInformation>(
          "dualArmCtl_fdback",
-@@ -106,6 +122,11 @@
+@@ -112,6 +128,11 @@
          m.output_position=s.output_position;m.output_speed=s.output_speed;m.output_torque=s.output_torque;m.output_kp=s.output_kp;m.output_kd=s.output_kd;
          for(unsigned i=0;i<position_session::joint_count;++i)m.hold_position[i]=s.hold_position[i];
          position_observation_pub_->publish(m);
@@ -169,49 +175,58 @@
      });
      position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
      position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
-@@ -1320,6 +1342,7 @@
- 
+@@ -544,6 +565,7 @@
+     impedance_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+         "~/impedance_enable", 10,
+         [this](const std_msgs::msg::Bool::SharedPtr msg) {
++            if(EtherCAT_driveResetBusy())return;
+             if (!impedance_inited_ && msg->data) {
+                 RCLCPP_WARN(this->get_logger(),
+                             "Impedance not initialized, ignore enable");
+@@ -1347,6 +1369,7 @@
+
      position_initialized_=true;position_init_error_.clear();
      position_startup_complete_=arm_startup_ready && head_torso_startup_ready && !sigInterrupt.load();
 +    drive_startup_finished_=!sigInterrupt.load();
      //开启ros2循环
      while (rclcpp::ok()){
          //----- Ctrl+C 关机回零: 像上位机下发一样, 检测需要回零的关节并单独使能 -----
-@@ -2021,6 +2044,8 @@
- 
+@@ -2048,6 +2071,8 @@
+
  // 夹爪控制回调 (data: [pos_rad, spd, tor], Kp/Kd跟手臂关节7)
  void ServoNode::gripper_cmd_apply(const std_msgs::msg::Float64MultiArray::SharedPtr msg, bool is_left){
 +    if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
 +
      if (shutdown_mode_) return;   // 关机回零期间忽略外部夹爪指令
- 
+
      double pos = 0.0, spd = 0.0, tor = 0.0;   // 速度默认 0, 避免驱动器 KD 前馈产生位置偏差
-@@ -2150,6 +2175,8 @@
+@@ -2177,6 +2202,8 @@
  // ========== 躯干/头部电机回调 & runin (纯位置模式) ==========
- 
+
  void ServoNode::torso_cmd_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg){
 +    if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
 +
      if(position_gate_.selected()){position_rejection_="legacy_waist_source_conflict";return;}
      if (shutdown_mode_) return;   // 关机回零期间忽略外部指令
      // 支持纯位置格式 [pos0, pos1] 以及旧版 [pos,spd,tor,kp,kd] x 2
-@@ -2204,6 +2231,8 @@
+@@ -2231,6 +2258,8 @@
  }
- 
+
  void ServoNode::head_cmd_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg){
 +    if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
 +
      if (shutdown_mode_) return;   // 关机回零期间忽略外部指令
      if (msg->data.size() == 2) {
          h_pos_target[0] = msg->data[0];
-@@ -2302,6 +2331,7 @@
+@@ -2329,7 +2358,8 @@
  }
- 
+
  void ServoNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
 + if(EtherCAT_driveResetBusy()){position_rejection_="manual_reset_in_progress";return;}
-  if(position_reference_mode_){position_submit(packet);return;}
-  const auto now=this->now().nanoseconds();const auto steady=position_session::steady_ns();const auto m=position_session::meta(packet->meta);
-  position_rejected_session_=m.session;position_rejected_sequence_=m.sequence;
+  if(const char* reason=position_command_graph_.check(*this,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo")){if(std::string(reason)!="command_source_discovering")position_rejection_=reason;return;}
+  position_submit(packet);
+ }
+ void ServoNode::position_interrupt(){
 --- a/servo_control/src/servo_control/ethercat_driver.cpp
 +++ b/servo_control/src/servo_control/ethercat_driver.cpp
 @@ -1,3 +1,4 @@
@@ -221,7 +236,7 @@
   *        基于 SNOWBOT_SOEM_Demo/sensor_motor_test.c
 @@ -626,6 +627,35 @@
  }
- 
+
  // ========== 单次 PDO 收发 (由 ROS loop 按 1kHz 调用) ==========
 +std::string EtherCATDriver::driveDiagnostics() {
 +    const auto s=observation();const auto now=position_session::steady_ns();
@@ -255,7 +270,7 @@
  void EtherCATDriver::cycle() {
      if (!inOP_) return;
      cycle_count_++;
-@@ -648,8 +668,21 @@
+@@ -648,8 +678,21 @@
      if(session_bypass_.load())session_packet.selected=false;
      session_watchdog_.evaluate(session_packet,observation_rt_,position_session::steady_ns());
      session_packet=session_watchdog_.output;
@@ -280,63 +295,13 @@
 --- a/servo_control/src/servo_control/transmit.cpp
 +++ b/servo_control/src/servo_control/transmit.cpp
 @@ -41,6 +41,10 @@
- 
+
  void EtherCAT_positionOutput(const position_session::Output& output){if(g_ecat_driver)g_ecat_driver->sessionOutput(output);}
  void EtherCAT_positionBypass(){if(g_ecat_driver)g_ecat_driver->sessionBypass();}
 +
 +std::string EtherCAT_driveDiagnostics(){return g_ecat_driver ? g_ecat_driver->driveDiagnostics() : "driver_unavailable";}
 +bool EtherCAT_requestDriveReset(){return g_ecat_driver && g_ecat_driver->requestDriveReset();}
 +bool EtherCAT_driveResetBusy(){return g_ecat_driver && g_ecat_driver->driveResetBusy();}
- 
+
  bool EtherCAT_isOperational() {
      return g_ecat_driver && g_ecat_driver->isOperational();
---- a/servo_control/src/ros_controller/rosLoop.cpp
-+++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -1,4 +1 @@
--    // 默认不上电启用, 由上位机通过 ~/impedance_enable 切换.
--    // 左/右参考位姿由控制器内部直接订阅:
--    //   ~/impedance/arm_l_link_7/reference  (左臂)
--    //   ~/impedance/arm_r_link_7/reference  (右臂)
-+    // Position releases retain the original gravity model, but expose no impedance control.
-@@ -8,40 +5 @@
--            if (!impedance_inited_ && msg->data) {
--                RCLCPP_WARN(this->get_logger(),
--                            "Impedance not initialized, ignore enable");
--                return;
--            }
--            const bool was_enabled = impedance_enable_;
--            impedance_enable_ = msg->data;
--            RCLCPP_INFO(this->get_logger(), "Impedance enable -> %s",
--                        impedance_enable_ ? "ON" : "OFF");
--            if (impedance_enable_ && !was_enabled) {
--                // 上升沿: 标记 just_enabled, 由 applyImpedanceControl 在 RT
--                // 线程上下文捕获当前末端位姿/sensor bias (避免与 EtherCAT
--                // 线程并发读 motor feedback). 同步使能双臂+双夹爪电机,
--                // 让 CiA402 在下一个 PDO 周期内走完 enable 序列.
--                impedance_just_enabled_.store(true, std::memory_order_release);
--                bool arm_mask[TOTAL_SLAVES] = {};
--                for (int i = 0; i < LARMDOF; i++) arm_mask[i] = true;        // 左臂 J1~J7
--                arm_mask[7] = true;                                            // 左夹爪
--                // arm_mask[5] = true;
--                for (int i = 0; i < RARMDOF; i++) arm_mask[8 + i] = true;    // 右臂 J1~J7
--                arm_mask[15] = true;                                           // 右夹爪
--                // arm_mask[14] = true;
--                // arm_mask[13] = true;
--                // arm_mask[12] = true;
--                // arm_mask[10] = true;
--                EtherCAT_setMotorEnable(true);
--                EtherCAT_setPerMotorEnable(arm_mask);
--                RCLCPP_INFO(this->get_logger(),
--                            "Impedance enable: motors enabled (arms+grippers)");
--            } else if (!impedance_enable_ && was_enabled) {
--                // 下降沿: 立即清 bias 和参考, 并失能双臂+双夹爪电机,
--                // 让机械臂回到回零后的锁死状态 (与原有失能逻辑一致)
--                if (impedance_left_)  impedance_left_->disable();
--                if (impedance_right_) impedance_right_->disable();
--                bool all_off_mask[TOTAL_SLAVES] = {};
--                EtherCAT_setPerMotorEnable(all_off_mask);
--                EtherCAT_setMotorEnable(false);
--                RCLCPP_INFO(this->get_logger(),
--                            "Impedance disable: motors disabled (arms+grippers)");
--            }
-+            if (msg->data) RCLCPP_WARN(this->get_logger(), "Position release rejects impedance enable");

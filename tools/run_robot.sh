@@ -3,9 +3,9 @@
 set -e
 
 usage() {
-    printf '%s\n' 'Usage: bash tools/run_robot.sh base' \
+    printf '%s\n' 'Usage: bash tools/run_robot.sh base [--no-impedance]' \
         '       bash tools/run_robot.sh vr|replay|menu|prepare' \
-        '  base     Start servo, middle and topic upper; position control.' \
+        '  base     Start servo, middle and topic upper; impedance is on by default.' \
         '  vr       Start VR, executor, browser and recording.' \
         '  replay   Start executor, Prepare, then the numbered menu (default).' \
         '  menu     Start executor and menu for an already mounted tool.' \
@@ -17,7 +17,7 @@ if (( $# )); then shift; fi
 case "$mode" in
     -h|--help) usage; exit 0 ;;
     base)
-        if (( $# )); then usage >&2; exit 2; fi ;;
+        if (( $# > 1 )) || [[ $# == 1 && "$1" != --no-impedance ]]; then usage >&2; exit 2; fi ;;
     vr|replay|menu|prepare|executor)
         if (( $# )); then usage >&2; exit 2; fi ;;
     *) usage >&2; exit 2 ;;

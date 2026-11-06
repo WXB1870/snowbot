@@ -25,6 +25,89 @@ struct ArmCtlOptInterface {
  );
 };
 // PRODUCTION_FUNCTION
+#ifdef TARGET_AUXILIARY
+#include "position_session_contract.h"
+#include "position_session_ros.h"
+#include <memory>
+#include <string>
+namespace snowbot_ctl_msgs { namespace msg {
+struct MidNodeCtlMsgSend {bool if_streaming_joint_position=true;int ctl_trans_mod=3;};
+struct SessionMeta {
+ uint64_t session=7,sequence=1,feedback_boot_id=3,feedback_sample=2,middle_instance_id=32;
+ int64_t source_stamp_ns=1999000000,expires_at_ns=2399000000;
+ uint8_t operation=1,reference_mode=2;
+};
+struct PositionSessionUpper {
+ using SharedPtr=std::shared_ptr<PositionSessionUpper>;
+ SessionMeta meta;MidNodeCtlMsgSend command;int trajectory=37;std::array<double,2> waist_position{.12,-.08};
+};
+}}
+struct ArmCtlNode {
+ struct Endpoint {
+  std::string node_name()const{return "robot_upperMonitor";}
+  std::string node_namespace()const{return "/";}
+  std::string topic_type()const{return "snowbot_ctl_msgs/msg/PositionSessionUpper";}
+ };
+ bool source_known=true;
+ position_session::CommandGraph position_command_graph_;
+ std::vector<Endpoint> get_publishers_info_by_topic(const char*)const{return source_known?std::vector<Endpoint>{{}}:std::vector<Endpoint>{};}
+ unsigned count_publishers(const char*)const{return 0;}
+ position_session::Gate position_gate_;
+ std::string position_rejection_,position_wait_reason_;
+ bool position_dispatch_=false,ifInitTemp=false,checkTemp=false,ifReInit_get=true;
+ unsigned ready_checks=0,native_dispatches=0;uint64_t position_instance_id_=32;
+ int64_t position_nominal_bootstrap_expires_=0;
+ std::vector<double> lArm_stPos_get,rArm_stPos_get;
+ std::array<double,2> position_waist_target_{};
+ snowbot_ctl_msgs::msg::SessionMeta position_meta_;
+ ArmCtlNode(){position_meta_.session=0;}
+ int position_trajectory_=0;
+ snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr position_target_packet_;
+ struct Feedback {
+  uint64_t boot=3,ready_sample=1,sample=2;int64_t ready_ros=1900000000;
+  std::array<double,16> q{};
+  bool fresh(int64_t,int64_t)const{return true;}
+ } position_feedback_;
+ struct Clock {int64_t nanoseconds()const{return 2000000000;}};
+ Clock now()const{return {};}
+ bool position_ready(){++ready_checks;return true;}
+ void upperMonitor_msg_callback(const std::shared_ptr<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>&){assert(position_dispatch_);++native_dispatches;}
+ void position_callback(const snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr packet);
+};
+// PRODUCTION_MIDDLE_CALLBACK
+void check_middle_session(){
+ using Packet=snowbot_ctl_msgs::msg::PositionSessionUpper;
+ ArmCtlNode discovering;discovering.source_known=false;
+ discovering.position_callback(std::make_shared<Packet>());
+ assert(discovering.position_rejection_.empty()&&!discovering.position_gate_.selected()&&discovering.native_dispatches==0);
+ for(uint8_t mode:{0,1}){
+  ArmCtlNode node;auto packet=std::make_shared<Packet>();packet->meta.reference_mode=mode;
+  node.position_callback(packet);
+  assert(node.position_rejection_=="reference_mode_conflict");
+  assert(!node.position_gate_.selected() && node.ready_checks==0 && node.native_dispatches==0);
+ }
+ ArmCtlNode node;auto packet=std::make_shared<Packet>();
+ node.position_callback(packet);
+ assert(node.position_rejection_.empty() && node.native_dispatches==1 && node.ifReInit_get);
+ assert(node.position_meta_.reference_mode==2 && node.position_trajectory_==37);
+ assert(node.position_nominal_bootstrap_expires_==packet->meta.expires_at_ns);
+ assert(node.position_waist_target_==packet->waist_position);
+ packet=std::make_shared<Packet>(*packet);packet->meta.operation=0;++packet->meta.sequence;
+ node.position_callback(packet);
+ assert(node.position_rejection_.empty() && node.native_dispatches==2 && !node.ifReInit_get);
+ packet=std::make_shared<Packet>(*packet);packet->meta.operation=2;++packet->meta.sequence;
+ packet->meta.expires_at_ns=packet->meta.source_stamp_ns+2000000000;
+ node.position_feedback_.q.fill(.5);node.position_callback(packet);
+ assert(node.position_rejection_.empty() && node.native_dispatches==3 && !node.ifReInit_get);
+ assert(node.position_gate_.last().expires==packet->meta.expires_at_ns);
+ assert(node.position_waist_target_==packet->waist_position);
+ assert(node.lArm_stPos_get.front()==0. && node.rArm_stPos_get.front()==0.);
+ ArmCtlNode expired;packet=std::make_shared<Packet>();packet->meta.expires_at_ns=1999999999;
+ expired.position_callback(packet);
+ assert(!expired.position_gate_.selected() && expired.native_dispatches==0);
+ std::cerr<<"PASS actual middle session callback rejects retired modes and forwards v3 takeover/target/PAUSE with original deadlines and waist targets\n";
+}
+#endif
 void equal(const std::vector<outpWrap>& a,const std::vector<outpWrap>& b){for(unsigned arm=0;arm<2;++arm){assert(a[arm].posDes==b[arm].posDes);assert(a[arm].velDes==b[arm].velDes);assert(a[arm].KpDes==b[arm].KpDes);assert(a[arm].KdDes==b[arm].KdDes);assert(a[arm].gravComp_TorDes==b[arm].gravComp_TorDes);assert(a[arm].InteriaComp_TorDes==b[arm].InteriaComp_TorDes);assert(a[arm].FeedForward_TorDes==b[arm].FeedForward_TorDes);}}
 int main(){
  KDL::JntArray pos,vel;for(unsigned i=0;i<7;++i){pos.q[i]=.02*i;vel.q[i]=.003*i;}
@@ -34,6 +117,7 @@ int main(){
   std::cout<<'\n';
  }
 #ifdef TARGET_AUXILIARY
+ check_middle_session();
  for(int gravity=1;gravity<=3;++gravity){ArmCtlOptInterface legacy,target;legacy.outpMod=1;legacy.GravCompInpChoose=gravity;auto expected=legacy.Traj_temp_outp(pos,pos,vel,vel,std::vector<double>(7,.1),std::vector<double>(7,.2));
   std::vector<outpWrap> reference(2);for(auto& arm:reference)for(unsigned i=0;i<7;++i){arm.posDes.push_back(.01*i);arm.velDes.push_back(.001*i);}
   modCtl config;config.gravComp_ctl.GravCompInpMod=gravity;

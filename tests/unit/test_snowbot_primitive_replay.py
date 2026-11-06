@@ -7,122 +7,81 @@ from snowbot_teleop.replay import NAMES, Replay, run_replay
 from tools.deployment.deploy import executor_command
 
 
-class Port:
-    def __init__(self, speed):
-        self.now = 0.
-        self.speed = speed
-        self.acquired_at = None
-        self.sent = []
-        self.released = False
-        self.frozen = False
-        self.fail_feedback = False
-        self.reject_target = False
+TIMING = dict(period_s=.02, command_ttl_s=.25, renewal_period_s=.5)
 
+
+class Port:
+    def __init__(self):
+        self.now, self.acquired_at, self.sent, self.stops = 0., None, [], 0
+        self.result = None
+        self.delay = 0.
+        self.error = None
     def steady(self): return self.now
-    def ros(self): return 100. + self.now
-    def wait_until(self, due): self.now = max(self.now, due)
-    def feedback_stamp(self): return 100. if self.frozen else self.ros()
-    def check(self, owned):
-        if self.fail_feedback:
-            raise RuntimeError('STALE_FEEDBACK')
-        if self.reject_target and self.sent:
-            raise RuntimeError('trajectory_takeover_seed')
-        velocity = dict.fromkeys(NAMES, 0.)
-        velocity['body_joint_2'] = self.speed(self.now)
-        return dict.fromkeys(NAMES, 0.), velocity
+    def ros(self): return 100.+self.now
+    def wait_until(self, due): self.now = max(self.now, due)+self.delay
+    def prepare(self, plan): self.now += .147  # Bulk logs and serialization precede control.
     def acquire(self): self.acquired_at = self.now
     def renew(self): pass
-    def send(self, goal, source): self.sent.append((self.now, source))
-    def release_and_confirm_stop(self):
-        self.released = True
-        return True
-    def arrival_tolerance(self, name): return .002
+    def send(self, source):
+        if self.error: raise RuntimeError(self.error)
+        self.sent.append(source)
+        if len(self.sent) == 3:
+            self.result = dict(completed=True, final=True, stop_confirmed=True, error=None,
+                nominal_arrival_confirmed=False, measured_arrival_confirmed=True,
+                measured_end_error_rad={}, details=[])
+    def outcome(self): return self.result
+    def finish(self):
+        self.stops += 1
+        return self.result or dict(completed=False, final=True, stop_confirmed=True, error=None,
+            nominal_arrival_confirmed=False, measured_arrival_confirmed=False,
+            measured_end_error_rad=None, details=[])
 
 
 class ReplayTakeoverTests(unittest.TestCase):
-    def test_wider_arrival_tolerances_accept_two_degrees_but_still_reject_excess(self):
-        import ast
-        import math
-        from types import SimpleNamespace as S
-        import snowbot_bringup.runtime.snowbot_primitive_replay as module
-        tree = ast.parse(Path(module.__file__).read_text())
-        execute = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'execute')
-        cls = next(n for n in execute.body if isinstance(n, ast.ClassDef) and n.name == 'Port')
-        arrival = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'arrival_tolerance')
-        arrival.decorator_list = []
-        velocity = next(n for n in execute.body if isinstance(n, ast.Assign) and
-                        any(isinstance(t, ast.Name) and t.id == 'velocity_tolerance' for t in n.targets))
-        profile = S(feedback_tolerances=dict(joint_position=.002, joint_velocity=.01),
-                    stop_position_tolerances={'body_joint_1': math.radians(1)})
-        args = S(action='Push')
-        ns = dict(args=args, robot=S(profile=profile), prepare_tolerance=.035, math=math,
-                  settings={'execution': {'motion_arrival_velocity_tolerance_rad_s': .005}})
-        exec(compile(ast.Module(body=[arrival, velocity], type_ignores=[]), str(module.__file__), 'exec'), ns)
-        tolerance = ns['arrival_tolerance']
-        self.assertEqual(tolerance('arm_l_joint_1'), math.radians(2))
-        self.assertEqual(tolerance('body_joint_1'), math.radians(2))
-        self.assertEqual(ns['velocity_tolerance'], .01)
-        args.action = 'Prepare'
-        self.assertEqual(tolerance('arm_l_joint_1'), .035)
-        args.action = 'Push'
-        profile.stop_position_tolerances['body_joint_2'] = .05
-        self.assertEqual(tolerance('body_joint_2'), .05)
-        for offset in (.03, .04):
-            with self.subTest(offset=offset):
-                port = Port(lambda t: .009)
-                port.arrival_tolerance = tolerance
-                plan = Replay((0., .02), ((0.,)*16, (offset,)*16), NAMES, 'tool', 'hash', 1.)
-                if offset == .03:
-                    self.assertTrue(run_replay(plan, port, velocity_tolerance=.01, settle_time=.1)['completed'])
-                else:
-                    with self.assertRaisesRegex(RuntimeError, 'REPLAY_ARRIVAL_UNCONFIRMED'):
-                        run_replay(plan, port, velocity_tolerance=.01, settle_time=.1, settle_timeout=.3)
-                self.assertTrue(port.released)
-
     def replay(self, port):
-        plan = Replay((0., .02), ((0.,)*16, (0.,)*16), NAMES, 'tool', 'hash', 1.)
-        return run_replay(plan, port, settle_timeout=.8, velocity_tolerance=.01)
+        return run_replay(Replay((0., .02), ((0.,)*16, (0.,)*16), NAMES, 'tool', 'hash', 1.),
+                          port, timing=TIMING)
 
-    def test_waits_through_a_second_swing_before_acquiring(self):
-        # One low-speed sample / READY must not authorize a later moving takeover.
-        port = Port(lambda t: .013 if .08 <= t < .3 else .009 if t < .3 else 0.)
+    def test_bulk_preparation_cannot_consume_first_heartbeat_budget(self):
+        port = Port()
         result = self.replay(port)
         self.assertTrue(result['completed'])
-        self.assertGreaterEqual(port.acquired_at, .5)
-        self.assertEqual(port.sent[0][1], 100. + port.acquired_at)
+        self.assertAlmostEqual(port.acquired_at, .147)
+        self.assertEqual(port.sent, [100.147, 100.167, 100.187])
+        self.assertEqual(port.stops, 1)
 
-    def test_rest_timeout_never_acquires_sends_or_releases(self):
-        port = Port(lambda t: -.013)
-        with self.assertRaisesRegex(RuntimeError, 'REPLAY_NOT_SETTLED.*body_joint_2'):
+    def test_late_client_cannot_redate_old_command_and_finishes_once(self):
+        port = Port(); port.delay = .3
+        with self.assertRaisesRegex(RuntimeError, 'REPLAY_STREAM_LATE'):
             self.replay(port)
-        self.assertIsNone(port.acquired_at)
-        self.assertFalse(port.sent or port.released)
-        self.assertLess(port.now, .83)
+        self.assertEqual(port.sent, [])
+        self.assertEqual(port.stops, 1)
 
-    def test_repeated_feedback_cannot_complete_rest_window(self):
-        port = Port(lambda t: 0.)
-        port.frozen = True
-        with self.assertRaisesRegex(RuntimeError, 'REPLAY_NOT_SETTLED'):
-            self.replay(port)
-        self.assertIsNone(port.acquired_at)
-
-    def test_feedback_error_before_acquire_does_not_request_stop(self):
-        port = Port(lambda t: 0.)
-        port.fail_feedback = True
-        with self.assertRaisesRegex(RuntimeError, 'STALE_FEEDBACK'):
-            self.replay(port)
-        self.assertIsNone(port.acquired_at)
-        self.assertFalse(port.sent or port.released)
-
-    def test_rejection_after_rest_still_stops_without_retry(self):
-        port = Port(lambda t: 0.)
-        port.reject_target = True
+    def test_command_timeout_survives_invalid_lease_and_stop_failure_details(self):
+        port = Port(); port.error = 'INVALID_LEASE'
+        port.finish = lambda: dict(completed=False, final=True, stop_confirmed=False,
+            nominal_arrival_confirmed=False, measured_arrival_confirmed=False,
+            measured_end_error_rad=None, error='COMMAND_TIMEOUT;STOP_UNCONFIRMED:vendor_hold',
+            details=['vendor_hold'])
         with self.assertRaises(RuntimeError) as caught:
             self.replay(port)
         result = json.loads(str(caught.exception))
-        self.assertIn('trajectory_takeover_seed', result['error'])
-        self.assertTrue(result['stop_confirmed'] and port.released)
-        self.assertEqual(len(port.sent), 1)
+        self.assertTrue(result['error'].startswith('COMMAND_TIMEOUT'))
+        self.assertIn('INVALID_LEASE', result['details'])
+        self.assertFalse(result['completed'] or result['stop_confirmed'])
+
+    def test_local_cancel_cause_and_external_cancel_are_not_replaced_by_invalid_lease(self):
+        for cause in ('KeyboardInterrupt', 'INVALID_LEASE'):
+            port = Port(); port.error = cause
+            port.finish = lambda: dict(completed=False, final=True, stop_confirmed=True,
+                nominal_arrival_confirmed=False, measured_arrival_confirmed=False,
+                measured_end_error_rad=None, error='CANCELED', details=[])
+            with self.assertRaises(RuntimeError) as caught:
+                self.replay(port)
+            result = json.loads(str(caught.exception))
+            self.assertEqual(result['error'], 'KeyboardInterrupt' if cause == 'KeyboardInterrupt' else 'CANCELED')
+            self.assertIn('CANCELED' if cause == 'KeyboardInterrupt' else 'INVALID_LEASE', result['details'])
+            self.assertTrue(result['stop_confirmed'])
 
     def test_current_preset_entry_passes_selected_dynamics(self):
         for mode in ('position', 'impedance'):

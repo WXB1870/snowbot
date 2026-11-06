@@ -37,6 +37,13 @@
     "lease_ttl_s": 2.0,
     "request_ttl_s": 0.25
   },
+  "replay": {
+    "period_s": 0.02,
+    "command_ttl_s": 0.25,
+    "renewal_period_s": 0.5,
+    "start_lead_s": 0.12,
+    "state_max_age_s": 0.2
+  },
   "execution": {
     "stop_confirmation_window_s": 0.1,
     "held_reference_velocity_tolerance_rad_s": 0.005,

@@ -14,11 +14,10 @@ def main():
     parser.add_argument('--vendor-root',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--bindu-root',type=Path,required=True,help='Selected Bindu checkout with the installed session preflight')
-    parser.add_argument('--execution-mode',choices=('position',),default='position',help='Synthetic position servo state/observation mode')
+    parser.add_argument('--execution-mode',choices=('position','impedance'),default='position',help='Synthetic position servo state/observation mode')
     parser.add_argument('--preflight-discovery-timeout',type=float,default=2.,help='New DDS observer discovery window; all feedback and contract freshness checks remain unchanged')
     args=parser.parse_args()
     if not 0 < args.preflight_discovery_timeout <= 10:parser.error('Require 0 < preflight discovery timeout <= 10 seconds')
-    if args.execution_mode!='position':parser.error('Target-stream relay validation supports pure position only')
     if int(os.environ.get('ROS_DOMAIN_ID','0'))<100 or os.environ.get('ROS_LOCALHOST_ONLY')!='1':
         raise RuntimeError('Require an isolated ROS domain >=100 and localhost-only transport')
     import rclpy
@@ -31,7 +30,7 @@ def main():
     from bindu_hardware.snowbot_session import CONTROL_NAMES
     from bindu_contracts.resources import package_share
     profile=Profile.load(package_share('snowbot_bringup')/'config/examples/snowbot/snowbot_vendor_position.json')
-    from tools.teleop.snowbot_pdo import observation_payload
+    from snowbot_bringup.visualization.snowbot_pdo import observation_payload
     rclpy.init()
     observer=rclpy.create_node('position_session_validation')
     feedback=rclpy.create_node('servo_node') # Test fixture only, not the servo executable.
@@ -65,11 +64,13 @@ def main():
         if layer=='upper':command+=['--ros-args','-p','control_source:=topic']
         launch_stamps[layer]=observer.get_clock().now().nanoseconds
         states.pop(layer,None)
-        process=subprocess.Popen(command,stdout=handle,stderr=subprocess.STDOUT,env=os.environ.copy())
+        environment=os.environ.copy()
+        environment['PYTHONHOME']=sys.base_prefix  # Match the middle layer's embedded Python to this test.
+        process=subprocess.Popen(command,stdout=handle,stderr=subprocess.STDOUT,env=environment)
         children.append(process);launched[process.pid]=time.monotonic()
         (args.output.parent/(str(process.pid)+'-launch.json')).write_text(json.dumps(dict(
-            command=command,pid=process.pid,environment={key:os.environ.get(key,'') for key in
-            ('AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','LD_LIBRARY_PATH','PYTHONPATH','ROS_DOMAIN_ID')}),indent=2)+'\n')
+            command=command,pid=process.pid,environment={key:environment.get(key,'') for key in
+            ('AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','LD_LIBRARY_PATH','PYTHONPATH','PYTHONHOME','ROS_DOMAIN_ID')}),indent=2)+'\n')
         return process
     def stop(process):
         if process.poll() is None:
@@ -88,7 +89,8 @@ def main():
                 msg.boot_id=333;msg.pdo_sample=max(1,sample);msg.pdo_age=max(0.,now-freeze_started) if frozen else .001
                 msg.receive_attempt=sample;msg.wkc=msg.expected_wkc=67;msg.valid_mask=0xfffff
                 msg.position=q;msg.speed=[0.]*20;msg.current=[0.]*20;msg.status=[0x27]*20
-                msg.reference_mode=2;msg.execution_mode=0
+                msg.reference_mode=2;msg.execution_mode=int(args.execution_mode=='impedance')
+                msg.sensor_valid_mask=3 if args.execution_mode=='impedance' else 0
                 msg.sample_time_ns=msg.header.stamp.sec*1_000_000_000+msg.header.stamp.nanosec
                 # This nominal reference is an explicit in-memory servo fixture.
                 # No servo executable, trajectory generator or device is running.
@@ -151,13 +153,16 @@ def main():
         from types import SimpleNamespace as S
         from bindu_hardware.snowbot_session import CONTROL_GROUPS,SourceEnvelope,SessionHealth
         from bindu_runtime.snowbot_position_session import PositionSessionDevices
+        from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS
         pump(.25);active_meta=None
         d=PositionSessionDevices.__new__(PositionSessionDevices)
         observer.now=lambda:observer.get_clock().now().nanoseconds*1e-9
         events=[];observer.event=lambda *args,**kwargs:events.append((args,kwargs))
-        d.node=d.graph=observer;d.health=SessionHealth(observer.now)
+        d.node=d.graph=observer;d.health=SessionHealth(observer.now,execution_mode=args.execution_mode)
+        d.trajectory_limits=dict(TARGET_STREAM_LIMIT_DEFAULTS)
         d.envelopes=SourceEnvelope(session,observer.now)
         d.sent={};d.target_instance=d.source_identity=d.takeover_pending=None
+        d.takeover_previous_hold=None
         d.target_fault='';d.applied_sequence=0
         d.arm_type=PositionSessionCommand;d.publishers={'arms':cmd_pub}
         d.receivers={'arms':'/robot_upperMonitor','middle':'/dual_arm_control_node','head':'/servo_node'}
@@ -242,10 +247,13 @@ def main():
         assert all(frame.trajectory==msg.trajectory and frame.meta==msg.meta for frame in matching)
         relayed=[frame for frame in upper_frames if frame.meta.session==101]
         assert relayed and all(frame.trajectory==msg.trajectory and frame.meta==msg.meta for frame in relayed)
+        assert all(frame.command.if_streaming_joint_position and frame.command.ctl_trans_mod==3 and
+                   list(frame.command.l_arm_des_pos_jntspace)==list(msg.command.l_arm_position) and
+                   list(frame.command.r_arm_des_pos_jntspace)==list(msg.command.r_arm_position) for frame in relayed)
         assert all(frame.meta.expires_at_ns==msg.meta.expires_at_ns for frame in matching)
         checks['empty_curve_target_recipe_and_source_identity_relayed_unchanged']=True
         observed=observations['last']
-        assert observed.reference_mode==2 and observed.execution_mode==0
+        assert observed.reference_mode==2 and observed.execution_mode==int(args.execution_mode=='impedance')
         assert observed.reference_valid and observed.output_valid and observed.segment_id==1
         assert observed.sample_time_ns==observed.header.stamp.sec*1_000_000_000+observed.header.stamp.nanosec
         assert list(observed.reference_position)==q[:7]+q[8:15]+q[18:20]

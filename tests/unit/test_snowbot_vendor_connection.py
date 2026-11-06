@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','session_v3_only'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','shutdown'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -66,70 +66,36 @@ class PositionReleaseTests(unittest.TestCase):
             copied=self.release/'src/servo_control'/folder/'bindu_execution_native'/name
             self.assertEqual(vendor.digest(copied),manifest['native_execution'][name])
 
-    def test_arm_homing_uses_half_degree_and_keeps_timeout_and_bus_gate(self):
-        header=(self.release/'src/servo_control/include/ros_controller/rosLoopMsgDefine.h').read_text()
-        loop=(self.release/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
-        self.assertIn('#define ZERO_POS_THRESHOLD    (0.008726646259971648)',header)
-        self.assertIn('#define ZERO_POS_EXIT_THRESH  ZERO_POS_THRESHOLD',header)
-        self.assertIn('constexpr float kRetzeroTimeoutAcceptError = 0.01f;',loop)
-        self.assertIn('if (settle_cnt > 500) retZero_done = true;',loop)
-        self.assertIn('constexpr int kRetzeroTimeoutCycles = 10000;',loop)
-        self.assertIn('bool residual_within_startup_tolerance = EtherCAT_communicationHealthy();',loop)
-        self.assertIn('arm_startup_ready = residual_within_startup_tolerance;',loop)
-        import re
-        definitions='\n'.join(re.findall(r'^#define ZERO_POS_(?:THRESHOLD|EXIT_THRESH).*$',header,re.M))
-        timeout=re.search(r'^constexpr float kRetzeroTimeoutAcceptError = .*?;',loop,re.M).group()
-        source=self.work/'homing-tolerance.cpp'
-        source.write_text('#include <cassert>\n#include <cmath>\n#include <initializer_list>\n'+definitions+'\n'+timeout+
-            '\nint main(){ const double degree=std::acos(-1.)/180.;\n'
-            'assert(std::abs(ZERO_POS_THRESHOLD/degree-.5)<1e-12);\n'
-            'for(double sign:{-1.,1.}){\n'
-            'assert(!(std::abs(sign*.499*degree)>ZERO_POS_EXIT_THRESH));\n'
-            'assert(!(std::abs(sign*.5*degree)>ZERO_POS_EXIT_THRESH));\n'
-            'assert(std::abs(sign*.501*degree)>ZERO_POS_EXIT_THRESH); }\n'
-            'assert(kRetzeroTimeoutAcceptError>ZERO_POS_EXIT_THRESH); }\n')
-        binary=self.work/'homing-tolerance'
-        subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True)
-        subprocess.run([str(binary)],check=True)
-
-    def test_position_release_rejects_legacy_impedance_and_keeps_gravity_model(self):
-        manifest=json.loads((self.release/'position_release.json').read_text())
-        self.assertNotIn('impedance_available',manifest)
-        self.assertNotIn('impedance_calibration_confirmed',manifest)
+    def test_optional_impedance_is_explicit_and_stays_disabled(self):
+        output=vendor.prepare(self.baseline,self.work/'with-impedance',with_impedance=True)
+        manifest=json.loads((output/'position_release.json').read_text())
+        self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance','shutdown','shutdown_impedance'})
         self.assertTrue(manifest['target_stream_available'])
-        self.assertEqual((manifest['target_wire_version'],manifest['target_reference_mode']),(5,2))
-        self.assertEqual(manifest['session_wire_version'],5)
-        self.assertEqual(manifest['position_protocol'],'session_v3')
-        self.assertEqual(manifest['reference_mode'],2)
-        self.assertEqual(manifest['target_prepare_ms'],10.)
-        servo=self.release/'src/servo_control'
-        for name in ('include/impedance/cartesian_impedance_controller.h',
-                     'src/impedance/cartesian_impedance_controller.cpp'):
-            self.assertEqual((servo/name).read_bytes(),(self.baseline/'servo_control'/name).read_bytes())
-        # Position mode also uses these deployed gravity coefficients; other tuning stays original.
-        expected=(self.baseline/'ctl_msgs/config/impedance_params.yaml').read_text().replace(
-            'kt_gravity: [1.3, 1.3, 1.3, 1.3, 1.35, 1.35, 1.35]',
-            'kt_gravity: [1.28, 1.35, 1.35, 1.35, 1.35, 1.35, 1.35]')
-        self.assertEqual((self.release/'src/ctl_msgs/config/impedance_params.yaml').read_text(),expected)
-        cmake=(servo/'CMakeLists.txt').read_text()
-        self.assertNotIn('install(PROGRAMS scripts/impedance_',cmake)
-        self.assertIn('src/impedance/cartesian_impedance_controller.cpp',cmake)
-        loop=(servo/'src/ros_controller/rosLoop.cpp').read_text()
-        callback=loop[loop.index('    impedance_enable_sub_ ='):loop.index('    // 前馈力矩测试订阅:')]
-        source=self.work/'reject-impedance.cpp'
-        source.write_text('#include <memory>\n#include <string>\n#include <cassert>\n'
-            '#define RCLCPP_WARN(logger,...) ((void)(logger))\n'
-            'namespace std_msgs::msg {struct Bool {using SharedPtr=std::shared_ptr<Bool>;bool data;};}\n'
-            'struct Servo {bool impedance_enable_=false;int get_logger(){return 0;}\n'
-            'template<class T,class F> int create_subscription(const std::string&,int,F f){\n'
-            'for(bool enabled:{true,false}){auto msg=std::make_shared<T>();msg->data=enabled;f(msg);assert(!impedance_enable_);}return 0;}\n'
-            'void check(){int '+callback.strip()+'(void)impedance_enable_sub_;} };\n'
-            'int main(){Servo node;node.check();}\n')
-        binary=self.work/'reject-impedance'
-        subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],check=True)
-        subprocess.run([str(binary)],check=True)
-        self.assertIn('computeGravityLive(q_full, dq_full)',loop)
-        self.assertIn('EtherCAT_setGravityFF(i,',loop)
+        self.assertTrue(manifest['feedback_publication']['isolated'])
+        self.assertEqual(manifest['feedback_publication']['mode'],'latest_only_worker')
+        identity=json.loads((ROOT/'vendor/snowbot/impedance_118.json').read_text())
+        self.assertEqual(manifest['impedance_source'],identity)
+        self.assertEqual(vendor.digest(output/'src/ctl_msgs/config/impedance_params.yaml'),
+                         identity['files']['ctl_msgs/config/impedance_params.yaml']['source_sha256'])
+        self.assertEqual(manifest['execution_mode'],'position')
+        self.assertTrue(manifest['impedance_available'])
+        self.assertNotIn('impedance_calibration_confirmed',manifest)
+        servo=(output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text()
+        self.assertNotIn('impedance_calibration_confirmed',servo)
+        self.assertEqual(manifest['stop_policy'],'unconfirmed')
+        default=json.loads((self.release/'position_release.json').read_text())
+        self.assertFalse(default['impedance_available'])
+        self.assertTrue(default['target_stream_available'])
+        self.assertEqual((default['target_wire_version'],default['target_reference_mode']),(5,2))
+        self.assertEqual(default['session_wire_version'],5)
+        self.assertEqual(default['target_prepare_ms'],10.)
+        for rel,hashes in identity['files'].items():
+            self.assertEqual(vendor.digest(self.release/'src'/rel),hashes['input_sha256'])
+        for name in ('RetInformation','JointPositionCommand','MidNodeCtlMsgSend','CtlInformation'):
+            rel='ctl_msgs/msg/'+name+'.msg'
+            self.assertEqual((self.baseline/rel).read_bytes(),(output/'src'/rel).read_bytes())
+        with self.assertRaisesRegex(ValueError,'IMPEDANCE_REQUIRES_FULL_SESSION'):
+            vendor.prepare(self.baseline,self.work/'invalid-impedance',with_impedance=True,observation_only=True)
 
     def test_rigid_model_is_explicit_hashed_and_incompatible_modes_rejected(self):
         urdf=ROOT/'src/snowbot_description/urdf/snowbot_control.urdf'
@@ -145,7 +111,7 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertIn('TARGET_PREDICTION ',(output/'src/servo_control/src/ros_controller/rosLoop.cpp').read_text())
         self.assertFalse(list((output/'src').rglob('*.orig')))
         self.assertFalse(json.loads((self.release/'position_release.json').read_text())['rigid_prediction']['enabled'])
-        for options in ({'observation_only':True},):
+        for options in ({'observation_only':True},{'with_impedance':True}):
             with self.assertRaisesRegex(ValueError,'REQUIRES_TARGET_STREAM'):
                 vendor.prepare(self.baseline,self.work/'bad-rigid',prediction_urdf=urdf,prediction_tool=tool,**options)
         with self.assertRaisesRegex(ValueError,'MODEL_AND_TOOL_REQUIRED'):
@@ -224,7 +190,8 @@ int main(){check_position_pdo_output();MappingProbe probe;
         invalid=({'waist_feedforward_gain':.05}, {'waist_velocity_ratio':(25.25,)},
             {'waist_velocity_ratio':(float('nan'),25.25)},
             {'waist_velocity_ratio':(25.25,25.25),'waist_feedforward_gain':.2},
-            {'waist_velocity_ratio':(25.25,25.25),'observation_only':True})
+            {'waist_velocity_ratio':(25.25,25.25),'observation_only':True},
+            {'waist_velocity_ratio':(25.25,25.25),'with_impedance':True})
         for options in invalid:
             with self.subTest(options=options),self.assertRaisesRegex(ValueError,'WAIST_'):
                 vendor.prepare(self.baseline,self.work/'invalid-waist',**options)
@@ -313,6 +280,49 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_vendor_build_uses_selected_ros_without_starting_nodes(self):
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp); vendor = workspace/'vendor'
+            for package, executable in zip(deploy.TARGETS, ('servo_node', 'dual_arm_control_node', 'robot_control_node')):
+                binary = vendor/'install'/package/'lib'/package/executable
+                binary.parent.mkdir(parents=True); binary.touch()
+            with patch.object(deploy.subprocess, 'run') as run:
+                deploy.vendor_build(vendor, workspace, 'humble')
+                command = run.call_args.args[0]
+                self.assertIn('source /opt/ros/humble/setup.bash', command[4])
+                self.assertIn('build', command)
+                self.assertNotIn('ros2', command)
+
+
+    def test_native_platforms_select_matching_ros_and_pinocchio(self):
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        for machine, release, distro, pinocchio in (
+                ('x86_64', '24.04', 'jazzy', '4.1.0'),
+                ('aarch64', '22.04', 'humble', '3.9.0')):
+            with self.subTest(machine=machine), \
+                    patch('platform.system', return_value='Linux'), \
+                    patch('platform.machine', return_value=machine), \
+                    patch('platform.freedesktop_os_release', return_value=dict(ID='ubuntu', VERSION_ID=release), create=True), \
+                    patch.object(Path, 'is_file', autospec=True, return_value=True) as exists:
+                self.assertEqual(deploy.require_platform(), distro)
+                checked = [str(call.args[0]) for call in exists.call_args_list]
+                self.assertIn(f'/opt/ros/{distro}/setup.bash', checked)
+                self.assertIn(f'/opt/openrobots/lib/libpinocchio_default.so.{pinocchio}', checked)
+                for missing in ('/usr/include/nlohmann/json.hpp',
+                                '/usr/lib/python3/dist-packages/colcon_ros/task/ament_python/build.py'):
+                    exists.side_effect = lambda path: str(path) != missing
+                    with self.assertRaisesRegex(ValueError, 'prerequisites'):
+                        deploy.require_platform()
+        with patch('platform.system', return_value='Linux'), \
+                patch('platform.machine', return_value='aarch64'), \
+                patch('platform.freedesktop_os_release', return_value=dict(ID='ubuntu', VERSION_ID='24.04'), create=True):
+            with self.assertRaisesRegex(ValueError, 'requires'):
+                deploy.require_platform()
+
+
     def primitive_menu(self, choices, replay):
         from unittest.mock import patch
         from contextlib import redirect_stdout
@@ -320,7 +330,7 @@ class DeploymentEntryTests(unittest.TestCase):
         from types import SimpleNamespace as S
         import snowbot_bringup.runtime.snowbot_primitive_replay as module
         library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
-        args = S(library=library, from_node=None, output_dir=Path('/unused'), execution_mode='position')
+        args = S(library=library, from_node=None, output_dir=Path('/unused'), execution_mode='impedance')
         with patch('builtins.input', side_effect=choices) as choose, \
                 patch.object(module, 'replay_action', side_effect=replay) as run, \
                 redirect_stdout(StringIO()):
@@ -334,7 +344,7 @@ class DeploymentEntryTests(unittest.TestCase):
         self.assertEqual([(action, node) for action,node,_,_ in calls], [
             ('Push','Push:start'), ('PushReverse','Push:end'), ('SideScoop','Push:start'),
             ('Flip','Flip:start'), ('Home','Dump:end')])
-        self.assertTrue(all(mode=='position' and hold==0. for _,_,mode,hold in calls))
+        self.assertTrue(all(mode=='impedance' and hold==0. for _,_,mode,hold in calls))
 
     def test_primitive_menu_scoop_can_return_without_flip_and_failure_never_advances(self):
         calls = []
@@ -377,14 +387,14 @@ class DeploymentEntryTests(unittest.TestCase):
         from unittest.mock import patch
         from tools.deployment.deploy import base_commands
         with patch.dict(os.environ, {'VIRTUAL_ENV':'upper', 'LD_LIBRARY_PATH':'upper-pin'}):
-            for mode in ('position',):
+            for mode in ('impedance', 'position'):
                 plan = base_commands(Path('/deployment/artifacts/robot'), mode)
                 self.assertEqual([name for name, _, _ in plan], ['servo','middle','upper'])
                 self.assertEqual(plan[0][1][-2:], ['-p', 'execution_mode:='+mode])
                 for _, _, env in plan:
                     self.assertNotIn('VIRTUAL_ENV', env)
                     self.assertNotIn('LD_LIBRARY_PATH', env)
-            self.assertEqual(base_commands(Path('/deployment'))[0][1][-1], 'execution_mode:=position')
+            self.assertEqual(base_commands(Path('/deployment'))[0][1][-1], 'execution_mode:=impedance')
 
     def test_upper_inherits_actual_base_mode_after_startup(self):
         from types import SimpleNamespace as State
@@ -394,15 +404,14 @@ class DeploymentEntryTests(unittest.TestCase):
         for state in states.values():state.startup_complete=True
         self.assertEqual(base_mode(states), 'position')
         states['servo'].control_source='impedance'
-        with self.assertRaisesRegex(RuntimeError, 'UNSUPPORTED_BASE_MODE'):
-            base_mode(states)
+        self.assertEqual(base_mode(states), 'impedance')
         states.pop('middle')
         self.assertIsNone(base_mode(states))
 
     def test_replay_sequence_and_executor_use_same_observed_mode(self):
         from tools.deployment.deploy import executor_command,replay_commands
         cfg,runs=Path('/config'),Path('/runs')
-        for mode in ('position',):
+        for mode in ('position','impedance'):
             self.assertIn('execution_mode:='+mode,executor_command(cfg,runs,mode,'bindu_snowbot'))
             commands=replay_commands('replay',cfg,runs,mode,'run')
             self.assertEqual(len(commands),2)
@@ -415,7 +424,7 @@ class DeploymentEntryTests(unittest.TestCase):
             self.assertNotIn('Prepare',menu[0])
             prepare=replay_commands('prepare',cfg,runs,mode,'run')
             for command in [*commands,*menu,*prepare]:
-                self.assertEqual(float(command[command.index('--speed')+1]),1.0)
+                self.assertEqual(float(command[command.index('--speed')+1]),.5 if 'Prepare' in command else 1.)
 
     def test_vr_replay_share_upper_lock_and_release_it(self):
         from unittest.mock import patch
@@ -530,7 +539,7 @@ class DeploymentEntryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'STARTUP_TIMEOUT'):
             wait_service([], lambda:False, spin, stopped, timeout=0.)
 
-    def test_service_exit_is_reverse_order_and_never_force_kills(self):
+    def test_base_exit_waits_for_servo_then_reverses_other_children_without_force_kill(self):
         import signal
         from unittest.mock import Mock, patch
         from tools.deployment import deploy
@@ -541,7 +550,7 @@ class DeploymentEntryTests(unittest.TestCase):
         children[-1][1].wait.side_effect = [subprocess.TimeoutExpired('executor', 60.), 0]
         with patch.object(deploy.os, 'killpg') as send:
             self.assertTrue(deploy.stop_services(children))
-        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (4,3,2,1)])
+        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (1,4,3,2)])
         self.assertEqual(children[-1][1].wait.call_count, 2)
         children[0][1].wait.return_value = 2
         with patch.object(deploy.os, 'killpg'):
@@ -605,6 +614,19 @@ class DeploymentEntryTests(unittest.TestCase):
                 deploy.assemble(bindu,workspace)
             self.assertEqual(changed.read_text(),'local maintenance')
 
+    def test_impedance_backend_selection_is_preserved_on_rebuild(self):
+        from tools.deployment import deploy
+        from bindu_contracts.resources import package_share
+        bindu=package_share('bindu_execution').parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace=Path(tmp)
+            output=deploy.assemble(bindu,workspace)
+            self.assertFalse(json.loads((output/'position_release.json').read_text())['impedance_available'])
+            output=deploy.assemble(bindu,workspace,with_impedance=True)
+            self.assertTrue(json.loads((output/'position_release.json').read_text())['impedance_available'])
+            self.assertEqual(deploy.assemble(bindu,workspace),output)
+            self.assertTrue(json.loads((output/'position_release.json').read_text())['impedance_available'])
+            self.assertEqual(len(list(workspace.glob('vendor-before-*'))),1)
 
     def test_prepare_build_and_start_have_separate_side_effects(self):
         from unittest.mock import Mock, patch
@@ -614,12 +636,13 @@ class DeploymentEntryTests(unittest.TestCase):
             calls=Mock();bindu=workspace/'bindu';vendor=workspace/'vendor'
             with patch.object(deploy,'require_platform'),patch.object(deploy,'require_stopped'), \
                  patch.object(deploy,'locked_bindu',return_value=bindu), \
-                 patch.object(deploy,'assemble',side_effect=lambda *a:(calls.assemble(),vendor)[1]), \
+                 patch.object(deploy,'assemble',side_effect=lambda *a,**kw:(calls.assemble(),vendor)[1]), \
                  patch.object(deploy,'vendor_build',side_effect=lambda *a:calls.vendor()), \
                  patch.object(deploy,'prepare_ros_dependencies',side_effect=lambda *a:calls.rosdep()), \
                  patch.object(deploy,'x86',side_effect=lambda b,w,c,*a:calls.upper(c)), \
                  patch.object(deploy,'receipt',side_effect=lambda *a:calls.receipt()):
-                self.assertEqual(deploy.main(['prepare','--workspace',str(workspace)]),0)
+                self.assertEqual(deploy.main(['prepare','--workspace',str(workspace),'--with-impedance']),0)
+                self.assertTrue(deploy.assemble.call_args.kwargs['with_impedance'])
                 self.assertEqual([c[0] for c in calls.mock_calls],['assemble','rosdep','vendor','upper','upper','receipt'])
                 self.assertEqual([c.args for c in calls.mock_calls if c[0]=='upper'],[('prepare',),('build',)])
                 calls.reset_mock();self.assertEqual(deploy.main(['build','--workspace',str(workspace)]),0)
