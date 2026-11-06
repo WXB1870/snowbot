@@ -20,7 +20,16 @@ python3 -m tools.deployment.deploy prepare
 
 正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。`main` 同时支持 `position` 与 `impedance`；编入阻抗后端仍由已有 `--with-impedance` 选择，现场版本不自动升级。
 
-`main` 维护公共集成版本，`xavier/session-v3-position-impedance` 承载持续精简与验证；Bindu 公共修改统一归入其 `main`，Snowbot 用依赖锁固定配套提交。
+## 维护分支
+
+Bindu 与 Snowbot 均只维护以下两条分支；Snowbot 的依赖锁固定对应 Bindu 提交。
+
+| 分支 | 定位 | 使用边界 |
+|---|---|---|
+| `main` | 保持现有架构的真机部署维护线 | 真机更新从此选版，部署与运动验收由现场执行 |
+| `xavier/session-v3-position-impedance` | 通信链路、模块分层及 session_v3 精简的重构候选 | 尚未经过真机测试，暂不替换 main |
+
+共享功能与修复先进入 main，再同步到精简版；通信和结构重构保留在精简版。其他专题、部署及实验分支只保留历史引用，不再作为维护入口。
 
 ## 功能
 
