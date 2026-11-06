@@ -550,11 +550,12 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(evidence['tool_present'],mode=='bimanual_tool')
                 self.assertFalse(evidence['load_state_checked'])
 
-    async def test_unheld_ignores_gripper_drift_while_loaded_operator_guard_remains(self):
+    async def test_operator_confirmation_does_not_make_gripper_position_a_grasp_sensor(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock
         for unheld in (False,True):
             node=self.production('tick');node.unheld_test=unheld;node.operator_grasp=True;node.base=None
+            node.position_contract=True
             node.last_tick_at=None;node.waiters=set();node.validator=S(poll=lambda:None)
             node.state=None;node.tool_result=None;node.pending_intent=None;node.record_future=None;node.running=None
             node.now=lambda:0.;node.last_status=0.;node.last_context_at=0.
@@ -564,8 +565,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.operator_grasp_positions={'left':0.}
             node.position_ops=S(config={'position_tolerance':.003},reading=Mock(return_value=S(state='IDLE',measured_position=.01)))
             node.tick()
-            self.assertEqual(node.control.lock.call_count,0 if unheld else 1)
-            if unheld:node.position_ops.reading.assert_not_called()
+            node.control.lock.assert_not_called()
+            node.position_ops.reading.assert_not_called()
 
     async def test_unheld_rejects_axial_switch_before_any_gripper_command(self):
         from types import SimpleNamespace as S
