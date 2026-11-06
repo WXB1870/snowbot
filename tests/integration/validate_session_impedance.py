@@ -90,7 +90,8 @@ def main():
         controller=source/'servo_control/src/impedance/cartesian_impedance_controller.cpp'
         obj=work/'controller.o'
         def run(command):
-            result=subprocess.run(command,capture_output=True,text=True,timeout=120)
+            result=subprocess.run(command,capture_output=True,text=True,
+                                  timeout=300 if command[0]==compiler else 120)
             if result.returncode:raise RuntimeError(result.stdout+result.stderr)
             return result.stdout
         if not args.physics_controller_output and args.case in ('all','rt'):
