@@ -22,14 +22,14 @@ python3 -m tools.deployment.deploy prepare
 
 ## 维护分支
 
-Bindu 只维护 `main`；Snowbot 维护以下两条分支，各自通过 `dependencies.repos` 固定 Bindu 提交。Snowbot main 沿用稳定版本锁，框架 main 前进不会自动升级真机部署线。
+Bindu 与 Snowbot 均维护以下两条分支。两仓 main 保持现有架构，精简分支承载配套重构；Snowbot 通过 `dependencies.repos` 分别固定对应 Bindu 分支的提交，应用与框架配套选版。
 
 | 分支 | 定位 | 使用边界 |
 |---|---|---|
 | `main` | 保持现有架构的真机部署维护线 | 真机更新从此选版，部署与运动验收由现场执行 |
 | `xavier/session-v3-position-impedance` | 通信链路、模块分层及 session_v3 精简的重构候选 | 尚未经过真机测试，暂不替换 main |
 
-Snowbot 共享功能与修复先进入 main，再同步到精简版；应用通信和结构重构保留在精简版，通用会话实现统一进入 Bindu main。其他专题、部署及实验分支转为本地 `archive/` 标签，保留提交和工作树，不再作为维护入口；远端旧引用未随本地整理删除。
+两仓共享功能与修复先进入 main，再同步到精简分支；尚未验收的框架及应用重构保留在精简分支，完成真机验收后再考虑合入 main。其他专题、部署及实验分支转为本地 `archive/` 标签，保留提交和工作树，不再作为维护入口；远端旧引用未随本地整理删除。
 
 ## 功能
 
