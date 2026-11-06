@@ -32,6 +32,8 @@ int main(){try{
  node.readers.push_back({});node.readers[0].node="upper";
  CHECK(check().ready());CHECK(check().publisher_gid.size()==48);CHECK(check().publisher_gid.substr(0,2)=="11");
  node.writers.push_back({});CHECK(check().reason=="publisher_ambiguous");node.writers.pop_back();
+ node.writers[0].node="_NODE_NAME_UNKNOWN_";CHECK(check().reason=="publisher_discovering");node.writers[0].node="servo_node";
+ node.writers[0].ns="_NODE_NAMESPACE_UNKNOWN_";CHECK(check().reason=="publisher_discovering");node.writers[0].ns="/";
  node.writers[0].node="observer";CHECK(check().reason=="publisher_identity_mismatch");node.writers[0].node="servo_node";
  node.writers[0].ns="/snowbot";CHECK(check().reason=="publisher_identity_mismatch");node.writers[0].ns="/";
  node.writers[0].type="std_msgs/msg/String";CHECK(check().reason=="message_type_mismatch");node.writers[0].type=node.readers[0].type;

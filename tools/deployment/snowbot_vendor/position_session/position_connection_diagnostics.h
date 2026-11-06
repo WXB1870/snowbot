@@ -19,6 +19,8 @@ EndpointCheck check_publisher(Node& node, const Subscription& sub,
     if (writers.size() != 1) return {"publisher_ambiguous", {}};
     const auto& writer = writers.front();
     std::string ns = writer.node_namespace();
+    if (writer.node_name() == "_NODE_NAME_UNKNOWN_" || ns == "_NODE_NAMESPACE_UNKNOWN_")
+        return {"publisher_discovering", {}};
     if (ns.empty() || ns.back() != '/') ns += '/';
     if (ns+writer.node_name() != expected_node) return {"publisher_identity_mismatch", {}};
     if (writer.topic_type() != expected_type) return {"message_type_mismatch", {}};

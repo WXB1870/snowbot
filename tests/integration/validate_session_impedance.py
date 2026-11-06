@@ -64,7 +64,7 @@ def write_shims(shim):
     namespace rclcpp {
     struct QoS {explicit QoS(int){} QoS& best_effort(){return *this;}QoS& durability_volatile(){return *this;}QoS& liveliness(int){return *this;}};
     template<class T>struct Subscription {using SharedPtr=std::shared_ptr<Subscription<T>>;};
-    template<class T>struct Publisher {using SharedPtr=std::shared_ptr<Publisher<T>>;T last{};void publish(const T& v){last=v;}};
+    template<class T>struct Publisher {using SharedPtr=std::shared_ptr<Publisher<T>>;inline static unsigned calls=0;T last{};void publish(const T& v){last=v;++calls;}};
     struct Node {using SharedPtr=std::shared_ptr<Node>;unsigned subscriptions=0;
     int get_logger(){return 0;}
     template<class T>typename Publisher<T>::SharedPtr create_publisher(const std::string&,QoS){return std::make_shared<Publisher<T>>();}

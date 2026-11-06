@@ -177,6 +177,13 @@ int main(int argc,char**argv){assert(argc==2);ServoNode node;
  snapshot.sensor_valid_mask=3;snapshot.wrench[0]=NAN;assert(!node.session_impedance_ready());
  snapshot.wrench[0]=0;node.feedback();snapshot.sampled_ns-=21000000;assert(!node.session_impedance_ready());
  node.feedback();
+ const auto published=rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::calls;
  check_target_impedance(node);
+ assert(rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::calls==published);
+ node.impedance_left_->publishPendingStatus();node.impedance_right_->publishPendingStatus();
+ assert(rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::calls==published+4);
+ node.impedance_left_->publishPendingStatus();node.impedance_right_->publishPendingStatus();
+ assert(rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::calls==published+4);
+ std::cout<<"PASS session controller: no ROS publish in control updates; telemetry worker drains latest status/effort once\n";
  std::cout<<"PASS actual session_v3 impedance inputs, sensor feedback, waist position, nominal PAUSE and source expiry\n";
 }
