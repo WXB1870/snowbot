@@ -350,7 +350,7 @@
 +
 +        };load();return load_error;
 +    });
-+    position_initialized_=position_init_error_.empty();position_feedback_.advances=0;
++    position_initialized_=position_init_error_.empty();position_feedback_.advances=0;if(position_initialized_ && position_rejection_=="initialization_incomplete")position_rejection_.clear();
 @@ -330 +367,9 @@
 -    mCtlData_pub->publish(tempCtlData_pub);
 +    if(position_gate_.selected()){
@@ -587,7 +587,7 @@
 +
 +        };load();return load_error;
 +    });
-+    position_initialized_=position_init_error_.empty();position_feedback_.advances=0;
++    position_initialized_=position_init_error_.empty();position_feedback_.advances=0;if(position_initialized_ && position_rejection_=="initialization_incomplete")position_rejection_.clear();
 @@ -432 +470,6 @@
 -    upperMointor_Msg_send->publish(temp_upperMonitorData_pub);
 +    if(position_gate_.selected()){
