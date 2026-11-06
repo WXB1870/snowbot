@@ -72,6 +72,8 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance','shutdown','shutdown_impedance'})
         self.assertTrue(manifest['target_stream_available'])
         self.assertTrue(manifest['feedback_publication']['isolated'])
+        for name in vendor.VALIDATION_FILES:
+            self.assertEqual(manifest['validation_inputs'][name],vendor.digest(ROOT/name))
         self.assertEqual(manifest['feedback_publication']['mode'],'latest_only_worker')
         identity=json.loads((ROOT/'vendor/snowbot/impedance_118.json').read_text())
         self.assertEqual(manifest['impedance_source'],identity)
@@ -746,8 +748,13 @@ class DeploymentEntryTests(unittest.TestCase):
                 self.assertEqual(deploy.assemble(bindu,workspace),output)
                 self.assertEqual(generate.call_count,0)
             native=bindu/'src/control/bindu_execution/native/interpolation.hpp'
+            unchanged=output/'src/servo_control/src/main.cpp'
+            modified_ns=unchanged.stat().st_mtime_ns
+            installed=output/'install/reused';installed.parent.mkdir();installed.write_text('cached install')
             with patch.object(deploy,'digest',side_effect=lambda p:'changed-native' if p==native else digest(p)):
                 self.assertEqual(deploy.assemble(bindu,workspace),output)
+            self.assertEqual(unchanged.stat().st_mtime_ns,modified_ns)
+            self.assertEqual(installed.read_text(),'cached install')
             self.assertEqual(len(list(workspace.glob('vendor-before-*'))),1)
             self.assertEqual(site.read_text(),'site-owned parameters')
             changed=output/'src/servo_control/src/main.cpp';changed.write_text('local maintenance')
@@ -788,6 +795,15 @@ class DeploymentEntryTests(unittest.TestCase):
                 self.assertEqual([c.args for c in calls.mock_calls if c[0]=='upper'],[('prepare',),('build',)])
                 calls.reset_mock();self.assertEqual(deploy.main(['build','--workspace',str(workspace)]),0)
                 self.assertEqual([c[0] for c in calls.mock_calls],['assemble','vendor','upper','receipt'])
+                calls.reset_mock()
+                with patch.object(deploy.subprocess,'run',side_effect=lambda *a,**kw:calls.validate()) as validate:
+                    self.assertEqual(deploy.main(['build','--workspace',str(workspace),'--validate','session']),0)
+                    self.assertIn('--build-dir',validate.call_args.args[0])
+                self.assertEqual([c[0] for c in calls.mock_calls],['assemble','validate','vendor','upper','receipt'])
+                calls.reset_mock()
+                with patch.object(deploy.subprocess,'run',side_effect=subprocess.CalledProcessError(1,['validation'])):
+                    self.assertEqual(deploy.main(['build','--workspace',str(workspace),'--validate','session']),2)
+                self.assertEqual([c[0] for c in calls.mock_calls],['assemble'])
                 calls.reset_mock();self.assertEqual(deploy.main(['start','--workspace',str(workspace),'--enable-commands']),0)
                 self.assertEqual(calls.mock_calls,[unittest.mock.call.upper('start')])
                 calls.reset_mock()
@@ -796,5 +812,68 @@ class DeploymentEntryTests(unittest.TestCase):
                     self.assertEqual(os.environ['ROS_DOMAIN_ID'],'88')
                 self.assertEqual([c[0] for c in calls.mock_calls],['assemble','vendor','upper','receipt'])
                 self.assertEqual(json.loads((workspace/'upper/deployment.json').read_text())['machine_profile'],'orin')
+
+class ImpedanceWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import importlib
+        import sys
+        from unittest.mock import patch
+        with patch.object(sys,'path',[str(ROOT/'tests/integration'),*sys.path]):
+            cls.validator=importlib.import_module('validate_session_impedance')
+
+    def test_missing_model_and_mismatched_fixture_fail_before_compile(self):
+        import sys
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'src';tests=root/'tests/native';tests.mkdir(parents=True)
+            for name in ('servo_control/src/impedance/cartesian_impedance_controller.cpp',
+                         'servo_control/src/ros_controller/rosLoop.cpp'):
+                path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('')
+            fixture=tests/'test_session_impedance.cpp'
+            fixture.write_bytes((ROOT/'tests/native/test_session_impedance.cpp').read_bytes())
+            manifest=root/'position_release.json'
+            manifest.write_text(json.dumps({'validation_inputs':{'tests/native/'+fixture.name:vendor.digest(fixture)}}))
+            with patch.object(sys,'argv',['validate','--source',str(source),'--prefix',str(root)]), \
+                 patch.object(self.validator.subprocess,'run') as compile_command:
+                with self.assertRaisesRegex(RuntimeError,'VALIDATION_INPUT_MISSING:.*snowbot.urdf'):
+                    self.validator.main()
+                compile_command.assert_not_called()
+            model=source/'dual_arm/urdf/snowbot.urdf';model.parent.mkdir(parents=True);model.write_text('<robot/>')
+            self.validator.check_inputs(source,tests,'session')
+            fixture.write_text('old fixture')
+            with self.assertRaisesRegex(RuntimeError,'VALIDATION_FIXTURE_MISMATCH:tests/native/test_session_impedance.cpp'):
+                self.validator.check_inputs(source,tests,'session')
+
+    def test_native_build_reuses_objects_and_rebuilds_changed_inputs(self):
+        import time
+        compiler=shutil.which('c++')
+        self.assertIsNotNone(compiler,'C++ compiler required for incremental-build regression')
+        identity=subprocess.check_output([compiler,'--version'],text=True)
+        with tempfile.TemporaryDirectory(prefix='impedance cache ') as tmp:
+            work=Path(tmp);source=work/'main.cpp';header=work/'value.h';binary=work/'check'
+            source.write_text('#include "value.h"\nint main(){return VALUE+EXTRA;}\n')
+            header.write_text('#define VALUE 3\n')
+            command=[compiler,'-DEXTRA=0',str(source),'-o',str(binary)]
+            self.validator.compile_cached(command,work,identity)
+            first=binary.stat().st_mtime_ns
+            self.validator.compile_cached(command,work,identity)
+            self.assertEqual(binary.stat().st_mtime_ns,first)
+            # macOS ships make 3.81, whose timestamp comparison has second precision.
+            time.sleep(1.05)
+            command[1]='-DEXTRA=1'
+            self.validator.compile_cached(command,work,identity)
+            self.assertEqual(subprocess.run([str(binary)]).returncode,4)
+            time.sleep(1.05)
+            header.write_text('#define VALUE 7\n')
+            self.validator.compile_cached(command,work,identity)
+            self.assertEqual(subprocess.run([str(binary)]).returncode,8)
+            time.sleep(1.05)
+            source.write_text('invalid C++')
+            with self.assertRaises(RuntimeError):self.validator.compile_cached(command,work,identity)
+            source.write_text('int main(){return 0;}\n')
+            self.validator.compile_cached(command,work,identity)
+            self.assertEqual(subprocess.run([str(binary)]).returncode,0)
+
 
 if __name__=='__main__':unittest.main()

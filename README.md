@@ -14,6 +14,8 @@ python3 -m tools.deployment.deploy prepare
 
 `prepare` 获取匹配的 Bindu，生成底层源码并构建底层和上层软件。后续更新使用 `python3 -m tools.deployment.deploy build`。
 
+需要验证阻抗会话改动时，使用 `python3 -m tools.deployment.deploy build --validate session`，也可按影响选择 `rt`、`nominal` 或 `all`。入口先生成配套源码，再运行所选离线检查，成功后继续增量构建和安装；不会启动设备。生成清单绑定测试文件，缺少模型或夹具版本不匹配会在编译前报错。验证产物保留在工作区的 `validation/impedance/`，由 make 跟踪源码、头文件及编译条件，重复运行同一命令会复用未变化的编译产物，但仍执行所选测试。重新生成时保留未变源码的时间戳及原安装目录，继续利用 colcon 增量构建。各阶段输出状态和耗时；验证或编译失败修正后重跑原命令即可。
+
 Orin 首次选择 `python3 -m tools.deployment.deploy prepare --with-impedance --machine orin`；已有部署可在下一次 `build` 时指定 `--machine orin`。选择保存在生成的部署元数据中，后续构建和 `run_robot.sh` 自动复用。机器配方 [orin.json](src/snowbot_bringup/config/deployments/machines/orin.json) 固定网卡、默认 ROS 域 88、阻抗模式、VR 端口及 TLS 路径引用；证书与私钥内容留在机器上。显式设置的 `ROS_DOMAIN_ID` 仍优先。不选机器配方时沿用原现场配置。
 
 完成构建后，按[现场配置](docs/运行与验证.md#首次现场配置)设置设备、标定和 PICO 网络，再按[启动顺序](docs/运行与验证.md#日常启动)运行。开发和仿真见[仿真与浏览器操作台](docs/运行与验证.md#仿真与浏览器操作台)。

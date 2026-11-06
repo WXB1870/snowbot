@@ -1,11 +1,13 @@
 """Snowbot x86/Jazzy assembly. prepare/build never start a device or ROS node."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -23,6 +25,19 @@ def git(root, *args):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@contextmanager
+def build_stage(name):
+    started = time.monotonic()
+    print('DEPLOY '+name+' START', flush=True)
+    try:
+        yield
+    except BaseException:
+        print(f'DEPLOY {name} FAILED elapsed={time.monotonic()-started:.1f}s', flush=True)
+        raise
+    else:
+        print(f'DEPLOY {name} DONE elapsed={time.monotonic()-started:.1f}s', flush=True)
 
 
 def machine_config(workspace, name=None):
@@ -120,6 +135,8 @@ def assemble(bindu, workspace, *, with_impedance=None):
     saved = json.loads(identity.read_text()) if identity.exists() else None
     if with_impedance is None:
         with_impedance = bool(saved and saved.get('with_impedance', False))
+    if with_impedance:
+        inputs.extend(ROOT/name for name in position.VALIDATION_FILES)
     signature = hashlib.sha256((''.join(digest(p) for p in inputs if p.is_file())+
                                 (':impedance' if with_impedance else '')).encode()).hexdigest()
     if identity.exists():
@@ -148,6 +165,12 @@ def assemble(bindu, workspace, *, with_impedance=None):
     if not config.exists():
         config.write_bytes((ASSETS/'target_stream.yaml').read_bytes())
     files = {str(p.relative_to(vendor)): digest(p) for p in (vendor/'src').rglob('*') if p.is_file()}
+    if saved:
+        for name, value in files.items():
+            if saved['files'].get(name) == value:
+                shutil.copystat(backup/name, vendor/name)
+        if (backup/'install').is_dir():
+            (backup/'install').rename(vendor/'install')
     identity.write_text(json.dumps(dict(signature=signature, files=files,
                                         with_impedance=with_impedance), indent=2)+'\n')
     return vendor
@@ -603,6 +626,8 @@ def main(argv=None):
                         help='Select machine defaults; prepare/build remember the selection for later runs')
     parser.add_argument('--with-impedance', action='store_const', const=True, default=None,
                         help='Include the impedance backend during prepare/build; subsequent builds retain it')
+    parser.add_argument('--validate', choices=('rt', 'nominal', 'session', 'all'),
+                        help='Run the selected offline impedance check before prepare/build installs software')
     parser.add_argument('--no-impedance', action='store_true', help='Base startup only: select position control')
     parser.add_argument('--home', action='store_true', help='Operator startup: smoothly zero arms and waist after powered hold')
     parser.add_argument('--frontend', choices=('vr', 'replay', 'menu', 'prepare', 'executor'), default='replay')
@@ -618,6 +643,8 @@ def main(argv=None):
             raise ValueError('--no-impedance belongs to the base startup only')
         if options.home and options.command != 'operator':
             raise ValueError('--home belongs to terminal 2 (operator) only')
+        if options.validate and options.command not in ('prepare', 'build'):
+            raise ValueError('--validate belongs to prepare/build only')
         if options.command == 'plan':
             bindu = locked_bindu(existing)
             print(json.dumps(dict(snowbot=git(ROOT, 'rev-parse', 'HEAD'), bindu=git(bindu, 'rev-parse', 'HEAD'),
@@ -638,16 +665,28 @@ def main(argv=None):
         if options.command == 'build' and not (workspace/'upper/deployment.json').is_file():
             raise ValueError('Run prepare once before build')
         require_stopped(bindu)
-        vendor = assemble(bindu, workspace, with_impedance=options.with_impedance)
+        with build_stage('assemble'):
+            vendor = assemble(bindu, workspace, with_impedance=options.with_impedance)
         if options.command == 'prepare':
-            prepare_ros_dependencies(bindu, vendor, distro)
-        vendor_build(vendor, workspace, distro)
+            with build_stage('dependencies'):
+                prepare_ros_dependencies(bindu, vendor, distro)
+        if options.validate:
+            with build_stage('validate-'+options.validate):
+                subprocess.run(['/usr/bin/python3', str(ROOT/'tests/integration/validate_session_impedance.py'),
+                    '--source', str(vendor/'src'), '--prefix', '/opt/openrobots',
+                    '--case', options.validate, '--require-production-poll',
+                    '--build-dir', str(workspace/'validation/impedance')], check=True)
+        with build_stage('vendor-build'):
+            vendor_build(vendor, workspace, distro)
         if options.command == 'prepare':
-            x86(bindu, workspace, 'prepare', '--vendor-setup', vendor/'install/local_setup.bash',
-                '--application-source', ROOT)
+            with build_stage('upper-prepare'):
+                x86(bindu, workspace, 'prepare', '--vendor-setup', vendor/'install/local_setup.bash',
+                    '--application-source', ROOT)
         configure_machine(workspace, machine_name, machine)
-        x86(bindu, workspace, 'build')
-        receipt(bindu, workspace)
+        with build_stage('upper-build'):
+            x86(bindu, workspace, 'build')
+        with build_stage('receipt'):
+            receipt(bindu, workspace)
         print('Built without starting hardware. Site configuration: '+str(workspace/'upper/site.json'))
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         print('Snowbot deployment: '+str(exc), file=sys.stderr)
