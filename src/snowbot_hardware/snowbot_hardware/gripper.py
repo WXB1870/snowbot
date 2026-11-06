@@ -331,12 +331,10 @@ class GripperController:
         c = self.channels[side]
         if not c['touched'] or c['state'] == 'FAULT':
             return
-        if c['state'] == 'CANCELED' and c['code'] == 'CLOSE_COMMANDED':
-            return  # Retain the closing reference; grasp is confirmed by the operator.
         if c['state'] == 'STOPPING':
             return  # Repeated faults do not refresh the first stop deadline.
         health = self.require_feedback()
-        position = self.q[JOINTS[side]]
+        position = c['target'] if c.get('manual_close') and (code in ('MANUAL_ENDPOINT_STOPPED', 'CLOSE_STOPPED') or c['state'] in ('SUCCEEDED', 'CANCELED')) else self.q[JOINTS[side]]
         ack = self._send(side, position, True)
         c.update(state='STOPPING', code=code, hold=position, ack=ack, sent_at=self.now(), sample=health['sample'],
                  hold_tolerance=target_position_tolerance(self.cfg,direct=c.get('direct',False)),
@@ -383,12 +381,6 @@ class GripperController:
                 continue
             try:
                 health = self.require_feedback()
-                if c['state'] == 'MOVING' and c.get('manual_close') and not self.require_driver_ack:
-                    if now >= c['deadline'] or steady >= c['steady_deadline']:
-                        c.update(state='CANCELED', code='CLOSE_COMMANDED')
-                    else:
-                        self._send(side, c['target'], False)
-                    continue
                 if now >= c['deadline'] or steady >= c['steady_deadline']:
                     if c['state'] == 'STOPPING':
                         raise RuntimeError('HOLD_TIMEOUT')
@@ -406,7 +398,7 @@ class GripperController:
                 arrived = (health['sample'] > c['sample']
                     and health.get('operation_enabled_mask', 0) & MASKS[side]
                     and self.feedback_stamp > c['sent_at']
-                    and abs(self.q[JOINTS[side]]-target) <= tolerance
+                    and (c['state'] == 'STOPPING' and c.get('manual_close') and c['hold'] == c['target'] or abs(self.q[JOINTS[side]]-target) <= tolerance)
                     and abs(self.v[JOINTS[side]]) <= self.cfg['velocity_tolerance'])
                 if self.require_driver_ack:
                     i = SIDES.index(side)

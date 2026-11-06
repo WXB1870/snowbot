@@ -34,7 +34,7 @@ def execute(args, plan):
     import rclpy
     from rclpy.signals import SignalHandlerOptions
     from rclpy.qos import qos_profile_sensor_data
-    from bindu_interfaces.msg import ExecutionState, MotionCommand, RuntimeEvent, GripperState
+    from bindu_interfaces.msg import ExecutionState, MotionCommand, RuntimeEvent
     from bindu_interfaces.srv import Lease, SubmitMotion, ControlExecution, GripperControl
     from std_srvs.srv import Trigger
     from bindu_runtime.robot_setup import RobotSetup
@@ -100,8 +100,6 @@ def execute(args, plan):
     holds = node.create_client(Trigger, ns+'/execution/held_reference')
     gripper_leases = node.create_client(Lease, ns+'/gripper/lease')
     gripper_control = node.create_client(GripperControl, ns+'/gripper/control')
-    node.create_subscription(GripperState, ns+'/gripper/state',
-        lambda msg: latest.update({'gripper_'+msg.side: (msg, time.monotonic())}), 10)
 
     def wait(predicate, timeout):
         end = time.monotonic()+timeout
@@ -128,7 +126,7 @@ def execute(args, plan):
         def ros(): return node.get_clock().now().nanoseconds*1e-9
 
         def grippers(self, operation):
-            # Reuse the adapter's configured endpoints, leases and measured completion.
+            # Reuse configured endpoints and leases; the operator confirms the grasp.
             confirmed_at, confirmed_steady = self.ros(), self.steady()
             wait(lambda: latest['state'][0].stamp.sec+latest['state'][0].stamp.nanosec*1e-9 >= confirmed_at and
                  latest['state'][1] >= confirmed_steady, 1.)
@@ -148,21 +146,8 @@ def execute(args, plan):
                     command(operation, side)
                 renewed = self.steady()
                 end = renewed+gripper_config['motion_timeout']+gripper_config['stop_timeout']
-                while True:
+                while self.steady() < end:
                     self.state()
-                    if all('gripper_'+side in latest for side in ('left', 'right')):
-                        states = [latest['gripper_'+side][0] for side in ('left', 'right')]
-                        current = all(m.epoch == lease.epoch and m.control_sequence == sequence for m in states)
-                        if current and any(m.state == 'FAILED' or
-                                m.state == 'CANCELED' and m.code not in ('MANUAL_ENDPOINT_STOPPED', 'CLOSE_COMMANDED') for m in states):
-                            raise RuntimeError('REPLAY_GRIPPER_FAILED:'+','.join(m.code for m in states))
-                        if current and all(m.state == 'SUCCEEDED' or
-                                m.state == 'CANCELED' and m.code in ('MANUAL_ENDPOINT_STOPPED', 'CLOSE_COMMANDED') for m in states):
-                            record('gripper_command_completed', operation=operation,
-                                   codes={m.side:m.code for m in states})
-                            break
-                    if self.steady() >= end:
-                        raise RuntimeError('REPLAY_GRIPPER_'+operation.upper()+'_TIMEOUT')
                     if self.steady()-renewed >= .5:
                         call(gripper_leases, Lease.Request(operation='renew', lease_id=lease.lease_id, epoch=lease.epoch))
                         renewed = self.steady()
@@ -170,11 +155,6 @@ def execute(args, plan):
             finally:
                 released = call(gripper_leases, Lease.Request(operation='release', lease_id=lease.lease_id, epoch=lease.epoch))
                 record('gripper_release', operation=operation, epoch=released.epoch)
-                wait(lambda: all('gripper_'+side in latest and
-                     latest['gripper_'+side][0].epoch == released.epoch and
-                     not latest['gripper_'+side][0].lease_active and
-                     latest['gripper_'+side][0].state not in ('MOVING', 'STOPPING', 'FAILED')
-                     for side in ('left', 'right')), gripper_config['stop_timeout'])
             q, v = self.state()
             record('grippers', operation=operation, measured_q_rad={n:q[n] for n in ('arm_l_joint_8', 'arm_r_joint_8')})
             if operation == 'close':
