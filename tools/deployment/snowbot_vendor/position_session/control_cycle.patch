@@ -181,10 +181,12 @@
          const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
          snowbot_ctl_msgs::msg::PositionSessionState m;m.header.stamp=this->now();m.layer="servo";m.wire_version=5;m.reference_mode=position_reference_mode_;m.rejected_session=position_rejected_session_;m.rejected_sequence=position_rejected_sequence_;m.control_source=impedance_enable_?"legacy_impedance":session_execution_mode_;
          m.startup_complete=position_startup_complete_ && !shutdown_mode_;m.selected=position_gate_.selected();m.session=position_gate_.last().session;m.sequence=position_gate_.last().sequence;
-@@ -193,6 +199,11 @@
+@@ -193,6 +199,12 @@
          else if(!ready)m.state="waiting_feedback_or_fault";
          if(!shutdown_mode_ && !ready && (position_gate_.selected()||position_target_takeover_valid_)){position_interrupt();position_pending_=false;}
-         const std::string report=ready?(position_cycle_reason_?position_cycle_reason_:position_rejection_):position_wait_reason_;
+-        const std::string report=ready?(position_cycle_reason_?position_cycle_reason_:position_rejection_):position_wait_reason_;
++        const auto impedance_failure=EtherCAT_positionObservation().session_reason==position_session::IMPEDANCE_INVALID;
++        const std::string report=impedance_failure?(position_output_.failure_reason==position_session::IMPEDANCE_INVALID && position_cycle_reason_?position_cycle_reason_:"impedance_watchdog_sensor_invalid"):ready?(position_cycle_reason_?position_cycle_reason_:position_rejection_):position_wait_reason_;
 +        const auto check=position_output_.cycle_fault;
 +        const auto output=position_output_;
 +        const auto feedback=position_feedback_;

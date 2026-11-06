@@ -1154,7 +1154,7 @@
 +   position_local_hold_ && position_gate_.generation()==position_output_.admission_generation && !position_output_.failure_reason))){
 +  if(source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
 +  position_acceptance_.rejected.reject(source,"target_snapshot_or_expired");position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
-+  position_cycle_reason_=position_acceptance_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
++  if(position_output_.failure_reason<position_session::CONTROL_SOURCE_CONFLICT)position_cycle_reason_=position_acceptance_.rejected.reason.c_str();position_admission_->defer_packet(position_target_pending_);return;
 + }
 + auto context=position_acceptance_.context(position_gate_,position_instance_id_,position_feedback_gid_);context.barrier=position_target_barrier_;
 + if(position_admission_->submit(std::move(position_target_pending_),trajectory_max_velocity_,trajectory_max_acceleration_,trajectory_max_jerk_,context,position_origin_packet_,snapshot))position_admission_source_=source;
@@ -1173,7 +1173,7 @@
 + }else if(error){
 +  if(source.operation==1&&position_target_takeover_valid_&&source==position_target_takeover_.source)position_interrupt();
 +  position_acceptance_.rejected.reject(source,error);position_rejected_session_=source.session;position_rejected_sequence_=source.sequence;
-+  position_cycle_reason_=position_acceptance_.rejected.reason.c_str();
++  if(position_output_.failure_reason<position_session::CONTROL_SOURCE_CONFLICT)position_cycle_reason_=position_acceptance_.rejected.reason.c_str();
 + }else{
 +  if(!result->command.derived){
 +   result->retired_packet=std::move(position_origin_packet_);position_origin_packet_=result->packet;
