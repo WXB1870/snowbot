@@ -383,13 +383,13 @@ def copy_service_output(name, child, writer):
 
 def base_commands(workspace, execution_mode='impedance'):
     vendor_env = {k:v for k,v in os.environ.items() if k in
-        ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS')}
+        ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML')}
     vendor_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     shell = ['bash', '--noprofile', '--norc', '-ec',
              'source "$1/tools/deployment/snowbot_vendor/env_118.sh" "$2/vendor"; shift 2; exec stdbuf -oL -eL "$@"',
              'snowbot-vendor', str(ROOT), str(workspace)]
     sudo = ['sudo', '-n', 'env', *[k+'='+vendor_env[k] for k in
-            ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS') if k in vendor_env]]
+            ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML') if k in vendor_env]]
     return (
         ('servo', [*sudo, *shell, 'ros2', 'run', 'snowbot_servo_control', 'servo_node',
                    '--ros-args', '--params-file', str(workspace/'vendor-position.yaml'),

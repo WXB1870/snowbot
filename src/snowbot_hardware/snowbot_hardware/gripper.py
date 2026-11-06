@@ -331,6 +331,8 @@ class GripperController:
         c = self.channels[side]
         if not c['touched'] or c['state'] == 'FAULT':
             return
+        if c['state'] == 'CANCELED' and c['code'] == 'CLOSE_COMMANDED':
+            return  # Retain the closing reference; grasp is confirmed by the operator.
         if c['state'] == 'STOPPING':
             return  # Repeated faults do not refresh the first stop deadline.
         health = self.require_feedback()
@@ -381,6 +383,12 @@ class GripperController:
                 continue
             try:
                 health = self.require_feedback()
+                if c['state'] == 'MOVING' and c.get('manual_close') and not self.require_driver_ack:
+                    if now >= c['deadline'] or steady >= c['steady_deadline']:
+                        c.update(state='CANCELED', code='CLOSE_COMMANDED')
+                    else:
+                        self._send(side, c['target'], False)
+                    continue
                 if now >= c['deadline'] or steady >= c['steady_deadline']:
                     if c['state'] == 'STOPPING':
                         raise RuntimeError('HOLD_TIMEOUT')

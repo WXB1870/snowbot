@@ -154,11 +154,11 @@ def execute(args, plan):
                         states = [latest['gripper_'+side][0] for side in ('left', 'right')]
                         current = all(m.epoch == lease.epoch and m.control_sequence == sequence for m in states)
                         if current and any(m.state == 'FAILED' or
-                                m.state == 'CANCELED' and m.code != 'MANUAL_ENDPOINT_STOPPED' for m in states):
+                                m.state == 'CANCELED' and m.code not in ('MANUAL_ENDPOINT_STOPPED', 'CLOSE_COMMANDED') for m in states):
                             raise RuntimeError('REPLAY_GRIPPER_FAILED:'+','.join(m.code for m in states))
                         if current and all(m.state == 'SUCCEEDED' or
-                                m.state == 'CANCELED' and m.code == 'MANUAL_ENDPOINT_STOPPED' for m in states):
-                            record('gripper_stopped', operation=operation,
+                                m.state == 'CANCELED' and m.code in ('MANUAL_ENDPOINT_STOPPED', 'CLOSE_COMMANDED') for m in states):
+                            record('gripper_command_completed', operation=operation,
                                    codes={m.side:m.code for m in states})
                             break
                     if self.steady() >= end:
@@ -178,7 +178,7 @@ def execute(args, plan):
             q, v = self.state()
             record('grippers', operation=operation, measured_q_rad={n:q[n] for n in ('arm_l_joint_8', 'arm_r_joint_8')})
             if operation == 'close':
-                print('双爪关爪已停止，请现场确认雪铲已夹牢。')
+                print('双爪关爪指令已完成，请现场确认雪铲已夹牢。')
         @staticmethod
         def wait_until(due): wait(lambda: time.monotonic() >= due, max(.1, due-time.monotonic()+.1))
         def state(self):
