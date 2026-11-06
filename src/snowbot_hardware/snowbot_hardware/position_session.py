@@ -1,6 +1,7 @@
 """Typed three-layer position sessions, using the independent PDO observation."""
 import json
 import math
+import os
 
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
@@ -159,6 +160,8 @@ class PositionSessionDevices:
         self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
         self.io.stop_requires_arrival = False
         self.startup_hold_state = ('waiting' if self.io.command_enabled else 'disabled')
+        self.startup_home = node.declare_parameter('startup_home', os.environ.get('SNOWBOT_STARTUP_HOME') == '1',
+            descriptor=ParameterDescriptor(read_only=True)).value
         self.io.after_capture = lambda: self.new_session()
         self.io.pause_feedback = self.health.confirmed_hold
         self.arm_type, self.array_type = PositionSessionCommand, Float64MultiArray
@@ -445,9 +448,11 @@ class PositionSessionDevices:
 
         Never retry a granted lease or failed enable. Subsequent squeeze actions
         acquire following sessions; they do not initiate this startup action.
+        Optional zero targets follow confirmed powered hold under the same lease.
         """
         from bindu_contracts.contracts import Motion
         from bindu_execution.executor import Rejected
+        from dataclasses import replace
         state = self.startup_hold_state
         if state in ('disabled', 'ready', 'failed') or self.node.closing:
             return
@@ -479,6 +484,7 @@ class PositionSessionDevices:
                     schema_version=2, resource_groups=('waist', 'left_arm', 'right_arm'), runtime_mode='real')
                 engine.submit(motion, now)
                 engine.tick(now)
+                self.startup_motion = motion
             except (Rejected, RuntimeError) as exc:
                 engine.halt(now, 'STARTUP_HOLD_FAILED', revoke=True)
                 self.startup_hold_state = 'failed'
@@ -491,8 +497,38 @@ class PositionSessionDevices:
                 self.startup_hold_state = 'failed'
                 self.node.event('STARTUP_HOLD_FAILED', self.target_fault or 'TAKEOVER_NOT_CONFIRMED')
             elif self.takeover_pending is None and self.applied_sequence:
-                engine.halt(now, revoke=True)
-                self.startup_hold_state = 'stopping'
+                home = getattr(self, 'startup_home', False)
+                engine.halt(now, revoke=not home)
+                self.startup_hold_state = 'holding' if home else 'stopping'
+        elif state == 'holding' and not engine.stopping:
+            self.startup_home_deadline = now+self.io.profile.max_transition_duration
+            self.startup_hold_state = 'homing'
+            self.node.event('STARTUP_HOME_REQUESTED', 'ARMS_WAIST_ZERO')
+        elif state == 'homing':
+            try:
+                if now >= self.startup_home_deadline:
+                    raise Rejected('STARTUP_HOME_TIMEOUT')
+                if engine.stopping or self.target_fault:
+                    raise Rejected(self.target_fault or 'STARTUP_HOME_INTERRUPTED')
+                motion = replace(self.startup_motion, command_id='startup_home_'+str(round(now*1e9)),
+                    stamp=now, positions=(0.,)*len(self.startup_motion.names))
+                engine.renew(motion.lease_id, motion.epoch, now)
+                engine.submit(motion, now)
+                engine.tick(now)
+                reference = self.io.sampled_reference()[1]
+                tolerance = self.io.profile.feedback_tolerances['joint_position']
+                arrival = dict(self.io.replay_position_tolerances)
+                arrival.update({n: self.io.profile.stop_position_tolerances.get(n, tolerance)
+                                for n in self.io.stop_arrival_joints})
+                if (self.takeover_pending is None and engine.references_arrived(motion.names,
+                        position_tolerances=arrival) and
+                        all(abs(reference.get(n, math.inf)) < tolerance for n in motion.names)):
+                    engine.halt(now, revoke=True)
+                    self.startup_hold_state = 'stopping'
+            except (Rejected, RuntimeError) as exc:
+                engine.halt(now, 'STARTUP_HOME_FAILED', revoke=True)
+                self.startup_hold_state = 'failed'
+                self.node.event('STARTUP_HOLD_FAILED', str(exc))
         elif state == 'stopping' and not engine.stopping:
             self.startup_hold_state = 'ready'
             self.node.event('STARTUP_HOLD_READY', 'POWERED_HOLD')
@@ -583,6 +619,8 @@ class PositionSessionDevices:
         for field, getter, ceiling in (('max_velocity', self.io.profile.speed, self.trajectory_limits['trajectory_max_velocity']),
                 ('max_acceleration', self.io.profile.acceleration, self.trajectory_limits['trajectory_max_acceleration']),
                 ('max_jerk', self.io.profile.jerk, self.trajectory_limits.get('trajectory_max_jerk', 162.))):
+            if getattr(self, 'startup_hold_state', '') == 'homing':
+                ceiling = min(ceiling, TARGET_STREAM_LIMIT_DEFAULTS['trajectory_'+field])
             setattr(msg.trajectory, field, [min(ceiling, getter(n)) for n in CONTROL_NAMES])
         msg.command.l_arm_position = [float(target[n]) for n in GROUPS['left_arm']]
         msg.command.r_arm_position = [float(target[n]) for n in GROUPS['right_arm']]

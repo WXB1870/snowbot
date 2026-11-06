@@ -4,12 +4,13 @@ set -e
 
 usage() {
     printf '%s\n' 'Usage: bash tools/run_robot.sh base [--no-impedance]' \
-        '       bash tools/run_robot.sh vr|replay|menu|prepare' \
+        '       bash tools/run_robot.sh vr|replay|menu|prepare [--home]' \
         '  base     Start servo, middle and topic upper; impedance is on by default.' \
         '  vr       Start VR, executor, browser and recording.' \
         '  replay   Start executor, Prepare, then the numbered menu (default).' \
         '  menu     Start executor and menu for an already mounted tool.' \
         '  prepare  Prepare only.' \
+        '  --home   Smoothly zero arms and waist after powered hold, before the application.' \
         'Upper applications read the base mode automatically.'
 }
 mode="${1:-replay}"
@@ -19,7 +20,7 @@ case "$mode" in
     base)
         if (( $# > 1 )) || [[ $# == 1 && "$1" != --no-impedance ]]; then usage >&2; exit 2; fi ;;
     vr|replay|menu|prepare|executor)
-        if (( $# )); then usage >&2; exit 2; fi ;;
+        if (( $# > 1 )) || [[ $# == 1 && "$1" != --home ]]; then usage >&2; exit 2; fi ;;
     *) usage >&2; exit 2 ;;
 esac
 
@@ -32,4 +33,4 @@ if [[ "$mode" == base ]]; then
     sudo -v
     exec python3 -u "$root/tools/deployment/deploy.py" services "$@"
 fi
-exec python3 -u "$root/tools/deployment/deploy.py" operator --frontend "$mode"
+exec python3 -u "$root/tools/deployment/deploy.py" operator --frontend "$mode" "$@"

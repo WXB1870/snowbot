@@ -444,8 +444,10 @@ def replay_commands(frontend, cfg, runs, execution_mode, stamp):
     return result
 
 
-def operator(bindu, workspace, frontend):
+def operator(bindu, workspace, frontend, *, home=False):
     """Wait for the base, then own either VR or the replay executor/client."""
+    # Invocation-local choice, inherited by either the VR or replay executor.
+    os.environ['SNOWBOT_STARTUP_HOME'] = '1' if home else '0'
     import rclpy
     from rclpy.signals import SignalHandlerOptions
     from snowbot_ctl_msgs.msg import PositionSessionState
@@ -562,6 +564,7 @@ def main(argv=None):
     parser.add_argument('--with-impedance', action='store_const', const=True, default=None,
                         help='Include the impedance backend during prepare/build; subsequent builds retain it')
     parser.add_argument('--no-impedance', action='store_true', help='Base startup only: select position control')
+    parser.add_argument('--home', action='store_true', help='Operator startup: smoothly zero arms and waist after powered hold')
     parser.add_argument('--frontend', choices=('vr', 'replay', 'menu', 'prepare', 'executor'), default='replay')
     options, extra = parser.parse_known_args(argv)
     workspace = options.workspace.expanduser().resolve()
@@ -571,6 +574,8 @@ def main(argv=None):
             raise ValueError('Extra arguments are only accepted by start')
         if options.no_impedance and options.command != 'services':
             raise ValueError('--no-impedance belongs to the base startup only')
+        if options.home and options.command != 'operator':
+            raise ValueError('--home belongs to terminal 2 (operator) only')
         if options.command == 'plan':
             bindu = locked_bindu(existing)
             print(json.dumps(dict(snowbot=git(ROOT, 'rev-parse', 'HEAD'), bindu=git(bindu, 'rev-parse', 'HEAD'),
@@ -583,7 +588,7 @@ def main(argv=None):
         if options.command == 'services':
             return services(bindu, workspace, 'position' if options.no_impedance else 'impedance')
         if options.command == 'operator':
-            return operator(bindu, workspace, options.frontend)
+            return operator(bindu, workspace, options.frontend, home=options.home)
         if options.command == 'start':
             # x86_real start already performs the runtime precheck exactly once.
             x86(bindu, workspace, 'start', *extra)

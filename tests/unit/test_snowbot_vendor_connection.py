@@ -280,6 +280,70 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_home_is_opt_in_and_terminal_two_only(self):
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        with patch.object(deploy, 'locked_bindu', return_value=Path('/bindu')), \
+                patch.object(deploy, 'operator', return_value=0) as operator:
+            for extra, enabled in (([], False), (['--home'], True)):
+                self.assertEqual(deploy.main(['operator', '--frontend', 'vr', *extra]), 0)
+                self.assertEqual(operator.call_args.kwargs, {'home': enabled})
+            self.assertEqual(deploy.main(['services', '--home']), 2)
+
+    def test_home_waits_for_powered_hold_and_measured_and_nominal_arrival(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        from bindu_contracts.contracts import Motion
+        from snowbot_hardware.position_session import PositionSessionDevices
+        from snowbot_hardware.protocol import GROUPS
+        names = tuple(n for g in ('waist', 'left_arm', 'right_arm') for n in GROUPS[g])
+        devices = PositionSessionDevices.__new__(PositionSessionDevices)
+        devices.node = S(now=Mock(return_value=10.), closing=False, event=Mock(), get_logger=Mock())
+        devices.io = S(stop_failures=(), profile=S(max_transition_duration=30.,
+            feedback_tolerances={'joint_position': .01}, stop_position_tolerances={names[0]: .02}),
+            stop_arrival_joints=GROUPS['waist'], replay_position_tolerances=dict.fromkeys(names, .035),
+            sampled_reference=Mock(return_value=(10., {}, {}, {})))
+        devices.startup_hold_state = 'holding'; devices.target_fault = ''; devices.takeover_pending = None
+        devices.startup_motion = Motion('hold', 'lease', 7, 'profile', 'startup_hold', '', 'joint_target', '',
+            10., .2, names=names, positions=(.2,)*16, schema_version=2,
+            resource_groups=('waist', 'left_arm', 'right_arm'), runtime_mode='real')
+        engine = Mock(stop_fault='', stopping=True)
+        devices.advance_startup_hold(engine)
+        engine.submit.assert_not_called()
+        engine.stopping = None
+        devices.advance_startup_hold(engine)
+        self.assertEqual(devices.startup_hold_state, 'homing')
+        engine.references_arrived.return_value = False
+        devices.advance_startup_hold(engine)
+        motion = engine.submit.call_args.args[0]
+        self.assertEqual((motion.lease_id, motion.epoch, motion.positions), ('lease', 7, (0.,)*16))
+        self.assertEqual(motion.names, names)
+        arrival = engine.references_arrived.call_args.kwargs['position_tolerances']
+        self.assertEqual((arrival[names[0]], arrival[names[1]], arrival[names[2]]), (.02, .01, .035))
+        engine.references_arrived.return_value = True
+        devices.node.now.return_value = 10.02
+        devices.advance_startup_hold(engine)
+        engine.halt.assert_not_called()  # A measured zero alone cannot finish an unfinished reference.
+        devices.io.sampled_reference.return_value = (10.04, dict.fromkeys(names, 0.), {}, {})
+        devices.node.now.return_value = 10.04
+        devices.advance_startup_hold(engine)
+        self.assertEqual(devices.startup_hold_state, 'stopping')
+        engine.halt.assert_called_once_with(10.04, revoke=True)
+        engine.stopping = True
+        devices.advance_startup_hold(engine)
+        self.assertEqual(devices.startup_hold_state, 'stopping')
+        engine.stopping = None
+        devices.advance_startup_hold(engine)
+        self.assertEqual(devices.startup_hold_state, 'ready')
+        devices.startup_hold_state = 'homing'; devices.node.now.return_value = 41.
+        devices.advance_startup_hold(engine)
+        self.assertEqual(devices.startup_hold_state, 'failed')
+        engine.halt.assert_called_with(41., 'STARTUP_HOME_FAILED', revoke=True)
+        devices.startup_hold_state = 'homing'; devices.node.closing = True
+        count = engine.submit.call_count
+        devices.advance_startup_hold(engine)
+        self.assertEqual(engine.submit.call_count, count)
+
     def test_vendor_build_uses_selected_ros_without_starting_nodes(self):
         from unittest.mock import patch
         from tools.deployment import deploy
