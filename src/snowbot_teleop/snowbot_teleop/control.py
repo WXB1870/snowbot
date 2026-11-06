@@ -5,29 +5,18 @@ operator declarations are separate; no input frame can manufacture a grip ack.
 """
 from dataclasses import dataclass
 import math
-import json
 import numpy as np
 from bindu_teleoperation.vr.mapping import pose_matrix
 
 PICO_MAPPING = 'pico_snowbot_v1'
 
 
-def temporary_capture_refusal(code, accepted_commands):
-    """Classify only; the coordinator must still prove cancellation and rest."""
-    if type(accepted_commands) is not int or accepted_commands != 0:
-        return False
-    if code == 'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY':
-        return True
-    prefix = 'BIMANUAL_LEASE_NOT_ACQUIRED:'
-    if not isinstance(code, str) or not code.startswith(prefix):
-        return False
-    try:
-        proof = json.loads(code[len(prefix):])
-    except (ValueError, TypeError):
-        return False
-    return (isinstance(proof, dict) and proof.get('reason') == 'FEEDBACK_NOT_STATIONARY' and
-            bool(proof.get('instance_id')) and bool(proof.get('profile_hash')) and
-            type(proof.get('epoch')) is int and proof['epoch'] >= 0)
+def temporary_capture_refusal(result):
+    """Classify local results; cancellation must still confirm measured rest."""
+    return (result.accepted_commands == 0 and
+            (result.code == 'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY' or
+             result.lease_rejection is not None and
+             result.lease_rejection.reason == 'FEEDBACK_NOT_STATIONARY'))
 
 
 @dataclass(frozen=True)
@@ -546,9 +535,7 @@ class PicoControl:
             # completed stop after an arrival timeout. Neither means arrival.
             arrival_failure=(stopped_failure and operation=='prepare' and
                              reason.startswith('RuntimeError:PICO_ACTUATOR_FEEDBACK_TIMEOUT:'))
-            capture_failure=(stopped_failure and operation=='follow' and not self.fault_active and
-                             reason.startswith('RuntimeError:') and
-                             temporary_capture_refusal(reason[len('RuntimeError:'):], 0))
+            capture_failure=(stopped_failure and operation=='follow' and not self.fault_active)
             retry=(((rejected or arrival_failure) and self.guided_loading or capture_failure) and self.rest(now) and
                    self.frames and 0<=now-self.stamp<=self.max_age)
             if not retry:
@@ -730,3 +717,23 @@ def loading_guide(view, modes):
         return dict(title='步骤 4/4：确认'+operation+'完成',
                     detail='松开双侧握，按 B 确认'+('工具已装夹' if goal=='held' else '工具已取出')+'，返回待命',key='B',step='confirm')
     return {}
+
+
+def prepare_start_tolerance(profile,cfg):
+    """Bound snapshot drift independently of the final arrival tolerance."""
+    value=float(cfg.get('prepare_start_tolerance_rad',.0001))
+    if not math.isfinite(value) or not 0<value<=profile.feedback_tolerances['joint_position']:
+        raise RuntimeError('PICO_PREPARE_START_TOLERANCE_INVALID')
+    return value
+
+
+def prepare_reference(profile,names,measured):
+    """Keep explicit A references legal without rewriting measured feedback."""
+    result=dict(measured)
+    tolerance=profile.feedback_tolerances['joint_position']
+    for n in names:
+        q=measured[n];lo,hi=profile.limits[n]
+        if not math.isfinite(q) or not lo-tolerance<=q<=hi+tolerance:
+            raise RuntimeError('PREPARE_START_JOINT_LIMIT:'+n)
+        result[n]=min(hi,max(lo,q))
+    return result

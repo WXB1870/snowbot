@@ -23,23 +23,12 @@ class GraphSnapshot:
         self.node, self.steady = node, steady
         self.entries = {}
 
-    def _get(self, topic, subscription):
-        key, now = (topic, subscription), self.steady()
-        previous = self.entries.get(key)
-        if previous is None or now-previous[0] >= .1:
-            method = (self.node.get_subscriptions_info_by_topic if subscription else
-                      self.node.get_publishers_info_by_topic)
-            self.entries[key] = now, method(topic)
-        return self.entries[key][1]
-
     def get_publishers_info_by_topic(self, topic):
-        return self._get(topic, False)
-
-    def get_subscriptions_info_by_topic(self, topic):
-        return self._get(topic, True)
-
-    def count_publishers(self, topic):
-        return len(self.get_publishers_info_by_topic(topic))
+        now = self.steady()
+        previous = self.entries.get(topic)
+        if previous is None or now-previous[0] >= .1:
+            self.entries[topic] = now, self.node.get_publishers_info_by_topic(topic)
+        return self.entries[topic][1]
 
 
 GROUPS = {

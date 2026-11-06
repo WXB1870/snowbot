@@ -103,10 +103,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/(name+'.patch'))],cwd=stage/'src',check=True,capture_output=True,text=True)
         if not observation_only:
             for package in ('robot_control','dual_arm_control','servo_control'):
-                for name in ('position_session_contract.h','position_connection_diagnostics.h'):
+                for name in ('position_session_contract.h','position_connection_diagnostics.h','position_session_ros.h'):
                     shutil.copy2(ASSETS/name,stage/'src'/package/'include'/name)
-            for package in ('robot_control','dual_arm_control'):
-                shutil.copy2(ASSETS/'position_session_ros.h',stage/'src'/package/'include/position_session_ros.h')
         if not observation_only:
             shutil.copy2(ASSETS/'position_trajectory.h',stage/'src/servo_control/include/position_trajectory.h')
             for name in NATIVE_FILES:
@@ -209,7 +207,7 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
             native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,
             impedance_source=json.loads((pairing_path.parent/'vendor/snowbot/impedance_118.json').read_text()) if with_impedance else None,
-            impedance_calibration_confirmed=False,source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
+            source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
         (stage/'position_release.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
         stage.rename(output)
     except BaseException:

@@ -218,11 +218,12 @@
      if (shutdown_mode_) return;   // 关机回零期间忽略外部指令
      if (msg->data.size() == 2) {
          h_pos_target[0] = msg->data[0];
-@@ -2329,6 +2358,7 @@
+@@ -2329,7 +2358,8 @@
  }
 
  void ServoNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionServo::SharedPtr packet){
 + if(EtherCAT_driveResetBusy()){position_rejection_="manual_reset_in_progress";return;}
+  if(const char* reason=position_command_graph_.check(*this,"/bindu/position/servo","dual_arm_control_node","snowbot_ctl_msgs/msg/PositionSessionServo")){if(std::string(reason)!="command_source_discovering")position_rejection_=reason;return;}
   position_submit(packet);
  }
  void ServoNode::position_interrupt(){

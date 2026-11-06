@@ -10,6 +10,7 @@ from bindu_contracts.teleoperation import VRFrame
 from bindu_teleoperation.vr.receiver import decode_controller, ButtonCounters
 from snowbot_teleop.control import PicoControl, PicoFeedback, PICO_MAPPING, temporary_capture_refusal
 from bindu_teleoperation.bimanual_session import BimanualSession
+from bindu_runtime.session_operation import LeaseRejection, SessionResult
 
 
 from tests.support.pico import Rig
@@ -19,8 +20,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_execution_contract_is_supplied_by_assembly(self):
         import ast
         from types import SimpleNamespace as S
-        path=Path(find_spec('snowbot_teleop.node').origin)
-        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoNode')
+        path=Path(find_spec('snowbot_teleop.application').origin)
+        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoApplication')
         init=next(n for n in node.body if getattr(n,'name','')=='__init__')
         def assigned(item,name):
             return isinstance(item,ast.Assign) and isinstance(item.targets[0],ast.Attribute) and item.targets[0].attr==name
@@ -32,13 +33,13 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 (True,2,'simulation','kinematic','position'),
                 (False,1,'simulation','kinematic','position')):
             owner=S(cfg={'schema_version':schema,'mapping':PICO_MAPPING},runtime_mode=mode,execution_mode=execution,
-                declare_parameter=lambda *a,**kw:S(value=selected),get_parameter=lambda *a:S(value=backend))
-            exec(code,{'self':owner,'PICO_MAPPING':PICO_MAPPING,'ParameterDescriptor':lambda **kw:kw})
+                declare_parameter=lambda *a,**kw:S(value=selected),get_parameter=lambda name:S(value=selected if name=='position_contract' else backend))
+            exec(code,{'self':owner,'node':owner,'PICO_MAPPING':PICO_MAPPING,'ParameterDescriptor':lambda **kw:kw})
             self.assertIs(owner.position_contract,selected)
             self.assertEqual(owner.backend,backend)
         owner.cfg['schema_version']=2
         with self.assertRaisesRegex(ValueError,'PICO_CONFIG_SCHEMA'):
-            exec(code,{'self':owner,'PICO_MAPPING':PICO_MAPPING,'ParameterDescriptor':lambda **kw:kw})
+            exec(code,{'self':owner,'node':owner,'PICO_MAPPING':PICO_MAPPING,'ParameterDescriptor':lambda **kw:kw})
 
     def test_control_chain_sets_async_transport_before_ros_init_and_honors_site_override(self):
         import ast,os
@@ -77,11 +78,11 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_not_ready_returns_to_standby_only_after_confirmed_stop(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock
-        lease_refusal='BIMANUAL_LEASE_NOT_ACQUIRED:'+json.dumps(dict(
-            reason='FEEDBACK_NOT_STATIONARY',instance_id='executor',profile_hash='p',epoch=3))
+        refusal=LeaseRejection('executor',3,'p','FEEDBACK_NOT_STATIONARY')
+        lease_refusal='FEEDBACK_NOT_STATIONARY'
         for accepted,stop_ok,code in ((0,True,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
                 (0,True,lease_refusal),(1,True,lease_refusal),(0,False,lease_refusal),
-                (0,True,lease_refusal.replace('FEEDBACK_NOT_STATIONARY','DEVICE_FAULT')),
+                (0,True,'DEVICE_FAULT'),
                 (0,True,'BIMANUAL_LEASE_NOT_ACQUIRED:FEEDBACK_NOT_STATIONARY'),
                 (1,True,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
                 (0,False,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
@@ -91,11 +92,12 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 node=self.production('perform');node.control=r.core;node.position_contract=False
                 node.cancel_tool=AsyncMock(side_effect=[None,None if stop_ok else RuntimeError('STOP_UNCONFIRMED')])
                 node.current=Mock();node.select_tool_mode=AsyncMock();node.follow=AsyncMock(side_effect=RuntimeError(code))
-                node.tool_result=S(done=lambda:True,result=lambda:S(result=S(code=code,accepted_commands=accepted)))
+                proof=refusal if code==lease_refusal else None
+                node.tool_result=S(done=lambda:True,result=lambda:SessionResult(simulated=False,code=code,accepted_commands=accepted,lease_rejection=proof))
                 node.now=lambda:r.now;node.feedback=lambda:PicoFeedback(r.now,stop_ok)
                 node.event=Mock();node.simulation=False
                 await node.perform(intent)
-                retry=stop_ok and temporary_capture_refusal(code,accepted)
+                retry=stop_ok and temporary_capture_refusal(node.tool_result.result())
                 self.assertEqual(r.core.phase,'standby' if retry else 'locked')
                 self.assertEqual(r.core.squeeze_released,[False,False])
                 self.assertIsNone(r.core.pending)
@@ -106,8 +108,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_pending_capture_refusal_is_not_locked_by_timer_before_cleanup(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock
-        lease_refusal='BIMANUAL_LEASE_NOT_ACQUIRED:'+json.dumps(dict(
-            reason='FEEDBACK_NOT_STATIONARY',instance_id='executor',profile_hash='p',epoch=3))
+        refusal=LeaseRejection('executor',3,'p','FEEDBACK_NOT_STATIONARY')
+        lease_refusal='FEEDBACK_NOT_STATIONARY'
         for code in ('SNOWBOT_HELD_REFERENCE_NOT_STATIONARY',lease_refusal,'SNOWBOT_PDO_STALE',
                      'BIMANUAL_LEASE_NOT_ACQUIRED:bad-json'):
             node=self.production('tick');node.last_tick_at=None;node.waiters=set();node.validator=S(poll=lambda:None)
@@ -115,10 +117,11 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.now=lambda:1.;node.feedback=lambda:PicoFeedback(1.,True)
             node.control=S(phase='engaging',teleop_mode='bimanual_tool',context_at=1.,pending=S(operation='follow'),
                 lock=Mock(),update_feedback=Mock(),tick=Mock(),drain=lambda:[])
-            node.tool_result=S(done=lambda:True,result=lambda:S(result=S(code=code,accepted_commands=0)))
+            proof=refusal if code==lease_refusal else None
+            node.tool_result=S(done=lambda:True,result=lambda:SessionResult(simulated=False,code=code,accepted_commands=0,lease_rejection=proof))
             node.pending_intent=node.record_future=node.running=None
             node.tick()
-            self.assertEqual(node.control.lock.called,not temporary_capture_refusal(code,0))
+            self.assertEqual(node.control.lock.called,not temporary_capture_refusal(node.tool_result.result()))
 
     def test_continuous_axial_ignores_x_without_changing_gripper_opening(self):
         r=Rig(load='held',guided=True,dual=True,direct=True)
@@ -255,24 +258,53 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         import ast
         from snowbot_hardware.parameters import parameters_for
         from types import SimpleNamespace as S
-        path=Path(find_spec('snowbot_teleop.node').origin)
-        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoNode')
+        path=Path(find_spec('snowbot_teleop.application').origin)
+        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoApplication')
         methods=[n for n in node.body if getattr(n,'name','') in names]
+        preparation=ast.parse(Path(find_spec('snowbot_teleop.preparation').origin).read_text())
+        for method in preparation.body:
+            if getattr(method,'name','') in names:
+                methods=[n for n in methods if n.name!=method.name]+[method]
         module=ast.Module(body=[ast.ClassDef(name='Actual',bases=[],keywords=[],body=methods,decorator_list=[])],type_ignores=[])
         namespace=dict(json=json,math=__import__('math'),time=S(monotonic=lambda:0.),parameters_for=parameters_for,
             temporary_capture_refusal=temporary_capture_refusal,
             seconds=lambda stamp:stamp.sec+stamp.nanosec*1e-9,
             joints_at_rest=lambda joints,names,tol:all(abs(v)<=tol for n,v in zip(joints.name,joints.velocity) if n in names),
-            Trigger=S(Request=lambda:S()),Superseded=type('Superseded',(RuntimeError,),{}))
-        helpers=[n for n in ast.parse(path.read_text()).body
+            SimpleNamespace=S,Trigger=S(Request=lambda:S()),Superseded=type('Superseded',(RuntimeError,),{}))
+        helpers=[n for n in ast.parse(Path(find_spec('snowbot_teleop.control').origin).read_text()).body
                  if getattr(n,'name','') in ('prepare_reference','prepare_start_tolerance')]
         exec(compile(ast.Module(body=helpers,type_ignores=[]),str(path),'exec'),namespace)
         exec(compile(ast.fix_missing_locations(module),str(path),'exec'),namespace)
         actual=namespace['Actual']()
+        actual.tool=S(poll_worker=lambda:None, preflight=lambda _,mode:actual.ready_client.call_async(S()))
+        actual.last_mode_status=1.
+        actual.tool_result=None
         from unittest.mock import AsyncMock
-        actual.reset_grasp_reference=AsyncMock()
+        if 'reset_grasp_reference' not in names:actual.reset_grasp_reference=AsyncMock()
         actual.position_contract=False  # Legacy-only cases opt in explicitly below.
         return actual
+
+    async def test_preparation_reference_reset_uses_current_execution_scope(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        owner=self.production('reset_grasp_reference')
+        owner.state=S(instance_id='execution',lease_epoch=4)
+        owner.current=Mock()
+        owner.tool=S(reset_grasp_reference=Mock(return_value=S(ok=True,code='GRASP_REFERENCE_RESET_QUEUED')))
+        await owner.reset_grasp_reference(object())
+        request=owner.tool.reset_grasp_reference.call_args.args[0]
+        self.assertEqual((request.execution_instance_id,request.epoch),('execution',4))
+
+    async def test_superseded_preparation_cannot_reset_local_reference(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        owner=self.production('reset_grasp_reference')
+        owner.state=S(instance_id='execution',lease_epoch=4)
+        owner.current=Mock(side_effect=RuntimeError('SUPERSEDED'))
+        owner.tool=S(reset_grasp_reference=Mock())
+        with self.assertRaisesRegex(RuntimeError,'SUPERSEDED'):
+            await owner.reset_grasp_reference(object())
+        owner.tool.reset_grasp_reference.assert_not_called()
 
     def test_display_keeps_fresh_coordinated_pair_during_one_hand_delivery(self):
         from types import SimpleNamespace as S
@@ -317,8 +349,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_unheld_policy_is_explicit_and_defaults_to_physical_grasp_checks(self):
         import ast
         from types import SimpleNamespace as S
-        path=Path(find_spec('snowbot_teleop.node').origin)
-        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoNode')
+        path=Path(find_spec('snowbot_teleop.application').origin)
+        node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PicoApplication')
         init=next(n for n in node.body if getattr(n,'name','')=='__init__')
         begin=next(i for i,n in enumerate(init.body) if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id=='policy')
         end=next(i for i,n in enumerate(init.body) if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Subscript) and getattr(n.targets[0].slice,'value','')=='urdf')
@@ -576,8 +608,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from snowbot_teleop.replay import NAMES
         library = package_share('snowbot_bringup')/'config/robots/snowbot/primitive-library/manifest.json'
         manifest = json.loads(library.read_text())
-        tree = ast.parse(Path(find_spec('snowbot_teleop.node').origin).read_text())
-        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'PicoNode')
+        tree = ast.parse(Path(find_spec('snowbot_teleop.application').origin).read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'PicoApplication')
         init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '__init__')
         block = next(n for n in init.body if isinstance(n, ast.If) and
                      "self.cfg.get('primitive_library')" in ast.unparse(n.test))
@@ -844,10 +876,10 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             stamp=lambda value:S(sec=int(value),nanosec=round((value-int(value))*1e9)),
             seconds=lambda value:value.sec+value.nanosec/1e9,
             joints_at_rest=lambda joints,names,tol:all(abs(v)<=tol for n,v in zip(joints.name,joints.velocity) if n in names))
-        path=Path(find_spec('snowbot_teleop.node').origin);tree=ast.parse(path.read_text())
-        node=next(x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='PicoNode')
-        helpers=[x for x in tree.body if getattr(x,'name','') in ('prepare_reference','prepare_start_tolerance')]
-        method=next(x for x in node.body if getattr(x,'name','')=='move')
+        path=Path(find_spec('snowbot_teleop.application').origin);tree=ast.parse(path.read_text())
+        node=next(x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='PicoApplication')
+        helpers=[x for x in ast.parse(Path(find_spec('snowbot_teleop.control').origin).read_text()).body if getattr(x,'name','') in ('prepare_reference','prepare_start_tolerance')]
+        method=next(x for x in ast.parse(Path(find_spec('snowbot_teleop.preparation').origin).read_text()).body if getattr(x,'name','')=='move')
         exec(compile(ast.Module(body=helpers+[method],type_ignores=[]),str(path),'exec'),module.__dict__)
         module.PicoNode=S(move=module.move)
         return module
@@ -905,7 +937,6 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(c.valid_for==.25 for c in commands))
         self.assertAlmostEqual(commands[0].positions[0],.199)
         self.assertAlmostEqual(commands[-1].positions[0],.2)
-        self.assertFalse(hasattr(node,'primitive_grasp_guard'))
         with self.assertRaisesRegex(RuntimeError,'REPLAY_STREAM_LATE'):
             await self.arrival(error=.001,primitive=True,tick_period=.1)
         with self.assertRaisesRegex(RuntimeError,'PREPARE_RELEASED'):
@@ -966,7 +997,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         return node
 
     async def test_return_does_not_preserve_captured_grasp_in_either_mode_or_any_load_state(self):
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         from snowbot_teleop.control import PicoIntent
         for load in ('empty','held','unknown'):
             for mode in ('independent_arms','bimanual_tool'):
@@ -981,7 +1012,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(event['tool_present'])
 
     async def test_return_still_propagates_robot_collision_limits_and_changed_feedback(self):
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         from snowbot_teleop.control import PicoIntent
         for error in ('SELF_COLLISION: arm / body t=0.5','PREPARE_JOINT_LIMIT'):
             with self.subTest(error=error),self.assertRaisesRegex(RuntimeError,error):
@@ -990,7 +1021,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             await PicoNode.validate_prepare(self.node(changed=True),PicoIntent(1,'prepare'))
 
     async def test_configured_prepare_start_tolerance_accepts_small_change_but_rejects_excess(self):
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         from snowbot_teleop.control import PicoIntent
         for gripper in (False,True):
             for delta in (.00019174768,.001,.001001):
@@ -1009,7 +1040,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
                                          ('joint',delta,.001))
 
     async def test_prepare_start_relaxation_keeps_default_and_stationary_guards(self):
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         from snowbot_teleop.control import PicoIntent
         from types import SimpleNamespace as S
         for configured,gripper,velocity in ((False,False,0.),(False,True,0.),(True,False,.00501),(True,True,.00501)):
@@ -1023,7 +1054,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
                     await PicoNode.validate_prepare(node,PicoIntent(1,'prepare'),{'joint':.2} if gripper else None)
 
     async def test_prepare_start_tolerance_rejects_invalid_configuration(self):
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         from snowbot_teleop.control import PicoIntent
         for tolerance in (0.,-.001,float('nan'),float('inf'),.002001):
             with self.subTest(tolerance=tolerance):
@@ -1033,7 +1064,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
                 node.validator.submit.assert_not_called()
 
     async def test_boundary_reference_is_explicit_and_does_not_replace_measured_validation_start(self):
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         from snowbot_teleop.control import PicoIntent
         from types import SimpleNamespace as S
         node=self.node('empty');measured={'joint':-1.00007}
@@ -1044,7 +1075,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measured,{'joint':-1.00007})
 
     def test_boundary_reference_preserves_strict_curve_limits_and_rejects_large_overrun(self):
-        from snowbot_teleop.node import prepare_reference
+        from snowbot_teleop.control import prepare_reference
         from bindu_execution.interpolation import Curve,State
         from bindu_contracts.profile import Profile
         from tests.support.paths import BINDU_ROOT as ROOT
@@ -1066,7 +1097,7 @@ class OperationCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_gripper_handoff_refreshes_stopped_feedback_before_held_a_completion(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock
-        from snowbot_teleop.node import PicoNode
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
         r=Rig(guided=True,direct=True);r.triggers=[1.,0.];r.step()
         r.triggers=[0.,0.];r.step();r.stopped=False;r.buttons[1]=1;r.step()
         intent=r.core.pending
@@ -1082,7 +1113,8 @@ class OperationCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def run_superseded(self, cleanup_error=None):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock
-        from snowbot_teleop.node import PicoNode,Superseded
+        PicoNode=type(ScenarioRuntimeTests.production('perform', 'validate_prepare'))
+        Superseded=PicoNode.perform.__globals__['Superseded']
         r=Rig(guided=True,direct=True);r.triggers=[1.,0.];old=r.step()[-1]
         r.triggers=[0.,0.];replacement=r.step()[-1]
         node=S(control=r.core,cancel_tool=AsyncMock(side_effect=[None,cleanup_error]),
@@ -1584,6 +1616,194 @@ class StateTests(unittest.TestCase):
         with self.assertRaises(ValueError):rig.core.context(rig.source,0,'held',True,rig.now)
         rig.context('held');self.assertEqual(rig.core.phase,'locked')
 
+
+
+class LocalApplicationTests(unittest.IsolatedAsyncioTestCase):
+    def test_real_recipe_constructs_application_and_capability_on_one_host(self):
+        import ast, math, types
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock, patch
+        from bindu_contracts.resources import resource_file
+        from bindu_contracts.teleoperation import load_tool_config
+        from bindu_runtime.robot_setup import RobotSetup
+        from bindu_teleoperation.base import BaseTeleop
+        from snowbot_hardware.parameters import load_mode_config, mode_config_digest, apply_tool_timing, load_parameters
+        from snowbot_hardware.gripper import validate_config, JOINTS
+        from tests.support.paths import BINDU_ROOT
+        def component(path, name, namespace, methods=('__init__',)):
+            original = next(n for n in ast.parse(path.read_text()).body
+                            if isinstance(n, ast.ClassDef) and n.name == name)
+            original.bases = []
+            original.body = [n for n in original.body if getattr(n, 'name', '') in methods]
+            exec(compile(ast.Module(body=[original], type_ignores=[]), str(path), 'exec'), namespace)
+            return namespace[name]
+        share = package_share('snowbot_bringup')
+        recipe = json.loads((share / 'config/deployments/snowbot_vr_real.json').read_text())['arguments']
+        robot = RobotSetup.load(resource_file(recipe['robot_config']))
+        values = dict(recipe, tool_config=str(robot.tool_config), model_root=str(robot.urdf.parent),
+                      recording_enabled=recipe['recorder_enabled'], require_recording=recipe['recorder_enabled'])
+        from bindu_runtime.teleop_deployment import position_contract_for
+        values['position_contract'] = position_contract_for(json.loads(robot.tool_config.read_text()))
+        for key in ('pico_config', 'parameters_config', 'gripper_config', 'base_config'):
+            values[key] = str(resource_file(values[key]))
+        class Host:
+            profile = robot.profile
+            runtime_mode, simulation = 'real', False
+            run_id, instance_id = 'test-run', 'test-application'
+            def __init__(self):
+                self.parameters = {}
+                self._parameter_overrides = {}
+                self.create_client = Mock(return_value=object())
+                self.create_subscription = Mock()
+            def declare_parameter(self, name, default, **kwargs):
+                assert name not in self.parameters, name
+                self.parameters[name] = S(value=values.get(name, default))
+                return self.parameters[name]
+            def has_parameter(self, name):return name in self.parameters
+            def get_parameter(self, name):return self.parameters[name]
+            def now(self):return 10.
+            def event(self, *args):pass
+            def matches_mode(self, message):return True
+            def get_logger(self):return Mock()
+        host = Host()
+        execution = S(state=None, leases=object(), submit=object(), control=object(), held_reference=object())
+        app_path = Path(find_spec('snowbot_teleop.application').origin)
+        descriptor = lambda **kwargs:None
+        namespace = dict(__package__='snowbot_teleop', Path=Path, math=math, json=json,
+            ParameterDescriptor=descriptor, get_package_share_directory=lambda name:str(package_share(name)),
+            load_tool_config=load_tool_config, PicoControl=PicoControl, PICO_MAPPING=PICO_MAPPING, BimanualWorker=Mock())
+        positions = dict(Path=Path, validate_config=validate_config, load_mode_config=load_mode_config,
+            mode_config_digest=mode_config_digest, Lease=object, GripperControl=object, GripperState=object)
+        position_type = component(app_path.with_name('position.py'), 'PositionOperations', positions,
+                                  ('__init__', 'receive'))
+        base_type = component(BINDU_ROOT / 'src/integration/bindu_runtime/bindu_runtime/teleop_base.py',
+                              'TeleopBase', dict(BaseTeleop=BaseTeleop, json=json, Path=Path))
+        with patch.dict('sys.modules', {'snowbot_teleop.position':S(PositionOperations=position_type),
+                                      'bindu_runtime.teleop_base':S(TeleopBase=base_type)}):
+            app = component(app_path, 'PicoApplication', namespace)(host, execution)
+        client_path = BINDU_ROOT / 'src/integration/bindu_runtime/bindu_runtime/execution_client.py'
+        parameter = next(n for n in ast.parse(client_path.read_text()).body if getattr(n, 'name', '') == 'parameter')
+        exec(compile(ast.Module(body=[parameter], type_ignores=[]), str(client_path), 'exec'), namespace)
+        namespace['__package__'] = 'bindu_runtime'
+        namespace.update(ToolPause=__import__('bindu_teleoperation.bimanual_session', fromlist=['ToolPause']).ToolPause)
+        tool_type = component(BINDU_ROOT / 'src/integration/bindu_runtime/bindu_runtime/tool_session.py',
+                              'ToolSession', namespace)
+        tool = tool_type(host, Mock(), execution=execution,
+            gripper_config_loader=lambda config,profile:(validate_config(load_mode_config(values['gripper_config'], 'real'), profile), JOINTS),
+            tool_config_loader=lambda node,config:apply_tool_timing(config, load_parameters(values['parameters_config'])))
+        self.assertIs(tool.execution, app.execution)
+        self.assertIs(tool.lease_client, app.leases)
+        self.assertIs(tool.submit_client, app.submit)
+        self.assertTrue(tool.independent_enabled)
+        self.assertTrue(tool.trajectory_reference)
+        self.assertEqual(app.prepare_positions.keys(), set(app.names))
+        host.create_subscription.assert_called_once()
+        status_path = app_path.with_name('status.py')
+        status = next(n for n in ast.parse(status_path.read_text()).body
+                      if getattr(n, 'name', '') == 'operator_view')
+        view_namespace = dict(seconds=lambda value:value)
+        exec(compile(ast.Module(body=[status], type_ignores=[]), str(status_path), 'exec'), view_namespace)
+        app.state = None
+        app.base = None
+        app.input_status = lambda now:{}
+        app.control.teleop_mode = 'bimanual_tool'
+        app.control.virtual = False
+        view = view_namespace['operator_view'](app, PicoFeedback(0., False, healthy=False))
+        self.assertEqual(view['grasp_applied'], 'right_axial')
+
+    async def mode_rig(self, *, input_enabled=True):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        from bindu_contracts.profile import Profile
+        app = ScenarioRuntimeTests.production('attach_tool', 'publish_mode', 'select_tool_mode')
+        profile = Profile.load(package_share('snowbot_bringup') / 'config/robots/snowbot/snowbot_real_position.json')
+        clock = [10.]
+        app.profile = profile
+        app.position_contract = True
+        app.recording_enabled = False
+        app.runtime_mode = 'simulation'
+        app.now = lambda: clock[0]
+        app.current = Mock()
+        app.control = S(teleop_mode='independent_arms')
+        app.mode_output = S(publish=Mock())
+        names = list(profile.limits)
+        app.state = S(profile_hash=profile.digest, lease_active=False, state='IDLE',
+            reference=S(name=[]), stop_failures=[], feedback_stamp=clock[0],
+            joints=S(name=names, velocity=[0.] * len(names)))
+        tool = S(cfg=dict(input_max_age=.25, feedback_max_age=.2, grip_release_threshold=.3,
+                         pair_max_skew_s=.02), frames={}, health=None,
+                 preflight=Mock(return_value=S(success=True, message='READY')))
+        app.attach_tool(tool)
+        app.publish_mode.__func__.__globals__.update(TeleopModeState=S, stamp=lambda value:value,
+            seconds=lambda value:value, time=S(monotonic=lambda:clock[0]))
+        app.publish_mode()
+        async def pause():
+            clock[0] += .02
+            app.state.feedback_stamp = clock[0]
+            if input_enabled:
+                tool.frames = {side: VRFrame('headset', 1, clock[0], side,
+                    tuple(np.eye(4).ravel()), 0.) for side in ('left', 'right')}
+        app.pause = pause
+        return app
+
+    async def test_mode_switch_uses_local_preflight_and_updates_session_authority(self):
+        app = await self.mode_rig()
+        await app.select_tool_mode(object())
+        self.assertEqual((app.mode.mode, app.mode.phase, app.mode.generation),
+                         ('independent_arms', 'READY', 2))
+        self.assertIs(app.mode, app.tool.mode_state)
+        app.tool.preflight.assert_called_once()
+        self.assertEqual(app.tool.preflight.call_args.args[1], 'independent_arms')
+
+    async def test_mode_switch_requires_new_paired_input_and_expires_without_it(self):
+        app = await self.mode_rig(input_enabled=False)
+        with self.assertRaisesRegex(RuntimeError, 'MODE_SWITCH_TIMEOUT'):
+            await app.select_tool_mode(object())
+        self.assertEqual(app.selection.phase, 'SAFE')
+        app.tool.preflight.assert_not_called()
+
+    def test_paired_input_reaches_session_directly_and_preserves_gripper_edges(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        app = ScenarioRuntimeTests.production('on_frame')
+        rig = Rig(guided=True, dual=True)
+        rig.core.phase = 'following'
+        rig.core.independent_grippers = True
+        app.control = rig.core
+        app.position_contract = True
+        app.independent_grippers = True
+        app.frames = {}
+        app.matches_mode = lambda message:True
+        app.now = lambda:rig.now + .02
+        app.runtime_parameters = {'diagnostics': {'input_gap_warning_s': .1}}
+        app.last_pair_at = app.last_pair_monotonic = None
+        app.base = None
+        app.feedback = lambda:PicoFeedback(rig.now + .02, True)
+        app.last_prepare_check = None
+        app.event = Mock()
+        app.release_until = 0.
+        app.instance_id = 'application'
+        app.handoff_complete = True
+        app.projected = S(get_subscription_count=lambda:0, publish=Mock())
+        app.gripper_projected = S(publish=Mock())
+        app.tool = S(on_frame=Mock())
+        app.on_frame.__func__.__globals__.update(VRInput=S, copy=__import__('copy').copy,
+            VRFrame=VRFrame, PICO_MAPPING=PICO_MAPPING, seconds=lambda value:value)
+        frames = []
+        for side in ('left', 'right'):
+            message = S(source_id=rig.source, seq=rig.seq + 1, stamp=rig.now + .02,
+                side=side, pose=tuple(np.eye(4).ravel()), grip=0., trigger=.8,
+                init=False, stop=False, valid=True, clutch_seq=0, mapping=PICO_MAPPING,
+                buttons=0, button_edges=[0, 0, 0, 0, 0, 0, 1, 0], virtual_grip=False,
+                stick=[], runtime_mode='simulation')
+            frames.append(message)
+            app.on_frame(message)
+        self.assertEqual(app.tool.on_frame.call_count, 2)
+        self.assertEqual(app.gripper_projected.publish.call_count, 2)
+        app.projected.publish.assert_not_called()
+        for original, call in zip(frames, app.tool.on_frame.call_args_list):
+            self.assertEqual((call.args[0].seq, call.args[0].stamp), (original.seq, original.stamp))
+            self.assertEqual(call.args[0].button_edges[6:], [1, 0])
 
 
 if __name__ == "__main__":

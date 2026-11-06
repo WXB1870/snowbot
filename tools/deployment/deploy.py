@@ -133,23 +133,27 @@ def require_stopped(bindu):
                    cwd=bindu, env=source_environment(bindu), check=True)
 
 
-def prepare_ros_dependencies(bindu, vendor):
+def prepare_ros_dependencies(bindu, vendor, distro):
     # Resolve only the required package closure across all three source roots.
     roots = [vendor/'src', bindu/'src', ROOT/'src']
     paths = subprocess.check_output(['/usr/bin/colcon', 'list', '--base-paths',
         *map(str, roots), '--packages-up-to', *TARGETS, 'snowbot_bringup',
         'bindu_bimanual_qp', '--paths-only'], text=True).splitlines()
     subprocess.run(['/usr/bin/rosdep', 'install', '--from-paths', *paths, '--ignore-src',
-        '--rosdistro', 'jazzy', '--skip-keys', 'pinocchio proxsuite', '-y'], check=True)
+        # These legacy keys have no rosdep definition; require_platform checks
+        # the installed colcon build task and JSON header before reaching here.
+        '--rosdistro', distro, '--skip-keys', 'pinocchio proxsuite ament_python libnlohmann-json-dev', '-y'], check=True)
 
 
-def vendor_build(vendor, workspace):
+def vendor_build(vendor, workspace, distro):
     # A clean, vendor-only shell prevents numerical venv libraries entering servo.
     env = {key: value for key, value in os.environ.items() if key in
            ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION',
             'FASTDDS_BUILTIN_TRANSPORTS', 'CMAKE_BUILD_PARALLEL_LEVEL')}
     env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-    script = 'source /opt/ros/jazzy/setup.bash; export LD_LIBRARY_PATH=/opt/openrobots/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; exec "$@"'
+    script = (f'source /opt/ros/{distro}/setup.bash; '
+              'export CMAKE_PREFIX_PATH=/opt/openrobots${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}; '
+              'export LD_LIBRARY_PATH=/opt/openrobots/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; exec "$@"')
     subprocess.run(['bash', '--noprofile', '--norc', '-ec', script, 'snowbot-build',
                     '/usr/bin/python3', '/usr/bin/colcon', '--log-base', str(workspace/'vendor-log'), 'build',
                     '--base-paths', str(vendor/'src'), '--build-base', str(workspace/'vendor-build'),
@@ -192,15 +196,21 @@ print(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in pat
 
 def require_platform():
     import platform
-    if (platform.system() != 'Linux' or platform.machine() != 'x86_64' or
-        platform.freedesktop_os_release().get('ID') != 'ubuntu' or
-        platform.freedesktop_os_release().get('VERSION_ID') != '24.04'):
-        raise ValueError('Full Snowbot assembly requires Ubuntu 24.04 x86_64 / ROS 2 Jazzy')
-    for path in ('/opt/ros/jazzy/setup.bash', '/usr/bin/colcon',
-                 '/opt/openrobots/lib/libpinocchio_parsers.so.4.1.0',
-                 '/opt/openrobots/lib/libpinocchio_default.so.4.1.0'):
+    info = platform.freedesktop_os_release() if platform.system() == 'Linux' else {}
+    targets = {('x86_64', '24.04'): ('jazzy', '4.1.0'),
+               ('aarch64', '22.04'): ('humble', '3.9.0')}
+    target = targets.get((platform.machine(), info.get('VERSION_ID')))
+    if info.get('ID') != 'ubuntu' or target is None:
+        raise ValueError('Full assembly requires Ubuntu 24.04 x86_64/Jazzy or Ubuntu 22.04 aarch64/Humble')
+    distro, pinocchio = target
+    for path in (f'/opt/ros/{distro}/setup.bash', '/usr/bin/colcon',
+                 '/usr/lib/python3/dist-packages/colcon_ros/task/ament_python/build.py',
+                 '/usr/include/nlohmann/json.hpp',
+                 f'/opt/openrobots/lib/libpinocchio_parsers.so.{pinocchio}',
+                 f'/opt/openrobots/lib/libpinocchio_default.so.{pinocchio}'):
         if not Path(path).is_file():
             raise ValueError('Install system/ROS/vendor prerequisites first: '+path)
+    return distro
 
 
 def keep_service_log(line, previous_wkc, now):
@@ -440,6 +450,7 @@ def operator(bindu, workspace, frontend):
     from rclpy.signals import SignalHandlerOptions
     from snowbot_ctl_msgs.msg import PositionSessionState
     from bindu_interfaces.msg import RuntimeEvent
+    from bindu_interfaces.srv import Lease
     from ament_index_python.packages import get_package_share_directory
     from snowbot_bringup.runtime.run_vr import startup_lock
     from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
@@ -451,7 +462,7 @@ def operator(bindu, workspace, frontend):
     handlers = {s:signal.signal(s, interrupt) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
     node = rclpy.create_node('snowbot_upper_launcher')
-    states, hold = {}, {}
+    states = {}
     for layer in ('servo', 'middle', 'upper'):
         node.create_subscription(PositionSessionState, '/bindu/position/'+layer+'_state',
                                  lambda msg, layer=layer: states.update({layer:msg}), 1)
@@ -473,8 +484,6 @@ def operator(bindu, workspace, frontend):
             print(f'LOGS {logdir}', flush=True)
             writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
             def event(msg):
-                if msg.state in ('STARTUP_HOLD_READY', 'STARTUP_HOLD_FAILED'):
-                    hold.update(state=msg.state, code=msg.code)
                 if msg.state in ('FAILED', 'TARGET_REJECTED', 'STARTUP_HOLD_FAILED', 'DEVICE_FEEDBACK_DETAIL'):
                     writer.record_log('executor-events', dict(name=msg.component, level=40,
                         message=msg.state+':'+msg.code, text=f'[executor] {msg.state}: {msg.code}\n'), text=True)
@@ -485,10 +494,21 @@ def operator(bindu, workspace, frontend):
             children.append(('executor', child))
             reader = threading.Thread(target=copy_service_output, args=('executor', child, writer), daemon=True)
             reader.start(); readers.append(reader)
+            readiness = node.create_client(Lease, '/'+namespace+'/execution/lease')
+            pending = None
             def executor_ready():
-                if hold.get('state') == 'STARTUP_HOLD_FAILED':
-                    raise RuntimeError('STARTUP_HOLD_FAILED:'+hold['code'])
-                return hold.get('state') == 'STARTUP_HOLD_READY'
+                nonlocal pending
+                if not readiness.service_is_ready():
+                    return False
+                if pending is None:
+                    pending = readiness.call_async(Lease.Request(operation='ready',
+                        resources=['waist', 'left_arm', 'right_arm']))
+                if not pending.done():
+                    return False
+                reply, pending = pending.result(), None
+                if reply.code in ('STARTUP_HOLD_FAILED', 'STOP_UNCONFIRMED'):
+                    raise RuntimeError(reply.code)
+                return reply.ok
             if not wait_service(children, executor_ready,
                                 lambda:rclpy.spin_once(node, timeout_sec=.05), stopped):
                 return 0
@@ -558,7 +578,7 @@ def main(argv=None):
                 'build', '--workspace', str(workspace/'upper')], driver_started=False), indent=2))
             return 0
         if options.command in ('prepare', 'build'):
-            require_platform()
+            distro = require_platform()
         bindu = locked_bindu(existing, acquire=options.command in ('prepare', 'build'))
         if options.command == 'services':
             return services(bindu, workspace, 'position' if options.no_impedance else 'impedance')
@@ -573,8 +593,8 @@ def main(argv=None):
         require_stopped(bindu)
         vendor = assemble(bindu, workspace, with_impedance=options.with_impedance)
         if options.command == 'prepare':
-            prepare_ros_dependencies(bindu, vendor)
-        vendor_build(vendor, workspace)
+            prepare_ros_dependencies(bindu, vendor, distro)
+        vendor_build(vendor, workspace, distro)
         if options.command == 'prepare':
             x86(bindu, workspace, 'prepare', '--vendor-setup', vendor/'install/local_setup.bash',
                 '--application-source', ROOT)

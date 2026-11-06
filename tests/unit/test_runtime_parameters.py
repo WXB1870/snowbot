@@ -21,6 +21,16 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertEqual(cfg['diagnostics']['pdo_capacity'],1200)
         self.assertEqual(cfg['display']['poll_ms'],150)
 
+    def test_replay_heartbeat_budget_preserves_250ms_ttl_and_120ms_braking_reserve(self):
+        cfg = load_parameters()
+        self.assertEqual(cfg['replay']['period_s'], .02)
+        self.assertEqual(cfg['replay']['command_ttl_s'], .25)
+        self.assertEqual(cfg['replay']['renewal_period_s'], .5)
+        self.assertAlmostEqual(cfg['replay']['command_ttl_s']-cfg['execution']['target_stream_brake_lead_s'], .13)
+        for replay in ({'period_s': .14}, {'command_ttl_s': .1}, {'renewal_period_s': 2.}):
+            with self.assertRaisesRegex(ValueError, 'REPLAY_TIMING'):
+                self.load({'replay': replay})
+
     def test_comments_do_not_change_defaults_or_local_and_remote_overrides(self):
         self.assertNotIn('_comment', load_parameters()['pico'])
         for connection in ('local', 'remote'):
@@ -91,12 +101,13 @@ class RuntimeParameterTests(unittest.TestCase):
         from importlib.util import find_spec
         from types import SimpleNamespace as S
         from unittest.mock import patch
-        base_source=Path(find_spec('bindu_runtime').origin).parent/'bimanual_tool_node.py'
+        base_source=Path(find_spec('bindu_runtime').origin).parent/'tool_session.py'
         app_source=Path(find_spec('snowbot_teleop').origin).parent/'tool_node.py'
         loader=next(n for n in ast.parse(app_source.read_text()).body if getattr(n,'name','')=='load_tool')
-        namespace={}
+        from bindu_runtime.execution_client import parameter
+        namespace={"parameter":parameter}
         exec(compile(ast.Module(body=[loader],type_ignores=[]),str(app_source),'exec'),namespace)
-        cls=next(n for n in ast.parse(base_source.read_text()).body if getattr(n,'name','')=='BimanualToolNode')
+        cls=next(n for n in ast.parse(base_source.read_text()).body if getattr(n,'name','')=='ToolSession')
         init=next(n for n in cls.body if getattr(n,'name','')=='__init__')
         start=next(i for i,n in enumerate(init.body) if isinstance(n,ast.Assign) and
                    isinstance(n.targets[0],ast.Attribute) and n.targets[0].attr=='cfg')
@@ -104,12 +115,12 @@ class RuntimeParameterTests(unittest.TestCase):
             parameters=Path(tmp)/'parameters.json';tool=Path(tmp)/'tool.json'
             parameters.write_text(json.dumps({'solver':{'timeout_s':.1,'worker_timeout_s':.4}}))
             tool.write_text(json.dumps({'input_max_age':9.,'command_max_age':9.}))
-            node=S(get_parameter=lambda name:S(value=str(tool)),
+            node=S(has_parameter=lambda name:False,get_parameter=lambda name:S(value=str(tool)),
                    declare_parameter=lambda *a,**kw:S(value=str(parameters)))
             modules={'rcl_interfaces':S(),'rcl_interfaces.msg':S(ParameterDescriptor=lambda **kw:kw)}
             with patch.dict('sys.modules',modules):
                 exec(compile(ast.Module(body=init.body[start:start+2],type_ignores=[]),str(base_source),'exec'),
-                     dict(self=node,load_tool_config=load_tool_config,Path=Path,tool_config_loader=namespace['load_tool']))
+                     dict(self=node,node=node,load_tool_config=load_tool_config,Path=Path,tool_config_loader=namespace['load_tool']))
             self.assertEqual(node.cfg['command_max_age'],.4)
             self.assertEqual(node.cfg['solve_timeout_us'],100000)
             self.assertEqual(node.cfg['worker_timeout'],.4)

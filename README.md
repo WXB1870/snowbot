@@ -18,7 +18,9 @@ python3 -m tools.deployment.deploy prepare
 
 本地与远程 PICO 的运行参数集中在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。本地直连使用顶层参数，远程调试在此基础上读取 `remote_vr` 中的输入有效期、换源等待、发送频率、双手时间差和告警间隔。远程现场的 `arguments.parameters_config` 可继续指向[远程入口](src/snowbot_bringup/config/robots/snowbot/runtime_parameters_remote_vr.json)；已有现场参数文件时，在其顶层加 `"vr_connection": "remote"` 即可选择远程模式，需要覆盖的远程值写在该文件的 `remote_vr` 中。下次启动时读取。
 
-正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。本分支支持position与impedance；编入阻抗后端仍由已有--with-impedance选择，现场版本不自动升级。
+正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。`main` 同时支持 `position` 与 `impedance`；编入阻抗后端仍由已有 `--with-impedance` 选择，现场版本不自动升级。
+
+`main` 维护公共集成版本，`xavier/session-v3-position-impedance` 承载持续精简与验证；Bindu 公共修改统一归入其 `main`，Snowbot 用依赖锁固定配套提交。
 
 ## 功能
 
@@ -54,6 +56,26 @@ snowbot/
 **常用入口**：调参数看 [机器人配置](src/snowbot_bringup/config/robots/snowbot/)，改手柄流程看 [遥操作源码](src/snowbot_teleop/snowbot_teleop/)，查现场记录看本地 `artifacts/field/118/`，找实验结果看本地 `artifacts/experiments/`。`config/deployments/` 是启动配方，与现场记录分开。
 
 运行入口在 `snowbot_bringup.runtime`，显示与诊断在 `snowbot_bringup.visualization`，仿真在 `snowbot_bringup.simulation`；页面位于该包的 `share/web/`。遥操作业务逻辑和可复用的预设规划／回放在 `snowbot_teleop`，设备协议和反馈会话在 `snowbot_hardware`。
+
+## 遥操作代码
+
+PICO 配方由 `vr_input → pico_control → execution → 厂商 upper/middle/servo` 连接输入与设备。`pico_control` 在进程内组合应用流程、模式选择和 Bindu 会话，共享一个执行客户端及反馈缓存。QP 和准备路径校验使用各自的数值 worker，电脑显示通过观察器读取状态。
+
+| 阅读位置 | 职责 |
+|---|---|
+| [assembly.py](src/snowbot_bringup/snowbot_bringup/assembly.py) | 启动装配与参数传递 |
+| [node.py](src/snowbot_teleop/snowbot_teleop/node.py) | ROS 发布、订阅、服务和组件装配 |
+| [application.py](src/snowbot_teleop/snowbot_teleop/application.py) | 准备、模式切换、跟随、取消及操作交接 |
+| [control.py](src/snowbot_teleop/snowbot_teleop/control.py) | PICO 按键状态机与操作意图 |
+| [preparation.py](src/snowbot_teleop/snowbot_teleop/preparation.py) | 准备路径、保持参考、目标生成及名义／实测到达检查 |
+| [position.py](src/snowbot_teleop/snowbot_teleop/position.py) | 夹爪操作及夹爪反馈 |
+| [status.py](src/snowbot_teleop/snowbot_teleop/status.py) | 面向操作者的状态视图 |
+| Bindu `tool_session.py` / `tool_follow.py` | 会话就绪、输入映射、QP 事务、执行租约与清理 |
+| Bindu `execution_client.py` | 执行服务客户端和唯一执行反馈缓存 |
+
+模式选择和会话启动在应用内直接调用，会话结果及租约拒绝证据使用 Bindu 结构化对象传递。`teleop/mode_state` 与 `teleop/state` 提供观察出口。`teleop/vr/input` 在存在观察或记录订阅者时发布处理后输入，独立夹爪通过 `teleop/vr/gripper_input` 接收扳机。执行层继续通过租约、修订号和实测反馈确认命令与停止。
+
+日常 QP 诊断和稳定会话反馈以约 10 Hz 更新，阶段变化及时报告。`--diagnostics` 启用逐次 QP 诊断，采集与浏览器显示由独立观察进程处理。
 
 ## 配置与模型
 
