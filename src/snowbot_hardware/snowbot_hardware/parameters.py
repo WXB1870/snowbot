@@ -9,7 +9,8 @@ from functools import lru_cache
 
 _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
  'solver': ('timeout_s', 'worker_timeout_s', 'startup_timeout_s'),
- 'pico': ('prepare_button_hold_s',
+ 'pico': ('remote_input_timeout_s', 'remote_source_timeout_s', 'controller_fps',
+          'prepare_button_hold_s',
           'pair_max_skew_s',
           'grip_press_threshold',
           'grip_release_threshold',
@@ -62,7 +63,7 @@ def _parameter_object(values):
 @lru_cache(maxsize=1)
 def _defaults():
     result = json.loads(default_path().read_text(), object_hook=_parameter_object)
-    if (set(result) != {'schema_version', 'remote_vr', *_FIELDS} or
+    if (set(result) != {'schema_version', *_FIELDS} or
             type(result.get('schema_version')) is not int or result['schema_version'] != 1 or
             any(not isinstance(result[g],dict) or set(result[g]) != set(keys) for g,keys in _FIELDS.items())):
         raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
@@ -71,25 +72,19 @@ def _defaults():
 
 def load_parameters(path=None):
     result = copy.deepcopy(_defaults())
-    remote_defaults = result.pop('remote_vr')
     raw = json.loads(Path(path).read_text(), object_hook=_parameter_object) if path else {}
     if (not isinstance(raw, dict) or type(raw.get('schema_version', 1)) is not int
             or raw.get('schema_version', 1) != 1):
         raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
     raw.pop('schema_version', None)
-    connection = raw.pop('vr_connection', 'local')
-    if connection not in ('local', 'remote'):
-        raise ValueError('SNOWBOT_VR_CONNECTION')
-    site_remote = raw.pop('remote_vr', {})
-    # Shared/site values first, then the selected connection's overrides.
-    layers = (raw, remote_defaults, site_remote) if connection == 'remote' else (raw,)
-    for layer in layers:
+    # Existing site files may still select a connection or nest their overrides.
+    raw.pop('vr_connection', None)
+    legacy_overrides = raw.pop('remote_vr', {})
+    for layer in (raw, legacy_overrides):
         if not isinstance(layer, dict) or set(layer)-set(_FIELDS):
             raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
         for group, values in layer.items():
             allowed = set(result[group])
-            if group == 'pico':
-                allowed.update(('remote_input_timeout_s', 'remote_source_timeout_s', 'controller_fps'))
             if not isinstance(values, dict) or set(values)-allowed:
                 raise ValueError('SNOWBOT_PARAMETERS_GROUP:'+group)
             result[group].update(values)
@@ -157,8 +152,7 @@ def apply_tool_timing(config, parameters):
     """Apply the selected site timing before constructing sessions and workers."""
     from bindu_contracts.teleoperation import tool_with_timing
     result = tool_with_timing(config, parameters['teleop'], parameters['solver'])
-    if 'remote_input_timeout_s' in parameters['pico']:
-        result['input_max_age'] = parameters['pico']['remote_input_timeout_s']
+    result['input_max_age'] = parameters['pico']['remote_input_timeout_s']
     gap = result.get('integration_max_sample_gap', result.get('max_integration_interval', .1))
     if gap > result['input_max_age']:
         raise ValueError('BIMANUAL_SAMPLE_GAP_EXCEEDS_INPUT_TIMEOUT')

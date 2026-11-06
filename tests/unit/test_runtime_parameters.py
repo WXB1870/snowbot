@@ -47,10 +47,8 @@ class RuntimeParameterTests(unittest.TestCase):
                 selected = self.load(commented)
                 self.assertEqual(selected, self.load(plain))
                 self.assertEqual(selected['pico']['prepare_button_hold_s'], 2.)
-                if connection == 'remote':
-                    self.assertEqual(selected['pico']['remote_input_timeout_s'], 1.5)
-                else:
-                    self.assertNotIn('remote_input_timeout_s', selected['pico'])
+                self.assertEqual(selected['pico']['remote_input_timeout_s'], 1.5)
+                self.assertEqual(self.load({'vr_connection':connection}), load_parameters())
 
     def test_shared_timing_preserves_standalone_defaults_and_selected_overrides(self):
         from bindu_contracts.teleoperation import load_tool_config
@@ -59,10 +57,11 @@ class RuntimeParameterTests(unittest.TestCase):
         for name in ('bimanual_snowbot_real.json',):
             original=load_tool_config(base/name)
             effective=apply_tool_timing(original,load_parameters())
-            for key in ('input_max_age','feedback_max_age','command_max_age',
+            self.assertEqual(effective['input_max_age'], 1.)
+            for key in ('feedback_max_age','command_max_age',
                         'solve_timeout_us','worker_timeout','worker_startup_timeout'):
                 self.assertEqual(effective[key],original[key],(name,key))
-            selected=self.load({'teleop':{'input_max_age_s':.3,'feedback_max_age_s':.15,'command_ttl_s':.35},
+            selected=self.load({'pico':{'remote_input_timeout_s':.3},'teleop':{'feedback_max_age_s':.15,'command_ttl_s':.35},
                                 'solver':{'timeout_s':.1,'worker_timeout_s':.4,'startup_timeout_s':10.}})
             changed=apply_tool_timing(original,selected)
             self.assertEqual([changed[k] for k in ('input_max_age','feedback_max_age','command_max_age',
@@ -79,7 +78,7 @@ class RuntimeParameterTests(unittest.TestCase):
         from bindu_contracts.teleoperation import VRFrame
         from bindu_teleoperation.independent_session import IndependentArmsSession
         cfg=apply_tool_timing(dict(engage_seconds=.1,position_scale=1.),
-                             self.load({'teleop':{'input_max_age_s':.3}}))
+                             self.load({'pico':{'remote_input_timeout_s':.3}}))
         pose=tuple(np.eye(4).ravel())
         frames=[VRFrame('vr',1,1.,side,pose,0.) for side in ('left','right')]
         session=IndependentArmsSession(cfg,1,0.)
@@ -91,7 +90,7 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertEqual(cfg['execution']['target_stream_brake_lead_s'],.04)
         with self.assertRaisesRegex(ValueError,'SAMPLE_GAP'):
             apply_tool_timing({'integration_max_sample_gap':.25},
-                             self.load({'teleop':{'input_max_age_s':.2}}))
+                             self.load({'pico':{'remote_input_timeout_s':.2}}))
         with self.assertRaisesRegex(ValueError,'BRAKE_LEAD_EXCEEDS_TTL'):
             validate_pico_timing(self.load({'teleop':{'input_max_age_s':.1,'command_ttl_s':.1}}),brake_lead_s=.12)
 

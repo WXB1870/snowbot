@@ -332,16 +332,16 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     stamp=S(sec=1,nanosec=round((f.stamp-1)*1e9))) for f in rig.core.frames}
                 left=node.frames['left'];now=rig.now
                 if fault=='invalid':left.valid=False
-                elif fault=='stale':now+=.251
+                elif fault=='stale':now+=1.01
                 elif fault=='future':left.stamp=S(sec=2,nanosec=0)
                 elif fault=='source':left.source_id='reconnected'
                 elif fault=='reversed':left.seq-=1
                 elif fault=='missing':node.frames.pop('right')
                 elif fault=='no_pair':node.control.frames=None
                 else:
-                    now+=.251
+                    now+=1.01
                     for f in node.frames.values():
-                        f.stamp=S(sec=1,nanosec=round((now-1)*1e9));f.seq+=1
+                        f.stamp=S(sec=int(now),nanosec=round((now-int(now))*1e9));f.seq+=1
                 state=node.input_status(now)
                 self.assertFalse(state['raw_input_valid']);self.assertFalse(state['input_pair_pending'])
 
@@ -1288,14 +1288,14 @@ class StateTests(unittest.TestCase):
     def test_timeout_keeps_triggering_old_frame_evidence_after_fresh_input_returns(self):
         rig=Rig(guided=True,dual=True);rig.grips=[1.,1.];rig.step();rig.complete()
         core=rig.core;old_stamp=core.stamp;old_seq=core.seq
-        rig.now=old_stamp+.26
+        rig.now=old_stamp+1.01
         core.update_feedback(PicoFeedback(rig.now,False),rig.now)
         core.tick(rig.now)
         evidence=core.last_input_timeout
         self.assertEqual((core.phase,core.reason),('locked','PICO_INPUT_TIMEOUT'))
         self.assertEqual(evidence['phase'],'following')
         self.assertEqual(evidence['input_seq'],old_seq)
-        self.assertAlmostEqual(evidence['input_age_s'],.26)
+        self.assertAlmostEqual(evidence['input_age_s'],1.01)
         core.tick(rig.now+.01)
         rig.step(.01)
         self.assertIs(core.last_input_timeout,evidence)
@@ -1334,7 +1334,7 @@ class StateTests(unittest.TestCase):
         core=PicoControl(initial_load='unknown')
         rig=Rig()
         core.ingest(*rig.core.frames,rig.now)
-        later=rig.now+1.
+        later=rig.now+1.01
         core.tick(later)
         self.assertEqual(core.phase,'checking')
         core.update_feedback(PicoFeedback(later,True),later)
@@ -1343,7 +1343,7 @@ class StateTests(unittest.TestCase):
         core.ingest(*rig.core.frames,rig.now)
         core.update_feedback(PicoFeedback(rig.now,True),rig.now)
         self.assertEqual(core.phase,'standby')
-        core.tick(rig.now+1.)
+        core.tick(rig.now+1.01)
         self.assertEqual((core.phase,core.reason),('locked','PICO_INPUT_TIMEOUT'))
 
     def test_initial_feedback_discovery_waits_without_latching_or_moving(self):
@@ -1523,7 +1523,7 @@ class StateTests(unittest.TestCase):
         tool = apply_tool_timing({}, params)
         self.assertEqual((tool['input_max_age'], tool['command_max_age'], tool['feedback_max_age']),
                          (1., .4, .2))
-        for settings, skew, expected in ((None, .04, 'locked'),
+        for settings, skew, expected in ((None, .04, 'standby'),
                                         (params['pico'], .04, 'standby'),
                                         (params['pico'], .051, 'locked')):
             with self.subTest(settings=settings, skew=skew):
@@ -1586,7 +1586,8 @@ class StateTests(unittest.TestCase):
         self.assertEqual(rig.core.reason, 'PICO_CONNECTION_CHANGED')
 
     def test_reconnect_locks_and_retired_source_cannot_take_over(self):
-        rig=Rig();old=rig.core.frames;rig.source='new';rig.counters=[ButtonCounters(),ButtonCounters()]
+        rig=Rig();rig.core.phase='following'
+        old=rig.core.frames;rig.source='new';rig.counters=[ButtonCounters(),ButtonCounters()]
         rig.step();self.assertEqual(rig.core.phase,'locked')
         rig.core.ingest(*old,rig.now)
         self.assertEqual(rig.core.source,'new')

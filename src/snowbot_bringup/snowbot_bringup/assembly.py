@@ -112,8 +112,7 @@ def assemble(context):
     nodes.append(Node(package='bindu_runtime', executable='teleop_mode', namespace=ns,
                       output='screen', parameters=[{**common, **tool, 'initial_side': side,
                           'supported_sides': [side],
-                          **({'input_max_age_s': input_settings['remote_input_timeout_s']}
-                             if 'remote_input_timeout_s' in input_settings else {}),
+                          'input_max_age_s': input_settings['remote_input_timeout_s'],
                           'single_arm_enabled':single_enabled,'require_single_worker':single_enabled,
                           'independent_arms_enabled':position_contract,
                           'require_recording':recorder_enabled}]))
@@ -134,11 +133,9 @@ def assemble(context):
                       output='screen', parameters=[{**common, **model, 'tool_config': str(robot.tool_config)}]))
     vr = {key: ParameterValue(LaunchConfiguration(key), value_type=str)
           for key in ('host', 'cert_file', 'key_file')}
-    if 'remote_input_timeout_s' in input_settings:
-        vr['remote_input_timeout_s'] = input_settings.get('remote_source_timeout_s', input_settings['remote_input_timeout_s'])
-        vr['input_gap_warning_s'] = runtime_parameters['diagnostics']['input_gap_warning_s']
-    if 'controller_fps' in input_settings:
-        vr['controller_fps'] = input_settings['controller_fps']
+    vr['remote_input_timeout_s'] = input_settings['remote_source_timeout_s']
+    vr['input_gap_warning_s'] = runtime_parameters['diagnostics']['input_gap_warning_s']
+    vr['controller_fps'] = input_settings['controller_fps']
     if pico:
         nodes.append(Node(package='snowbot_teleop',executable='pico_control',namespace=ns,output='screen',
             parameters=[{**common,**model,'parameters_config':value('parameters_config'),'tool_config':str(robot.tool_config),

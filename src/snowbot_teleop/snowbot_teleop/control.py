@@ -66,9 +66,8 @@ class PicoControl:
         self.settings = dict(load_parameters()['pico'], **(settings or {}))
         # The longer VR window applies to controller input only. Robot feedback
         # is measured locally and retains the original freshness budget.
-        self.remote_vr = 'remote_input_timeout_s' in self.settings
         self.feedback_max_age = max_age
-        self.max_age = self.settings.get('remote_input_timeout_s', max_age)
+        self.max_age = self.settings['remote_input_timeout_s']
         self.prepare_hold = self.settings['prepare_button_hold_s'] if prepare_hold is None else prepare_hold
         self.phase, self.reason = 'checking', 'WAITING_FOR_INPUT_AND_FEEDBACK'
         self.fault_active = False
@@ -221,23 +220,22 @@ class PicoControl:
         if self.phase!='checking' and self.feedback and not 0 <= now-self.feedback.stamp <= self.feedback_max_age:
             self.lock('PICO_FEEDBACK_STALE',now)
 
-    def superseded_remote_input(self, source_id, seq):
-        return self.remote_vr and (source_id in self.retired or
-                                   (source_id == self.source and seq <= self.seq))
+    def superseded_input(self, source_id, seq):
+        return source_id in self.retired or (source_id == self.source and seq <= self.seq)
 
-    def expired_remote_pair(self, pair, now):
+    def expired_pair(self, pair, now):
         # A queued pair cannot renew the input deadline or claim a new session.
         # Keep an explicit stop on the normal stop/lock path.
-        return self.remote_vr and all(not f.stop and math.isfinite(f.stamp)
-                                      and now-f.stamp > self.max_age for f in pair)
+        return all(not f.stop and math.isfinite(f.stamp)
+                   and now-f.stamp > self.max_age for f in pair)
 
     def ingest(self, left, right, now):
         pair=(left,right)
         if ((left.source_id == right.source_id and left.seq == right.seq
-             and self.superseded_remote_input(left.source_id, left.seq))
-                or self.expired_remote_pair(pair, now)):
+             and self.superseded_input(left.source_id, left.seq))
+                or self.expired_pair(pair, now)):
             return
-        idle_reconnect = (self.remote_vr and self.phase == 'standby' and not self.pending
+        idle_reconnect = (self.phase == 'standby' and not self.pending
                           and not self.fault_active and self.rest(now)
                           and left.source_id == right.source_id != self.source)
         acquiring = self.source is None and self.phase == 'checking'

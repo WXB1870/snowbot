@@ -22,7 +22,7 @@ Orin 首次选择 `python3 -m tools.deployment.deploy prepare --with-impedance -
 
 终端2可选 `bash tools/run_robot.sh vr --home` 或 `bash tools/run_robot.sh replay --home`：先确认原位使能保持，再通过现有轨迹生成器平滑将双臂和腰部回关节零位，头部／夹爪不参与；到位、停稳后开放业务。回零使用现有默认慢速上限（速度≤0.25 rad/s、加速度≤0.5 rad/s²、jerk≤162 rad/s³，同时服从关节配置），不改业务限值。默认不回零，Ctrl+C继续走原有停止流程；replay随后仍执行原有Prepare。
 
-本地与远程 PICO 的运行参数集中在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。本地直连使用顶层参数，远程调试在此基础上读取 `remote_vr` 中的输入有效期、换源等待、发送频率、双手时间差和告警间隔。远程现场的 `arguments.parameters_config` 可继续指向[远程入口](src/snowbot_bringup/config/robots/snowbot/runtime_parameters_remote_vr.json)；已有现场参数文件时，在其顶层加 `"vr_connection": "remote"` 即可选择远程模式，需要覆盖的远程值写在该文件的 `remote_vr` 中。下次启动时读取。
+直连和远程都用 `bash tools/run_robot.sh vr` 启动。手柄输入有效期和换源静默时间均为 1 秒，双手配对窗口为 50 毫秒，到帧间隔告警阈值为 1 秒。统一在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json) 的 `pico` 和 `diagnostics` 中调整。已有现场配置中的 `remote_vr` 覆盖值对所有 VR 连接生效。
 
 正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。`main` 同时支持 `position` 与 `impedance`；编入阻抗后端仍由已有 `--with-impedance` 选择，现场版本不自动升级。
 
@@ -79,7 +79,7 @@ snowbot/
 | 要调整的内容 | 配置位置 |
 |---|---|
 | 真机或位置仿真启动哪些组件 | [deployments/](src/snowbot_bringup/config/deployments/) 下的 real、sim 两份配方 |
-| VR 有效期、双手配对、求解超时和执行时序 | [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。顶层是默认值，`remote_vr` 保存远程覆盖；同目录的 `runtime_parameters_remote_vr.json` 仅供已有部署选择远程模式 |
+| VR 有效期、双手配对、求解超时和执行时序 | [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json)。直连与转发共用同一套输入参数 |
 | 准备姿态、按钮流程、握持确认；夹爪和底盘参数 | [teleop.json](src/snowbot_bringup/config/robots/snowbot/teleop.json)、[grippers.json](src/snowbot_bringup/config/robots/snowbot/grippers.json)、[snowbot_base.json](src/snowbot_bringup/config/robots/snowbot/snowbot_base.json) |
 | 本体、关节限制、双臂工具几何和求解权重 | [本体入口](src/snowbot_bringup/config/robots/snowbot/robot_snowbot_real.json)引用关节配置和[双臂工具配置](src/snowbot_bringup/config/robots/snowbot/bimanual_snowbot_real.json)。独立加载双臂工具时，从同目录的运行参数读取默认时序 |
 | 动作回放数据、雪铲物理仿真参数 | [primitive-library/](src/snowbot_bringup/config/robots/snowbot/primitive-library/) 和 [snowbot_shovel_physics.json](src/snowbot_bringup/config/robots/snowbot/snowbot_shovel_physics.json) |
