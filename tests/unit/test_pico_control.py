@@ -254,6 +254,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         actual=namespace['Actual']()
         actual.tool=S(poll_worker=lambda:None, preflight=lambda _,mode:actual.ready_client.call_async(S()))
         actual.last_mode_status=1.
+        actual.tool_result=None
         actual.position_contract=False  # Legacy-only cases opt in explicitly below.
         return actual
 
@@ -593,10 +594,26 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+    def test_primitive_library_initialization_uses_available_replay_api(self):
+        import ast
+        from types import SimpleNamespace as S
+        from snowbot_teleop.replay import NAMES
+        library = package_share('snowbot_bringup')/'config/robots/snowbot/primitive-library/manifest.json'
+        manifest = json.loads(library.read_text())
+        tree = ast.parse(Path(find_spec('snowbot_teleop.node').origin).read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'PicoNode')
+        init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+        block = next(n for n in init.body if isinstance(n, ast.If) and
+                     "self.cfg.get('primitive_library')" in ast.unparse(n.test))
+        node = S(position_contract=True, cfg={'primitive_library': str(library)})
+        exec(compile(ast.Module(body=[block], type_ignores=[]), '<primitive-init>', 'exec'), {'self': node})
+        self.assertEqual(node.prepare_positions, dict(zip(NAMES, manifest['nodes'][manifest['home_node']])))
+        self.assertFalse(hasattr(node, 'primitive_grasp_guard'))
+
     async def test_primitive_a_targets_side_scoop_and_never_falls_back_while_holding(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock, AsyncMock, patch
-        from snowbot_bringup.teleop.snowbot_primitive_replay import NAMES
+        from snowbot_teleop.replay import NAMES
         node=self.production('prepare_primitive')
         node.current=Mock();node.event=Mock();node.primitive_library='library';node.profile=object()
         node.names=NAMES;node.unheld_test=False;node.control=S(load='held',teleop_mode='bimanual_tool')
@@ -605,7 +622,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         node.move=AsyncMock()
         plan=S(points=((0.,)*16,(.1,)*16),names=NAMES,route=('FlipReverse','ScoopPrefixReverse'),
                duration=2.,validate_profile=Mock())
-        with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',return_value=plan) as planner:
+        with patch('snowbot_teleop.replay.plan_from_current',return_value=plan) as planner:
             self.assertTrue(await node.prepare_primitive(S(token=1)))
             self.assertEqual(planner.call_args.args[1],'Home')
             node.move.assert_awaited_once()
@@ -613,15 +630,55 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         node.move.reset_mock()
         for mode in ('bimanual_tool','independent_arms'):
             node.control.teleop_mode=mode
-            with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',
+            with patch('snowbot_teleop.replay.plan_from_current',
                        side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
                 with self.assertRaisesRegex(RuntimeError,'UNKNOWN_START'):
                     await node.prepare_primitive(S(token=1))
             node.move.assert_not_awaited()
         node.control.load='empty'
-        with patch('snowbot_bringup.teleop.snowbot_primitive_replay.plan_from_current',
+        with patch('snowbot_teleop.replay.plan_from_current',
                    side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
             self.assertFalse(await node.prepare_primitive(S(token=1)))
+
+
+    def test_real_impedance_enable_flag_retains_simulation_and_mode_guards(self):
+        import ast
+        from types import SimpleNamespace as S
+        path=Path(find_spec('snowbot_bringup.runtime.run_vr').origin)
+        entry=next(n for n in ast.parse(path.read_text()).body if getattr(n,'name','')=='parse_args')
+        block=next(n for n in entry.body if isinstance(n,ast.If) and isinstance(n.test,ast.Attribute)
+                   and n.test.attr=='enable_commands')
+        code=compile(ast.Module(body=[block],type_ignores=[]),str(path),'exec')
+        def error(message):raise ValueError(message)
+        for mode in ('position','impedance'):
+            d=dict(runtime_mode='real',device_backend='snowbot_vendor',execution_mode=mode)
+            exec(code,dict(args=S(enable_commands=True,physics=False,declare_load=None),d=d,parser=S(error=error)))
+            self.assertEqual(d['command_enabled'],'true')
+        for change in ({'runtime_mode':'simulation'},{'device_backend':'kinematic'},{'execution_mode':'unknown'}):
+            d=dict(runtime_mode='real',device_backend='snowbot_vendor',execution_mode='impedance')
+            d.update(change)
+            with self.assertRaises(ValueError):
+                exec(code,dict(args=S(enable_commands=True,physics=False,declare_load=None),d=d,parser=S(error=error)))
+
+
+    async def test_impedance_a_selects_confirmed_nominal_node_under_compliance(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock,patch
+        from snowbot_teleop.replay import NAMES
+        node=self.production('prepare_primitive');node.execution_mode='impedance'
+        node.current=Mock();node.event=Mock();node.primitive_library='library';node.profile=object();node.names=NAMES
+        node.control=S(load='held',teleop_mode='bimanual_tool');node.unheld_test=False
+        node.tool_cfg=dict(reference_kinematics=True,max_reference_error=.15,
+             impedance_reference_limits={'joint_reference_error_limits':dict.fromkeys(NAMES[2:],.25)})
+        actual=dict.fromkeys(NAMES,.0);actual.update(dict.fromkeys(NAMES[2:],.2))
+        node.reading=lambda:(S(joints=S(name=list(NAMES),velocity=[0.]*16)),actual)
+        held={'positions':dict.fromkeys(NAMES,0.)};node.prepare_hold_reference=AsyncMock(return_value=held)
+        node.primitive_grasp_guard=S(check=Mock());node.move=AsyncMock()
+        plan=S(names=NAMES,points=((0.,)*16,(.1,)*16),duration=2.,route=('route',),validate_profile=Mock())
+        with patch('snowbot_teleop.replay.plan_from_current',return_value=plan) as planner:
+            self.assertTrue(await node.prepare_primitive(S(token=1)))
+            self.assertEqual(planner.call_args.args[2],held['positions'])
+        node.move.assert_awaited_once()
 
 class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_exit_is_revalidated_before_full_prepare(self):
@@ -803,9 +860,10 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace as S
         from bindu_execution.interpolation import Curve,State
         from snowbot_hardware.parameters import parameters_for
+        from bindu_runtime.stop_evidence import sampled_nominal_reference
         module=types.ModuleType('offline_prepare_move')
         module.__dict__.update(json=json,math=math,time=__import__('time'),uuid=__import__('uuid'),Curve=Curve,State=State,
-            parameters_for=parameters_for,Lease=S(Request=lambda **kw:S(**kw)),
+            parameters_for=parameters_for,sampled_nominal_reference=sampled_nominal_reference,Lease=S(Request=lambda **kw:S(**kw)),
             SubmitMotion=S(Request=lambda **kw:S(**kw)),MotionCommand=S,JointTrajectoryPoint=S,Duration=S,
             stamp=lambda value:S(sec=int(value),nanosec=round((value-int(value))*1e9)),
             seconds=lambda value:value.sec+value.nanosec/1e9,
@@ -818,7 +876,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         module.PicoNode=S(move=module.move)
         return module
 
-    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=1.,position_contract=True,primitive=False,cancel_at=None):
+    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=1.,position_contract=True,primitive=False,cancel_at=None,execution_mode='position'):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock,patch
         module=self.move_module()
@@ -833,6 +891,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             joints=S(name=[joint],velocity=[velocity]),reference=S(name=[joint],position=[target]))
         def reading():
             state.feedback_stamp=module.stamp(clock[0] if fresh else 0.)
+            state.reference.header=S(stamp=module.stamp(max(0.,clock[0]-.001)))
             return state,{joint:target-error}
         async def pause():clock[0]+=tick_period
         async def wait(value):return value
@@ -843,9 +902,14 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             event=Mock(),simulation=False,now=lambda:clock[0],runtime_mode='real',pause=pause,
             runtime_parameters=parameters,submit=S(call_async=Mock(return_value=S(accepted=True,revision=0))),
             release_lease=AsyncMock(side_effect=stop_error))
+        node.execution_mode=execution_mode
+        node.tool_cfg=dict(reference_kinematics=True,max_reference_error=.15,feedback_max_age=.2,
+            impedance_reference_limits={'joint_reference_error_limits':{joint:.25}})
+        node.primitive_nominal_hold={'positions':{joint:target-error}}
+        node.prepare_hold_reference=AsyncMock(return_value=node.primitive_nominal_hold)
         replay=None
         if primitive:
-            from snowbot_bringup.teleop.snowbot_primitive_replay import Replay
+            from snowbot_teleop.replay import Replay
             replay=Replay((0.,2.),((target-error,),(target,)),(joint,),'tool','kin',1.)
             def current(intent):
                 if cancel_at is not None and clock[0]>=cancel_at:raise RuntimeError('PREPARE_RELEASED')
@@ -868,6 +932,14 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             await self.arrival(error=.001,primitive=True,tick_period=.1)
         with self.assertRaisesRegex(RuntimeError,'PREPARE_RELEASED'):
             await self.arrival(error=.001,primitive=True,tick_period=.005,cancel_at=.2)
+
+    async def test_impedance_a_accepts_nominal_arrival_with_measured_rest(self):
+        node=await self.arrival(error=.04,primitive=True,tick_period=.005,execution_mode='impedance')
+        arrivals=[json.loads(c.args[1]) for c in node.event.call_args_list if c.args[0]=='PICO_ACTUATOR_ARRIVED']
+        self.assertEqual(arrivals[0]['arrival_basis'],'sampled_nominal')
+        self.assertFalse(arrivals[0]['measured_at_goal'])
+        self.assertTrue(arrivals[0]['measured_at_rest'])
+        node.prepare_hold_reference.assert_awaited_once()
 
     async def test_configured_prepare_period_and_ttl_reach_real_motion_messages(self):
         from snowbot_hardware.parameters import load_parameters
@@ -1569,6 +1641,7 @@ class LocalApplicationTests(unittest.IsolatedAsyncioTestCase):
             run_id, instance_id = 'test-run', 'test-application'
             def __init__(self):
                 self.parameters = {}
+                self._parameter_overrides = {}
                 self.create_client = Mock(return_value=object())
                 self.create_subscription = Mock()
             def declare_parameter(self, name, default, **kwargs):

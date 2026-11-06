@@ -12,11 +12,43 @@ CONTROL_MASK = sum(SLOT_MASKS[g] for g in CONTROL_GROUPS)
 # ROS delivery can lag the local PDO sampler. Keep these budgets independent.
 ROS_FEEDBACK_TIMEOUT_S = .04
 PDO_MAX_AGE_S = .02
-MOTION_MAX_TTL_S = .2
 TARGET_STREAM_MAX_TTL_S = .4
 SLOTS = [*(f'arm_l_joint_{i}' for i in range(1, 9)),
          *(f'arm_r_joint_{i}' for i in range(1, 9)),
          'head_joint_1', 'head_joint_2', 'body_joint_1', 'body_joint_2']
+
+
+# Joint-task order; EtherCAT wire order remains CONTROL_NAMES.
+REPLAY_GROUPS = ('waist', 'left_arm', 'right_arm')
+REPLAY_NAMES = ('body_joint_1', 'body_joint_2',
+                *(f'arm_{side}_joint_{i}' for side in ('l', 'r') for i in range(1, 8)))
+
+
+def checked_execution_state(msg, now, received, steady, profile_hash, *, owned=False, epoch=0, stationary=True,
+                  state_max_age=.1, feedback_max_age=.2):
+    feedback_age = now-(msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9)
+    if (msg.runtime_mode != 'real' or msg.simulated or msg.device_backend != 'snowbot_vendor' or
+            msg.profile_hash != profile_hash or msg.stop_failures or
+            not 0 <= steady-received <= state_max_age or
+            not 0 <= feedback_age <= feedback_max_age or
+            msg.state in ('FAILED', 'STOPPING')):
+        raise RuntimeError('EXECUTION_NOT_READY:state='+msg.state+';code='+msg.code+
+                           ';feedback_age='+str(round(feedback_age, 4))+
+                           ';state_age='+str(round(steady-received, 4))+
+                           ';profile_match='+str(msg.profile_hash == profile_hash)+
+                           ';stop_failures='+str(list(msg.stop_failures)))
+    if (msg.lease_active != owned or (owned and
+            (msg.lease_epoch != epoch or set(msg.lease_resources) != set(REPLAY_GROUPS)))):
+        raise RuntimeError('EXECUTION_OWNERSHIP_CHANGED')
+    if len(msg.joints.name) != len(set(msg.joints.name)) or not (
+            len(msg.joints.name) == len(msg.joints.position) == len(msg.joints.velocity)):
+        raise RuntimeError('MEASUREMENT_LAYOUT')
+    q, v = dict(zip(msg.joints.name, msg.joints.position)), dict(zip(msg.joints.name, msg.joints.velocity))
+    if any(n not in q or not all(math.isfinite(x) for x in (q[n], v[n])) for n in REPLAY_NAMES):
+        raise RuntimeError('MEASUREMENT_MISSING_OR_NONFINITE')
+    if stationary and not owned and any(abs(v[n]) > .01 for n in REPLAY_NAMES):
+        raise RuntimeError('MEASUREMENT_NOT_STATIONARY')
+    return q, v
 
 
 def decode_observation(msg, now):
@@ -40,9 +72,9 @@ def decode_observation(msg, now):
 
 
 class SessionHealth:
-    def __init__(self, now, steady=time.monotonic, *, execution_mode="position", reference_mode=0):
+    def __init__(self, now, steady=time.monotonic, *, execution_mode="position"):
         self.execution_mode = execution_mode
-        self.reference_mode = reference_mode
+        self.reference_mode = 2
         self.now, self.steady = now, steady
         self.states, self.received = {}, {}
         self.observation = None
@@ -106,7 +138,7 @@ class SessionHealth:
         session, sequence, boot, baseline = request
         # A disabled/interrupted session cannot acknowledge a braking PAUSE.
         # Report the device barrier before the incidental sequence mismatch.
-        if self.reference_mode and obs.session_reason >= 3:
+        if obs.session_reason >= 3:
             return 'SESSION_TERMINATED:'+str(obs.session_reason)
         checks = ((obs.boot_id == boot, 'BOOT_MISMATCH'),
                   (obs.session_selected, 'SESSION_NOT_SELECTED'),
@@ -115,14 +147,13 @@ class SessionHealth:
                   (obs.session_reason in (1, 2), 'PAUSE_REASON_INVALID'),
                   (getattr(obs, 'hold_valid', False), 'HOLD_NOT_VALID'),
                   (baseline <= obs.hold_sample < obs.pdo_sample, 'HOLD_SAMPLE_NOT_ADVANCED'))
-        if self.reference_mode:
-            checks += ((getattr(obs, 'reference_mode', 0) == 2, 'REFERENCE_MODE_MISMATCH'),
-                       (getattr(obs, 'segment_id', 0) == sequence, 'SEGMENT_ID_MISMATCH'),
-                       (obs.session_reason == 1, 'PAUSE_EXPIRED_OR_REVOKED'),
-                       (getattr(obs, 'trajectory_phase', 0) == 4, 'TRAJECTORY_NOT_PAUSED'),
-                       (getattr(obs, 'hold_basis', -1) == 0, 'HOLD_BASIS_MISMATCH'),
-                       (getattr(obs, 'reference_valid', False), 'REFERENCE_NOT_VALID'),
-                       (getattr(obs, 'output_valid', False), 'OUTPUT_NOT_VALID'))
+        checks += ((getattr(obs, 'reference_mode', 0) == 2, 'REFERENCE_MODE_MISMATCH'),
+                   (getattr(obs, 'segment_id', 0) == sequence, 'SEGMENT_ID_MISMATCH'),
+                   (obs.session_reason == 1, 'PAUSE_EXPIRED_OR_REVOKED'),
+                   (getattr(obs, 'trajectory_phase', 0) == 4, 'TRAJECTORY_NOT_PAUSED'),
+                   (getattr(obs, 'hold_basis', -1) == 0, 'HOLD_BASIS_MISMATCH'),
+                   (getattr(obs, 'reference_valid', False), 'REFERENCE_NOT_VALID'),
+                   (getattr(obs, 'output_valid', False), 'OUTPUT_NOT_VALID'))
         for passed, reason in checks:
             if not passed:
                 return reason
@@ -161,9 +192,9 @@ class SessionHealth:
                 raise RuntimeError('SNOWBOT_STOP_POLICY_UNCONFIRMED')
             if layer == 'servo' and state.control_source != self.execution_mode:
                 raise RuntimeError('SNOWBOT_EXECUTION_MODE_CONFLICT:'+self.execution_mode)
-            if getattr(state, 'wire_version', 0) != (5 if self.reference_mode else 3):
+            if getattr(state, 'wire_version', 0) != 5:
                 raise RuntimeError('SNOWBOT_SESSION_PROTOCOL_CONFLICT:'+layer)
-            if self.reference_mode and layer == 'servo' and getattr(state, 'reference_mode', 0) != self.reference_mode:
+            if layer == 'servo' and getattr(state, 'reference_mode', 0) != 2:
                 raise RuntimeError('SNOWBOT_TRAJECTORY_PROTOCOL_CONFLICT:'+layer)
         if obs.session_reason >= 2 and not acquiring:
             raise RuntimeError('SNOWBOT_SESSION_STOPPED:'+str(obs.session_reason))
@@ -269,20 +300,19 @@ def new_session_id(now, previous=0):
 
 class SourceEnvelope:
     """One envelope per accepted Motion; executor ticks cannot renew a target."""
-    def __init__(self, session, now, *, target_stream=False):
+    def __init__(self, session, now):
         self.session, self.now = session, now
-        self.target_stream = target_stream
         # A new PAUSE authorizes only braking. Its original deadline is fixed
         # here, independently of the ordinary target's source deadline.
-        self.pause_valid_for = 2. if target_stream else .2
+        self.pause_valid_for = 2.
         self.sequence = 0
         self.last_id = None
         self.takeover = True
 
     @staticmethod
-    def validate_motion(motion, now, *, target_stream=False):
+    def validate_motion(motion, now):
         """Check the same effective source deadline before software acceptance."""
-        maximum = TARGET_STREAM_MAX_TTL_S if target_stream else MOTION_MAX_TTL_S
+        maximum = TARGET_STREAM_MAX_TTL_S
         expires = motion.stamp + min(maximum, motion.valid_for)
         if (not all(math.isfinite(value) for value in (motion.stamp, motion.valid_for, now)) or
                 motion.valid_for <= 0 or not motion.stamp <= now < expires):
@@ -296,7 +326,7 @@ class SourceEnvelope:
             return None
         source = self.now() if pause else motion.stamp
         expires = source+self.pause_valid_for if pause else self.validate_motion(
-            motion, self.now(), target_stream=self.target_stream)
+            motion, self.now())
         if not source <= self.now() < expires:
             raise RuntimeError('SNOWBOT_SOURCE_COMMAND_EXPIRED')
         self.sequence += 1
@@ -305,7 +335,7 @@ class SourceEnvelope:
         if not pause:
             self.last_id = motion.command_id
         source_ns = round(source*1e9)
-        maximum = TARGET_STREAM_MAX_TTL_S if self.target_stream else MOTION_MAX_TTL_S
+        maximum = TARGET_STREAM_MAX_TTL_S
         ttl_ns = (round(self.pause_valid_for*1e9) if pause else
                   min(round(maximum*1e9), round(motion.valid_for*1e9)))
         return dict(session=self.session, sequence=self.sequence,

@@ -30,7 +30,7 @@ def commands(args):
     control = ['ros2', 'launch', getattr(args, 'launch_package', 'bindu_runtime'), args.launch,
                *[f'{key}:={value}' for key,value in deployment.items() if value!=''],
                f'run_id:={args.run_id}']
-    display = [sys.executable, '-m', 'snowbot_bringup.teleop.snowbot_live', '--dashboard',
+    display = [sys.executable, '-m', 'snowbot_bringup.visualization.snowbot_live', '--dashboard',
         '--namespace', args.namespace, '--run-id', args.run_id, '--port', str(args.port),
         '--robot-config', args.deployment['robot_config'],
         '--runtime-mode', args.deployment['runtime_mode'],
@@ -83,13 +83,13 @@ def check(args):
             pico.get('simulation_only') is not simulation or
             grippers.get('simulation_only',False) is not simulation):
         raise ValueError('部署、工具、PICO 和夹爪配置范围不匹配')
-    from snowbot_bringup.teleop.runtime_check import check_runtime
+    from snowbot_bringup.runtime.runtime_check import check_runtime
     report = check_runtime(args.deployment, robot)
     print('VR_SOFTWARE_CHECK_OK：依赖、配置、消息字段与 TLS 检查通过；不表示机器人接口可用。')
     if args.deployment['runtime_mode'] == 'real':
         requested = getattr(args, 'check_robot', False)
         if requested:
-            from snowbot_bringup.teleop.runtime_check import check_robot_interface
+            from snowbot_bringup.runtime.runtime_check import check_robot_interface
             online = check_robot_interface(args.deployment, args.robot_check_timeout)
             report['online'] = online
             print(json.dumps(online, ensure_ascii=False))
@@ -179,7 +179,7 @@ def startup_lock(domain_id, namespace, *, inherit=False):
 def run_session(args, manifest):
     os.environ['ROS_DOMAIN_ID']=str(args.domain_id)
     if args.declare_load:
-        from snowbot_bringup.teleop.snowbot_live import declare_load
+        from snowbot_bringup.visualization.snowbot_live import declare_load
         args.robot_config=args.deployment['robot_config']
         args.runtime_mode=args.deployment['runtime_mode']
         args.run_id=args.context_run_id
@@ -246,7 +246,7 @@ def run_session(args, manifest):
             print('安装版本：'+(', '.join(name+'='+str(value.get('commit')) for name,value in revisions.items())
                                   if revisions else '无构建身份记录'), flush=True)
             if args.diagnostics:
-                from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
+                from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
                 process_logs=DiagnosticWriter(args.output/'process-output.jsonl',
                     settings=args.runtime_parameters['diagnostics'],input_settings=args.runtime_parameters['pico'],
                     health_filename='process-log-health.json',echo=True)
@@ -297,7 +297,7 @@ def run_session(args, manifest):
 
 def copy_output(child, path, writer=None):
     # Always drain the pipe; disk and terminal writes belong to the bounded worker.
-    from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter, console_log
+    from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter, console_log
     owns_writer=writer is None
     if owns_writer:
         writer=DiagnosticWriter(path.with_suffix('.jsonl'),health_filename=path.stem+'-log-health.json',echo=True)
@@ -325,7 +325,9 @@ def parse_args(argv=None):
     parser.add_argument('--check', action='store_true', help='显式检查环境、配置和证书')
     parser.add_argument('--check-robot', action='store_true', help='配合 --check，只读核对机器人端点、实测反馈和保护状态')
     parser.add_argument('--enable-commands', action='store_true',
-                        help='为本次真机纯位置会话开放运动写入；由实际节点检查就绪，不修改现场配方')
+                        help='为本次真机位置或阻抗会话开放运动写入；由实际节点检查就绪，不修改现场配方')
+    parser.add_argument('--execution-mode', choices=('position',),
+                        help='本次运行模式；由统一入口读取底层模式后传入')
     parser.add_argument('--robot-check-timeout', type=float, default=2., help='只读机器人检查时长，秒，最多30秒')
     parser.add_argument('--physics', action='store_true', help='启用Isaac物理反馈，保留浏览器显示；仅允许仿真配置')
     parser.add_argument('--domain-id', type=int, default=int(os.environ.get('ROS_DOMAIN_ID','0')))
@@ -361,13 +363,15 @@ def parse_args(argv=None):
     args.launch,args.deployment=load_deployment(args.config,get_package_share_directory('bindu_runtime'))
     args.launch_package=json.loads(Path(args.config).read_text()).get('robot_package','bindu_runtime')
     d=args.deployment
+    if args.execution_mode:
+        d['execution_mode'] = args.execution_mode
     from snowbot_hardware.parameters import default_path, load_parameters, validate_pico_timing, braking_lead, load_mode_config
     d['parameters_config']=d.get('parameters_config') or str(default_path())
     args.runtime_parameters=load_parameters(d['parameters_config'])
     if args.enable_commands:
         if (d.get('runtime_mode') != 'real' or d.get('device_backend') != 'snowbot_vendor' or
                 d.get('execution_mode', 'position') != 'position' or args.physics or args.declare_load):
-            parser.error('--enable-commands 仅用于真机纯位置会话，不能与 --physics/--declare-load 同用')
+            parser.error('--enable-commands 仅用于真机位置会话，不能与 --physics/--declare-load 同用')
         d['command_enabled'] = 'true'
     if args.check_robot and d.get('runtime_mode') != 'real':
         parser.error('--check-robot 仅用于真实接口配方')
@@ -383,7 +387,7 @@ def parse_args(argv=None):
     if pico.get('tool_grasp_confirmation') not in ('calibrated','operator'):
         raise ValueError('PICO_TOOL_GRASP_CONFIRMATION_CONFIG')
     lead=0.
-    if d.get('runtime_mode')=='real' and d.get('position_protocol')=='session_v3':
+    if d.get('runtime_mode')=='real':
         lead=braking_lead(args.runtime_parameters,d.get('target_stream_brake_lead_s'))
         d['target_stream_brake_lead_s']=str(lead)
         target_stream_limits(d)

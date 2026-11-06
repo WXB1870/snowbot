@@ -131,31 +131,6 @@ void check_position_pdo_output(){
     path=work/'position_pdo_check.cpp';path.write_text(preamble+block+tests);return path
 
 
-def write_receipt_poll_check(source, work, root):
-    """Compile the production admission poll with the position-only fixture."""
-    fixture=(root/'test_position_poll.cpp').read_text()
-    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
-    preamble=fixture[:fixture.index('position_session::Observation snapshot;')]
-    body=fixture[fixture.index('position_session::Observation snapshot;'):fixture.index('// PRODUCTION_POLL_METHODS')]
-    body=body[:body.rindex('\n};')]
-    if 'void ServoNode::position_target_dispatch()' in text:
-        body+=TARGET_FIELDS
-    body+='};\n'
-    start=text.index('void ServoNode::position_poll()')
-    poll=text[start:text.index('void ServoNode::position_step()',start)]
-    if 'void ServoNode::position_target_dispatch()' in text:
-        begin=text.index('void ServoNode::position_target_dispatch()')
-        poll=text[begin:start]+poll
-    if 'void ServoNode::position_interrupt()' in text:
-        begin=text.index('void ServoNode::position_interrupt()');end=text.index('void ServoNode::position_submit(',begin)
-        poll=text[begin:end]+poll
-    described=fixture[fixture.index('TrajectoryWire described('):fixture.index('void check_production_poll')]
-    checks=fixture[fixture.index('void check_production_poll()'):]
-    main='\nint main(){\n snapshot.valid_mask=0xfffff;snapshot.wkc=snapshot.expected_wkc=67;snapshot.status.fill(0x27);\n snapshot.position[1]=.2;snapshot.position[9]=-.2;snapshot.position[18]=.12;snapshot.position[19]=-.08;\n check_production_poll();\n}\n'
-    path=work/'test_production_receipt.cpp'
-    path.write_text(preamble+body+poll+described+checks+main)
-    return path
-
 TARGET_FIELDS = r"""
  std::string position_feedback_gid_="publisher";
  position_session::Meta position_admission_source_{};position_session::FixedText position_target_error_{};
@@ -260,6 +235,7 @@ def main():
     parser.add_argument("--output",type=Path)
     parser.add_argument("--baseline",type=Path,help="Old prepared src for touched middle default-path differential")
     parser.add_argument("--sanitize",action="store_true",help="AddressSanitizer and UndefinedBehaviorSanitizer, pure memory tests only")
+    parser.add_argument('--tests',nargs='+',help='Run selected existing native cases')
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[1]/"native"
     compiler=shutil.which('c++')
@@ -272,7 +248,7 @@ def main():
     names=['test_snowbot_reconnect_tracker','test_snowbot_connection_contract','test_position_connection_diagnostics','test_position_initialization','test_position_session']
     if (args.source/'servo_control/include/position_receipt.h').is_file():
         sources.append(args.source/'servo_control/include/position_receipt.h')
-        names.extend(('test_position_receipt','test_production_receipt'))
+        names.append('test_position_receipt')
         sources.extend((args.source/'servo_control/src/ros_controller/rosLoop.cpp',root/'test_position_poll.cpp'))
     native_include=args.source/'servo_control/include/bindu_execution_native'
     native_sources=[args.source/'servo_control/src/bindu_execution_native'/name
@@ -290,7 +266,6 @@ def main():
         expected=manifest.get('native_execution',{})
         if any(expected.get(path.name)!=hashlib.sha256(path.read_bytes()).hexdigest() for path in native_paths):
             raise RuntimeError('CANDIDATE_NATIVE_SHA256_MISMATCH')
-        names.append('test_position_trajectory')
         if 'prepare_target' in trajectory.read_text():
             names.append('test_position_target')
             if 'void ServoNode::position_target_dispatch()' in (args.source/'servo_control/src/ros_controller/rosLoop.cpp').read_text():
@@ -309,6 +284,10 @@ def main():
     sources.append(Path(__file__).resolve())
     if args.baseline:sources.append(args.baseline/'dual_arm_control/src/controller/ArmInterface.cpp')
     sources.extend(root/(name+'.cpp') for name in names if (root/(name+'.cpp')).is_file())
+    if args.tests:
+        unknown=set(args.tests)-set(names)
+        if unknown:parser.error('Unknown native cases: '+','.join(sorted(unknown)))
+        names=[name for name in names if name in args.tests]
     before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     results={}
     def failed(detail):
@@ -332,8 +311,6 @@ def main():
                 copied=write_position_cycle_check(args.source,work,root)
             elif name=='test_production_target':
                 copied=write_target_poll_check(args.source,work,root)
-            elif name=='test_production_receipt':
-                copied=write_receipt_poll_check(args.source,work,root)
             else:
                 copied=work/(name+'.cpp');copied.write_bytes((root/(name+'.cpp')).read_bytes())
             command=[compiler,'-std=c++17','-Wall','-Wextra','-Werror','-pthread',
@@ -347,7 +324,7 @@ def main():
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
-            elif name in ('test_position_trajectory','test_production_receipt','test_position_target','test_production_target','test_production_position_cycle'):
+            elif name in ('test_position_target','test_production_target','test_production_position_cycle'):
                 command.extend(map(str,native_sources))
             compiled=subprocess.run(command,capture_output=True,text=True)
             if compiled.returncode:failed(compiled.stdout+compiled.stderr)

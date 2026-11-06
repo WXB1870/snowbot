@@ -76,9 +76,8 @@ class PicoApplication:
         node.declare_parameter(
             "device_backend", "kinematic", descriptor=ParameterDescriptor(read_only=True)
         )
-        node.declare_parameter(
-            "position_protocol", "legacy_guard", descriptor=ParameterDescriptor(read_only=True)
-        )
+        if "position_protocol" in node._parameter_overrides:
+            raise ValueError("SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol")
         node.declare_parameter("gripper_config", "", descriptor=ParameterDescriptor(read_only=True))
         node.declare_parameter("base_config", "", descriptor=ParameterDescriptor(read_only=True))
         node.declare_parameter(
@@ -227,7 +226,7 @@ class PicoApplication:
         self.primitive_library = None
         if self.position_contract and self.cfg.get("primitive_library"):
             from bindu_contracts.resources import resource_file
-            from snowbot_bringup.teleop.snowbot_primitive_replay import replay_graph, NAMES
+            from snowbot_teleop.replay import replay_graph, NAMES
 
             self.primitive_library = resource_file(self.cfg["primitive_library"])
             library, _, _ = replay_graph(self.primitive_library, 1.0, None)
@@ -262,7 +261,7 @@ class PicoApplication:
             or not 0 <= self.prepare_limit_max <= self.prepare_position_tolerance
         ):
             raise ValueError("PICO_PREPARE_LIMIT_RECOVERY_CONFIG")
-        if self.simulation or node.get_parameter("position_protocol").value != "session_v3":
+        if self.simulation:
             self.prepare_limit_max = 0.0
         self.control = PicoControl(
             initial_load=initial_load,
@@ -1377,7 +1376,10 @@ class PicoApplication:
                         if self.prepare_limit_reference is not None:
                             raise RuntimeError("PREPARE_LIMIT_RECOVERY_NOT_INSIDE")
                     _, measured = self.reading()
-                    error = max(abs(measured[n] - q) for n, q in target.items())
+                    ready = measured
+                    if getattr(self, "execution_mode", "position") == "impedance":
+                        ready = (await self.prepare_hold_reference(intent))["positions"]
+                    error = max(abs(ready[n] - q) for n, q in target.items())
                     if (
                         self.position_contract
                         and error < self.prepare_position_tolerance

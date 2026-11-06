@@ -151,6 +151,9 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
             shutil.copy2(ASSETS/'position_waist_feedback.h',stage/'src/servo_control/include/position_waist_feedback.h')
             subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'waist_feedback.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
             patches=(*patches,'waist_feedback')
+        if not observation_only:
+            subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'session_v3_only.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+            patches=(*patches,'session_v3_only')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
@@ -195,8 +198,8 @@ def prepare(source,output,*,observation_only=False,execution_source=None,predict
                 provisional_ratio=[101,101],read_failure_policy='explicit_provisional_101',
                 invalid_response_policy='refuse_initialization',velocity_command_scaled=False,
                 physical_units_verified=False,helper_sha256=digest(ASSETS/'position_waist_feedback.h') if feedback_units else None),
-            stop_policy='unconfirmed',execution_mode='position',reference_mode='follower',trajectory_available=not observation_only,target_stream_available=not observation_only,
-            session_wire_version=3,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=contract_ttl_ms('maximum_target_ttl'),target_pause_ttl_ms=contract_ttl_ms('maximum_target_pause_ttl'),
+            stop_policy='unconfirmed',execution_mode='position',position_protocol=None if observation_only else 'session_v3',reference_mode=None if observation_only else 2,target_stream_available=not observation_only,
+            session_wire_version=None if observation_only else 5,target_wire_version=5,target_reference_mode=2,target_prepare_ms=10.,target_motion_ttl_ms=contract_ttl_ms('maximum_target_ttl'),target_pause_ttl_ms=contract_ttl_ms('maximum_target_pause_ttl'),
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
             native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},

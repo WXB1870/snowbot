@@ -27,7 +27,7 @@ class PositionReleaseTests(unittest.TestCase):
 
     def test_legacy_abi_components_and_shared_sources(self):
         m=json.loads((self.release/'position_release.json').read_text())
-        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback'})
+        self.assertEqual(set(m['components']),{*vendor.COMPONENTS,'pause_hold','drive_maintenance','runtime_timing','waist_feedback','session_v3_only'})
         self.assertFalse(m['driver_started']);self.assertFalse(m['hardware_commands_sent'])
         self.assertEqual(m['preparation']['artifact_role'],'generated_candidate')
         self.assertFalse(m['preparation']['deployment_verified'])
@@ -98,7 +98,9 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertNotIn('impedance_calibration_confirmed',manifest)
         self.assertTrue(manifest['target_stream_available'])
         self.assertEqual((manifest['target_wire_version'],manifest['target_reference_mode']),(5,2))
-        self.assertEqual(manifest['session_wire_version'],3)
+        self.assertEqual(manifest['session_wire_version'],5)
+        self.assertEqual(manifest['position_protocol'],'session_v3')
+        self.assertEqual(manifest['reference_mode'],2)
         self.assertEqual(manifest['target_prepare_ms'],10.)
         servo=self.release/'src/servo_control'
         for name in ('include/impedance/cartesian_impedance_controller.h',
@@ -311,6 +313,240 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def primitive_menu(self, choices, replay):
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from types import SimpleNamespace as S
+        import snowbot_bringup.runtime.snowbot_primitive_replay as module
+        library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
+        args = S(library=library, from_node=None, output_dir=Path('/unused'), execution_mode='position')
+        with patch('builtins.input', side_effect=choices) as choose, \
+                patch.object(module, 'replay_action', side_effect=replay) as run, \
+                redirect_stdout(StringIO()):
+            module.interactive_replay(args, None)
+        return choose, run
+
+    def test_primitive_menu_requires_explicit_returns_and_blocks_wrong_stage_keys(self):
+        calls = []
+        self.primitive_menu(['3','1','2','3','','3','2','1','3','1','2','','q'],
+                            lambda args, _:calls.append((args.action, args.from_node, args.execution_mode, args.transition_hold_s)))
+        self.assertEqual([(action, node) for action,node,_,_ in calls], [
+            ('Push','Push:start'), ('PushReverse','Push:end'), ('SideScoop','Push:start'),
+            ('Flip','Flip:start'), ('Home','Dump:end')])
+        self.assertTrue(all(mode=='position' and hold==0. for _,_,mode,hold in calls))
+
+    def test_primitive_menu_scoop_can_return_without_flip_and_failure_never_advances(self):
+        calls = []
+        self.primitive_menu(['2','','1','','q'], lambda args, _:calls.append(args.action))
+        self.assertEqual(calls, ['SideScoop','Home','Push','PushReverse'])
+        def fail(args, parser):
+            raise RuntimeError('STOP_UNCONFIRMED')
+        with self.assertRaisesRegex(RuntimeError, 'STOP_UNCONFIRMED'):
+            self.primitive_menu(['1','2'], fail)
+
+    def test_primitive_menu_routes_reuse_exact_segments_with_no_artificial_pause(self):
+        from snowbot_teleop.replay import NAMES, plan_from_current
+        library = ROOT/'src/snowbot_bringup/config/robots/snowbot/primitive-library/manifest.json'
+        m = json.loads(library.read_text())
+        self.assertEqual(m['preparation']['goal_node'], 'Push:start')
+        self.assertEqual(m['actions']['SideScoop']['end_node'], 'Flip:start')
+        cases = [
+            ('Push:start','Push',('Push',),7.8),
+            ('Push:end','PushReverse',('PushReverse',),7.82),
+            ('Push:start','SideScoop',('BridgeForward','SideScoop'),12.5),
+            ('Flip:start','Flip',('Flip',),8.12),
+            ('Flip:start','Home',('ScoopReturn',),4.),
+            ('Dump:end','Home',('DumpReturn',),7.08),
+        ]
+        for start, action, route, duration in cases:
+            with self.subTest(start=start, action=action):
+                plan = plan_from_current(library, action, dict(zip(NAMES, m['nodes'][start])), hold_s=0.)
+                self.assertEqual(plan.route, route)
+                self.assertEqual(plan.hold_s, 0.)
+                self.assertAlmostEqual(plan.duration, duration)
+                for a,b in zip(plan.segments,plan.segments[1:]):
+                    self.assertLess(max(abs(x-y) for x,y in zip(a.points[-1], b.points[0])), 1e-12)
+                if len(plan.segments)>1:
+                    boundary=plan.segments[0].duration
+                    actual=plan.sample(boundary+.02);following=plan.segments[1].sample(.02)
+                    self.assertLess(max(abs(a-b) for a,b in zip(actual,following)), 1e-12)
+                    self.assertNotEqual(actual, plan.segments[0].points[-1])
+
+    def test_base_has_three_native_layers_and_mode_override(self):
+        from unittest.mock import patch
+        from tools.deployment.deploy import base_commands
+        with patch.dict(os.environ, {'VIRTUAL_ENV':'upper', 'LD_LIBRARY_PATH':'upper-pin'}):
+            for mode in ('position',):
+                plan = base_commands(Path('/deployment/artifacts/robot'), mode)
+                self.assertEqual([name for name, _, _ in plan], ['servo','middle','upper'])
+                self.assertEqual(plan[0][1][-2:], ['-p', 'execution_mode:='+mode])
+                for _, _, env in plan:
+                    self.assertNotIn('VIRTUAL_ENV', env)
+                    self.assertNotIn('LD_LIBRARY_PATH', env)
+            self.assertEqual(base_commands(Path('/deployment'))[0][1][-1], 'execution_mode:=position')
+
+    def test_upper_inherits_actual_base_mode_after_startup(self):
+        from types import SimpleNamespace as State
+        from tools.deployment.deploy import base_mode
+        states = {name:State(startup_complete=False,control_source='position') for name in ('servo','middle','upper')}
+        self.assertIsNone(base_mode(states))
+        for state in states.values():state.startup_complete=True
+        self.assertEqual(base_mode(states), 'position')
+        states['servo'].control_source='impedance'
+        with self.assertRaisesRegex(RuntimeError, 'UNSUPPORTED_BASE_MODE'):
+            base_mode(states)
+        states.pop('middle')
+        self.assertIsNone(base_mode(states))
+
+    def test_replay_sequence_and_executor_use_same_observed_mode(self):
+        from tools.deployment.deploy import executor_command,replay_commands
+        cfg,runs=Path('/config'),Path('/runs')
+        for mode in ('position',):
+            self.assertIn('execution_mode:='+mode,executor_command(cfg,runs,mode,'bindu_snowbot'))
+            commands=replay_commands('replay',cfg,runs,mode,'run')
+            self.assertEqual(len(commands),2)
+            self.assertEqual(commands[0][commands[0].index('--action')+1],'Prepare')
+            self.assertIn('--interactive',commands[1])
+            for command in commands:
+                self.assertEqual(command[command.index('--execution-mode')+1],mode)
+            menu=replay_commands('menu',cfg,runs,mode,'run')
+            self.assertEqual(len(menu),1)
+            self.assertNotIn('Prepare',menu[0])
+            prepare=replay_commands('prepare',cfg,runs,mode,'run')
+            for command in [*commands,*menu,*prepare]:
+                self.assertEqual(float(command[command.index('--speed')+1]),1.0)
+
+    def test_vr_replay_share_upper_lock_and_release_it(self):
+        from unittest.mock import patch
+        from snowbot_bringup.runtime.run_vr import startup_lock
+        with tempfile.TemporaryDirectory() as tmp,patch('tempfile.gettempdir',return_value=tmp):
+            with startup_lock(7,'test_upper'):
+                with self.assertRaisesRegex(RuntimeError,'ROS'):
+                    startup_lock(7,'test_upper')
+            with startup_lock(7,'test_upper'):
+                pass
+
+    def test_service_log_keeps_wkc_changes_and_faults_without_healthy_spam(self):
+        from tools.deployment.deploy import keep_service_log
+        previous = []
+        healthy = '[ECAT-MON] pdo=100 WKC=67/67 bad_wkc=0 good_age_ms=0.2\n'
+        self.assertTrue(keep_service_log(healthy, previous, 0.))
+        self.assertFalse(keep_service_log(healthy.replace('100', '101'), previous, 1.))
+        self.assertFalse(keep_service_log(healthy, previous, 5.))
+        self.assertTrue(keep_service_log(healthy, previous, 10.))
+        self.assertTrue(keep_service_log(healthy.replace('67/67', '45/67'), previous, 10.1))
+        self.assertTrue(keep_service_log(healthy, previous, 10.2))
+        self.assertTrue(keep_service_log(healthy.replace('bad_wkc=0', 'bad_wkc=1'), previous, 10.3))
+        self.assertFalse(keep_service_log('TARGET_PREDICTION accepted=1 error=\n', previous, 11.))
+        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=0 error=joint_limit\n', previous, 11.))
+        self.assertTrue(keep_service_log('TARGET_PREDICTION accepted=1 error=admission_failed\n', previous, 11.))
+        self.assertTrue(keep_service_log('[ERROR] drive fault\n', previous, 11.))
+
+    def test_service_console_coalesces_fault_snapshots_and_shows_changed_faults(self):
+        from unittest.mock import patch
+        from tools.deployment.deploy import ServiceConsole
+        console = ServiceConsole()
+        warning = '[servo] [WARN] [1.0] [servo_node]: Position session: impedance_joint_feedback_invalid; pdo_sample=1 ft_valid=0x0\n'
+        # Keep the fake clock local to deploy; lazy imports must see real time.
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with patch('tools.deployment.deploy.time',
+                   SimpleNamespace(monotonic=Mock(side_effect=[0., 1., 10., 10.1]))):
+            self.assertIn('ft_valid=0x0', console('servo', warning))
+            self.assertIsNone(console('servo', warning.replace('pdo_sample=1', 'pdo_sample=2')))
+            summary = console('servo', warning.replace('pdo_sample=1', 'pdo_sample=3'))
+            self.assertIn('impedance_joint_feedback_invalid', summary)
+            self.assertIn('repeat +2', summary)
+            self.assertNotIn('pdo_sample', summary)
+            self.assertIn('drive_fault', console('servo', warning.replace('impedance_joint_feedback_invalid', 'drive_fault')))
+
+    def test_session_only_notice_prints_once_without_hiding_real_faults(self):
+        from tools.deployment.deploy import ServiceConsole
+        console = ServiceConsole()
+        notice = '[servo] [WARN] [1.0] [servo_node]: Position session: legacy_source_disabled_for_target_stream\n'
+        self.assertIn('INFO target_stream: legacy input ignored', console('servo', notice))
+        for _ in range(5):
+            self.assertIsNone(console('servo', notice))
+        self.assertIn('ERROR drive fault', console('servo', '[servo] [ERROR] [1.1] [servo_node]: drive fault\n'))
+        self.assertIsNone(console('servo', notice))
+        self.assertIn('ERROR', console('servo', notice.replace('[WARN]', '[ERROR]')))
+
+    def test_service_output_saves_all_lines_and_only_echoes_key_events(self):
+        from io import StringIO
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from tools.deployment.deploy import ServiceConsole, copy_service_output
+        from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
+        lines = ['  joint_name Kp Kd\n', '  shoulder_joint 1200 600\n',
+                 '[INFO] [1.0] [servo_node]: pinocchio joint idx_q=1 idx_v=1\n',
+                 '[EtherCAT] 7 slaves found\n',
+                 '[ECAT-MON] pdo=1 WKC=13/13 bad_wkc=0 good_age_ms=0.2 L4{cw=0x0000}\n',
+                 '[ECAT-MON] pdo=2 WKC=13/13 bad_wkc=0 good_age_ms=0.3 L4{cw=0x0000}\n',
+                 'TARGET_PREDICTION accepted=1 error=\n',
+                 '[WARN] [1.0] [servo_node]: impedance_joint_feedback_invalid\n',
+                 '[WARN] [2.0] [servo_node]: impedance_joint_feedback_invalid\n',
+                 '[ERROR] [2.0] [servo_node]: drive fault\n',
+                 '警告：所有电机反馈为0，跳过回零控制。\n',
+                 '收到中断信号，进入关机回零模式...\n',
+                 'Traceback (most recent call last):\n', '  File "a.py", line 2\n',
+                 'ValueError: invalid target\n']
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch('sys.stdout', output):
+            writer = DiagnosticWriter(Path(tmp)/'process-output.jsonl', echo=ServiceConsole())
+            child = SimpleNamespace(stdout=StringIO(''.join(lines)))
+            copy_service_output('servo', child, writer)
+            writer.close()
+            saved = (Path(tmp)/'servo.log').read_text()
+            self.assertEqual(saved, ''.join('[servo] '+line for line in lines))
+            self.assertTrue(child.stdout.closed)
+            self.assertEqual(writer.dropped, 0)
+        visible = output.getvalue()
+        self.assertNotIn('Kp Kd', visible)
+        self.assertNotIn('idx_q', visible)
+        self.assertNotIn('TARGET_PREDICTION', visible)
+        self.assertNotIn('L4{', visible)
+        self.assertNotIn('LOG_REPEAT', visible)
+        self.assertEqual(visible.count('WKC='), 1)
+        self.assertEqual(visible.count('impedance_joint_feedback_invalid'), 1)
+        for text in ('7 slaves found', 'drive fault', '警告', '关机回零', 'Traceback', 'ValueError'):
+            self.assertIn(text, visible)
+
+    def test_service_wait_uses_readiness_and_never_advances_after_exit(self):
+        import threading
+        from unittest.mock import Mock
+        from tools.deployment.deploy import wait_service
+        stopped = threading.Event(); state = []
+        child = Mock(); child.poll.return_value = None
+        spin = Mock(side_effect=lambda:state.append('ready'))
+        self.assertTrue(wait_service([('servo', child)], lambda:bool(state), spin, stopped))
+        spin.assert_called_once()
+        child.poll.return_value = 3
+        with self.assertRaisesRegex(RuntimeError, 'servo exited: code=3'):
+            wait_service([('servo', child)], lambda:True, spin, stopped)
+        stopped.set()
+        self.assertFalse(wait_service([], lambda:False, spin, stopped))
+        stopped.clear()
+        with self.assertRaisesRegex(RuntimeError, 'STARTUP_TIMEOUT'):
+            wait_service([], lambda:False, spin, stopped, timeout=0.)
+
+    def test_service_exit_is_reverse_order_and_never_force_kills(self):
+        import signal
+        from unittest.mock import Mock, patch
+        from tools.deployment import deploy
+        children = []
+        for index, name in enumerate(('servo', 'middle', 'upper', 'executor'), 1):
+            child = Mock(pid=index); child.poll.return_value = None; child.wait.return_value = 0
+            children.append((name, child))
+        children[-1][1].wait.side_effect = [subprocess.TimeoutExpired('executor', 60.), 0]
+        with patch.object(deploy.os, 'killpg') as send:
+            self.assertTrue(deploy.stop_services(children))
+        self.assertEqual(send.call_args_list, [unittest.mock.call(i, signal.SIGINT) for i in (4,3,2,1)])
+        self.assertEqual(children[-1][1].wait.call_count, 2)
+        children[0][1].wait.return_value = 2
+        with patch.object(deploy.os, 'killpg'):
+            self.assertFalse(deploy.stop_services(children[:1]))
+
     def test_lock_fetches_exact_revision_and_preserves_existing_checkouts(self):
         from unittest.mock import patch
         from tools.deployment import deploy
@@ -368,6 +604,7 @@ class DeploymentEntryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Generated vendor changed'):
                 deploy.assemble(bindu,workspace)
             self.assertEqual(changed.read_text(),'local maintenance')
+
 
     def test_prepare_build_and_start_have_separate_side_effects(self):
         from unittest.mock import Mock, patch

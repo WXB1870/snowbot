@@ -118,9 +118,6 @@ for(auto x:s.r_posReceive_atRuninSt)assert(x==0.);
  assert(s.position_rejection_=="legacy_source_disabled_for_target_stream");
  // Unsupported old channels stay isolated even during shutdown; internal homing is separate.
  s.shutdown_mode_=true;s.message_callback(m);assert(enable_writes==0);
- // Non-target-stream mode's existing behavior is preserved.
- ServoNode legacy;legacy.position_reference_mode_=0;m->header.stamp={100.};
- legacy.message_callback(m);legacy.message_callback(m);assert(enable_writes>0 && legacy.ifRunin);
- std::cout<<"new callback: 2400 legacy packets blocked without enable/target/gain/interpolation writes; other mode preserved\n";
+ std::cout<<"new callback: 2400 retired native packets blocked without enable/target/gain/interpolation writes\n";
 #endif
 }

@@ -1,4 +1,4 @@
-"""Native Snowbot gripper commands; measured state comes from RetInformation."""
+"""Native Snowbot gripper commands; measured state comes from PositionObservation."""
 import json
 import time
 from pathlib import Path
@@ -27,7 +27,6 @@ class SnowbotGrippers:
             raise ValueError('REAL_GRIPPER_CONFIG_REQUIRED')
         prefix = node.get_parameter('vendor_namespace').value.rstrip('/')
         self.topics = {side: prefix+'/gripper/'+side+'_cmd' for side in SIDES}
-        self.session_protocol = hasattr(devices, 'envelopes')
         self.sent_positions = {}
         self.publishers = ({side: node.create_publisher(devices.array_type, topic, 1)
                             for side, topic in self.topics.items()}
@@ -56,18 +55,14 @@ class SnowbotGrippers:
 
     def health(self):
         sides = self.core.feedback_sides()
-        if self.session_protocol:
-            obs = self.devices.health.require_observation()
-            for side, slot in (('left', 7), ('right', 15)):
-                if side not in sides:
-                    continue
-                if not obs.valid_mask & MASKS[side]:
-                    raise RuntimeError(f'GRIPPER_DRIVER_FEEDBACK_INVALID:{side}:slot={slot}')
-                if obs.status[slot] & 8:
-                    raise RuntimeError(f'GRIPPER_DRIVER_FAULT:{side}:slot={slot}:status=0x{obs.status[slot]:04x}')
-        else:
-            self.devices.io.require_feedback()
-            self.devices.check_health(set(self.core.groups))
+        obs = self.devices.health.require_observation()
+        for side, slot in (('left', 7), ('right', 15)):
+            if side not in sides:
+                continue
+            if not obs.valid_mask & MASKS[side]:
+                raise RuntimeError(f'GRIPPER_DRIVER_FEEDBACK_INVALID:{side}:slot={slot}')
+            if obs.status[slot] & 8:
+                raise RuntimeError(f'GRIPPER_DRIVER_FAULT:{side}:slot={slot}:status=0x{obs.status[slot]:04x}')
         for side in sides:
             topic = self.topics[side]
             if side not in self.publishers or self.devices.graph.count_publishers(topic) != 1:
@@ -76,40 +71,23 @@ class SnowbotGrippers:
             if not any(info.node_namespace.rstrip('/')+'/'+info.node_name == self.devices.receivers['head']
                        and info.topic_type == 'std_msgs/msg/Float64MultiArray' for info in readers):
                 raise RuntimeError('GRIPPER_RECEIVER_UNAVAILABLE:'+side)
-        if 'gripper_control_enabled' in self.devices.health.messages['servo']:
-            # The historical custom-wire guard explicitly rejects native topics.
-            raise RuntimeError('GRIPPER_NATIVE_PROTOCOL_GUARD_MISMATCH')
         result = dict(self.devices.health.messages['servo'])
-        if self.session_protocol:
-            result['sample'] = obs.pdo_sample
+        result['sample'] = obs.pdo_sample
         return result
 
     def send(self, side, position, hold, sequence):
         self.health()
         cfg = self.core.cfg['grippers'][side]
-        if self.session_protocol:
-            # Native servo topics interpolate each target but have no speed cap.
-            # Bound target increments here; a delivery gap cannot create a large step.
-            now = time.monotonic()
-            previous, when = self.sent_positions.get(side, (self.core.q[JOINTS[side]], now))
-            if not hold:
-                step = cfg['max_speed']*min(max(now-when, 0.), self.node.profile.control_period)
-                position = previous+max(-step, min(step, position-previous))
-            values = native_command(position, cfg)
-        else:
-            values = self.devices.guarded_array(native_command(position, cfg), hold)
+        # Native servo topics interpolate each target but have no speed cap.
+        # Bound target increments here; a delivery gap cannot create a large step.
+        now = time.monotonic()
+        previous, when = self.sent_positions.get(side, (self.core.q[JOINTS[side]], now))
+        if not hold:
+            step = cfg['max_speed']*min(max(now-when, 0.), self.node.profile.control_period)
+            position = previous+max(-step, min(step, position-previous))
+        values = native_command(position, cfg)
         self.publishers[side].publish(self.devices.array_type(data=values))
-        if self.session_protocol:
-            self.sent_positions[side] = (position, now)
-
-    def observe(self, msg, q, v, when):
-        if self.core is None:
-            return
-        try:
-            current = {side: float(getattr(msg, prefix+'_iq')[7]) for side, prefix in (('left','l'),('right','r'))}
-            self.core.observe(q, v, current, when)
-        except (ValueError, IndexError) as exc:
-            self.core.invalid = str(exc)
+        self.sent_positions[side] = (position, now)
 
     def lease(self, req, reply):
         try:

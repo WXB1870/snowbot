@@ -3,9 +3,9 @@
 @@ -1,5 +1,7 @@
  # Certified Bindu curve description; order L1..7,R1..7,waist1..2, rad.
 -# Version 0 selects the unchanged Follower path; version 1 requires session_v2.
-+# Version 0: Follower; 1: session_v2 curve; 2: ordinary target; 3: rigid target.
-+# V2 target: segment_id=source sequence, effective_at_ns=0, all curve arrays empty.
-+# Original positions live in command/waist_position; limits are profile-clamped.
++# V0 Follower; V1 curve; V2/V3 ordinary/rigid target; V4/V5 prepared tool/entry.
++# V2/V3: zero effective time, empty curves. V4/V5: dated curve; empty curves renew TTL.
++# Prepared segment_id binds the first source sequence; heartbeats keep it and the start.
  uint8 version
  uint64 segment_id
  int64 effective_at_ns

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Same PICO operation sequence on kinematic IO and synthetic vendor wire IO.
+"""PICO operation sequence on simulation IO.
+
+The session_v3 vendor relay is covered by validate_position_session_ros.py.
 
 Requires an isolated localhost ROS domain. Never starts vendor drivers or SOEM.
 """
@@ -17,8 +19,7 @@ import time
 import uuid
 import math
 import rclpy
-from std_msgs.msg import String, Float64MultiArray, UInt64MultiArray
-from snowbot_ctl_msgs.msg import RetInformation, JointPositionCommand, CtlInformation, MidNodeCtlMsgSend
+from std_msgs.msg import String
 from bindu_interfaces.msg import VRInput, ExecutionState, MotionCommand, GripperState
 from bindu_interfaces.srv import Lease, SubmitMotion, PicoContext
 from bindu_runtime.common import stamp, seconds
@@ -115,49 +116,10 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
     fixture['initial_load_state']='unknown'
     fixture['initial_teleop_mode']='independent_arms' if ordinary else 'bimanual_tool'
     q=fixture['device_initial_positions_rad'].copy()
-    if mode=='real' and not ordinary and not prepare_return:
-        # Synthetic measured posture, deliberately independent of an A command.
-        # The actual real deployment continues to use only vendor feedback.
-        q.update(fixture['prepare_positions_rad'])
     session=0;sample=0
-    if mode=='real':
-        vendor_feedback=node.create_publisher(RetInformation,vendor+'/dualArmCtl_fdback',1)
-        vendor_health=node.create_publisher(String,vendor+'/bindu/servo_health',1)
-        control_source=node.create_publisher(String,vendor+'/bindu/control_source',1)
-        bridges=[node.create_publisher(cls,vendor+topic,1) for cls,topic in
-                 ((CtlInformation,'/ctl_data_pub'),(MidNodeCtlMsgSend,'/upperMonitor_msg_send'))]
-        for cls,topic in ((CtlInformation,'/ctl_data_pub'),(MidNodeCtlMsgSend,'/upperMonitor_msg_send')):
-            node.create_subscription(cls,vendor+topic,lambda _:None,1)
-        def heartbeat(msg):
-            nonlocal session
-            if len(msg.data)==3:session=msg.data[2]
-        node.create_subscription(UInt64MultiArray,vendor+'/bindu/heartbeat',heartbeat,1)
-        def arms(msg):
-            values=dict(zip(GROUPS['left_arm']+GROUPS['right_arm'],list(msg.l_arm_position)+list(msg.r_arm_position)))
-            q.update(values);packets.append('arms')
-        node.create_subscription(JointPositionCommand,vendor+'/joint_position_cmd',arms,10)
-        node.create_subscription(Float64MultiArray,vendor+'/body/motor_cmd',lambda m:q.update(zip(GROUPS['waist'],m.data)),10)
-        node.create_subscription(Float64MultiArray,vendor+'/head/motor_cmd',lambda _:None,1)
-        def grip_target(side,msg):
-            assert len(msg.data)==5 and list(msg.data[1:3])==[0.,0.]
-            q[GROUPS[side+'_tool_axis'][0]]=msg.data[0];packets.append('gripper')
-        for side in ('left','right'):
-            node.create_subscription(Float64MultiArray,vendor+'/gripper/'+side+'_cmd',
-                                     lambda msg,s=side:grip_target(s,msg),10)
     def publish():
         nonlocal sample
         now=node.get_clock().now().nanoseconds*1e-9
-        if mode=='real':
-            sample+=1;msg=RetInformation();msg.header.stamp=stamp(now)
-            for prefix,groups in (('l',('left_arm','left_tool_axis')),('r',('right_arm','right_tool_axis')),('torso',('waist',)),('head',('head',))):
-                names=[n for g in groups for n in GROUPS[g]]
-                setattr(msg,prefix+'_position',[q[n] for n in names]);setattr(msg,prefix+'_speed',[0.]*len(names))
-            vendor_feedback.publish(msg)
-            control_source.publish(String(data=json.dumps(dict(schema=1,stamp=now,source='topic'))))
-            vendor_health.publish(String(data=json.dumps(dict(schema=1,stamp=now,sample=sample,sample_age=.001,
-                operational=True,ready=True,guard_enabled=True,guard_armed=bool(session),guard_latched=False,
-                guard_session=session,wkc=40,expected_wkc=40,present_mask=0xfffff,fault_mask=0,
-                enable_requested_mask=0xfffff,operation_enabled_mask=0xfffff))))
         if source['stream'] and not websocket:
             source['seq']+=1
             for i,side in enumerate(('left','right')):
@@ -171,7 +133,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
                     head_pose=[1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.],
                     head_stamp=stamp(now),head_age_s=0.,head_source_id=token,head_seq=source['seq']))
     node.create_timer(.01,publish)
-    recipe=json.loads((package_share('snowbot_bringup')/f'config/deployments/snowbot_vr_{"sim" if mode=="simulation" else "real"}.json').read_text())
+    recipe=json.loads((package_share('snowbot_bringup')/'config/deployments/snowbot_vr_sim.json').read_text())
     recipe['arguments'].update(namespace=ns,vr_enabled=websocket,command_enabled=True)
     if not websocket:
         recipe['arguments'].pop('base_config', None)
@@ -179,18 +141,8 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         with socket.socket() as probe:
             probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
         recipe['arguments'].update(host='127.0.0.1',port=port)
-    if mode=='real':
-        # This is explicitly synthetic calibration, written only under test output.
-        gc=load_mode_config(CFG/'grippers.json','real');gc['calibrated']=True
-        gp=out/'fixture-grippers.json';gp.write_text(json.dumps(gc))
-        pc=load_mode_config(CFG/'teleop.json','real');pc['prepare_positions_rad']=fixture['prepare_positions_rad']
-        pc['initial_teleop_mode']=fixture['initial_teleop_mode']
-        pp=out/'fixture-pico.json';pp.write_text(json.dumps(pc))
-        recipe['arguments'].update(gripper_config=str(gp),pico_config=str(pp),vendor_namespace=vendor,
-            **{k:'/'+node.get_name() for k in ('arm_receiver_node','servo_receiver_node','mid_receiver_node')})
-    else:
-        pp=out/'fixture-pico-simulation.json';pp.write_text(json.dumps(fixture))
-        recipe['arguments']['pico_config']=str(pp)
+    pp=out/'fixture-pico-simulation.json';pp.write_text(json.dumps(fixture))
+    recipe['arguments']['pico_config']=str(pp)
     path=out/(mode+'.json');path.write_text(json.dumps(recipe))
     log=(out/(mode+'.log')).open('w')
     command=['ros2','launch','bindu_runtime','teleop_only.launch.py','config:='+str(path)]
@@ -242,10 +194,10 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         observer_log=(out/(mode+'-observer.log')).open('w')
         from bindu_runtime.teleop_deployment import load_deployment
         observer_robot=load_deployment(path,package_share('bindu_runtime'))[1]['robot_config']
-        observer=subprocess.Popen([sys.executable, '-m', 'snowbot_bringup.teleop.snowbot_live','--observe',
+        observer=subprocess.Popen([sys.executable, '-m', 'snowbot_bringup.visualization.snowbot_live','--observe',
             '--namespace',ns,'--run-id',json.loads((out/'unified-session/session.json').read_text())['run_id'] if physics else views[-1]['run_id'],
             '--robot-config',observer_robot,
-            '--runtime-mode',mode,'--device-backend','external_simulation' if physics else 'kinematic' if mode=='simulation' else 'snowbot_vendor',
+            '--runtime-mode',mode,'--device-backend','external_simulation' if physics else 'kinematic',
             '--state-file',str(out/(mode+'-observer.json')),
             '--trace-file',str(trace_dir/'diagnostics.jsonl')],
             stdout=observer_log,stderr=subprocess.STDOUT,start_new_session=True)
@@ -268,7 +220,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert not accepted and not packets,'startup actuation'
         initial=dict(zip(states[-1].joints.name,states[-1].joints.position))
         assert all(n in initial and abs(initial[n]-v)<(.003 if physics else 1e-9)
-                   for n,v in (q if mode=='real' else fixture['device_initial_positions_rad']).items()),'startup feedback differs from configured fixture'
+                   for n,v in fixture['device_initial_positions_rad'].items()),'startup feedback differs from configured fixture'
         assert states[-1].simulated==(mode=='simulation') and states[-1].runtime_mode==mode
         if composition:
             assert views[-1]['capabilities']['continuous_axial_grasp'] is True
@@ -517,7 +469,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
             assert not states[-1].stop_failures
             sys.path.insert(0,str(ROOT))
-            from snowbot_bringup.teleop.snowbot_errors import pinocchio_fk
+            from snowbot_bringup.visualization.snowbot_errors import pinocchio_fk
             from bindu_kinematics.tool_geometry import coupling_metrics
             tool_cfg=json.loads((CFG/'bimanual_snowbot_real.json').read_text())
             robot_meta=json.loads((out/'unified-session/session.json').read_text())
@@ -588,16 +540,15 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             source.update(grips=[0.,0.],buttons=[0,0]);pump(.3);click(1,1);phase('standby')
             count=len(accepted);pump(.3);assert len(accepted)==count
             checks.append('Y stops both arms; B explicitly recovers standby without switching or resuming')
-            if mode=='simulation':
-                source['buttons'][1]=1
-                wait(lambda:views[-1]['reason']=='PREPARED' and views[-1]['pending'] is None,40.)
-                source['buttons'][1]=0;pump(.2)
-                assert views[-1]['teleop_mode']=='independent_arms'
-                count=len(accepted);click(1,1);phase('standby')
-                assert views[-1]['teleop_mode']=='bimanual_tool' and len(accepted)==count
-                click(1,1);phase('standby')
-                assert views[-1]['teleop_mode']=='independent_arms' and len(accepted)==count
-                checks.append('A explicitly prepares; B changes mode in either direction while retaining pose and standby')
+            source['buttons'][1]=1
+            wait(lambda:views[-1]['reason']=='PREPARED' and views[-1]['pending'] is None,40.)
+            source['buttons'][1]=0;pump(.2)
+            assert views[-1]['teleop_mode']=='independent_arms'
+            count=len(accepted);click(1,1);phase('standby')
+            assert views[-1]['teleop_mode']=='bimanual_tool' and len(accepted)==count
+            click(1,1);phase('standby')
+            assert views[-1]['teleop_mode']=='independent_arms' and len(accepted)==count
+            checks.append('A explicitly prepares; B changes mode in either direction while retaining pose and standby')
             source['grips']=[1.,0.];phase('following');source['stream']=False;phase('locked')
             wait(lambda:not states[-1].lease_active and states[-1].state not in ('RUNNING','STOPPING'))
             assert not states[-1].stop_failures
@@ -622,16 +573,11 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
             return dict(mode=mode,teleop_mode='independent_arms',checks=checks,accepted=len(accepted),vendor_packets=len(packets))
         assert views[-1]['load_state']=='unknown'
         source['grip']=1.
-        if mode=='simulation':
-            wait(lambda:views[-1]['phase']=='standby' and views[-1]['pending'] is None and
-                 'BIMANUAL_GRASP_POSE' in views[-1]['reason'])
-            pump(.3);assert not accepted and not packets
-            checks.append('direct engagement from invalid zero posture is refused with geometric reason and no actuation')
-        else:
-            phase('following')
-            assert views[-1]['load_state']=='unknown'
-            checks.append('unknown load at a valid measured posture engages directly without A, B or an empty declaration')
-        source['grip']=0.;phase('standby' if mode=='simulation' else 'tool_standby')
+        wait(lambda:views[-1]['phase']=='standby' and views[-1]['pending'] is None and
+             'BIMANUAL_GRASP_POSE' in views[-1]['reason'])
+        pump(.3);assert not accepted and not packets
+        checks.append('direct engagement from invalid zero posture is refused with geometric reason and no actuation')
+        source['grip']=0.;phase('standby')
         before=len(accepted)
         source['buttons'][1]=1
         wait(lambda:views[-1]['pending'] is None and views[-1]['reason']=='PREPARED',40.)
@@ -639,10 +585,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert views[-1]['phase']=='standby'
         assert accepted and all(m.mode=='joint_target' and not m.points for m in accepted)
         assert all(m.runtime_mode==mode for m in accepted)
-        if mode=='simulation':assert len(accepted)>before
-        if mode!='simulation':
-            assert views[-1]['load_state']=='unknown'
-            assert len(accepted)==before
+        assert len(accepted)>before
         checks.append('optional A validates the path and measured arrival, returning standby without entering loading')
         before=len(accepted)
         for side,index in (('left',0),('right',1)):
@@ -758,8 +701,7 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
         assert any(v['load_state']=='unknown' and v['operation'] in ('prepare_path','prepare_recovery_path') and
                    not v['load_state_checked'] and not v['tool_present'] and not v['coupling_checked'] for v in validations)
         assert any(e['state']=='PICO_ENGAGE_CHECK' for e in events)
-        if mode=='simulation':
-            assert any(json.loads(e['code']).get('read_only_rejection') for e in events if e['state']=='PICO_OPERATION_RESULT')
+        assert any(json.loads(e['code']).get('read_only_rejection') for e in events if e['state']=='PICO_OPERATION_RESULT')
         checks.append('raw/projected input, commands, feedback and preparation checks persisted without logger queue loss')
         if websocket:
             assert not peer_errors,peer_errors
@@ -778,8 +720,8 @@ def scenario(out, mode, websocket=False, ordinary=False, physics=False, replay=N
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);p.add_argument('--mode',choices=('simulation','real','both'),default='both')
-    p.add_argument('--composition', action='store_true', help='Current single-application lifecycle from the configured prepared pose')
+    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);p.add_argument('--mode',choices=('simulation',),default='simulation',help='Simulation workflow; use validate_position_session_ros.py for session_v3 relays')
+    p.add_argument("--composition", action="store_true", help="Current single-application lifecycle from the configured prepared pose")
     p.add_argument('--physics',action='store_true',help='Use the actual Isaac backend and unified launcher; requires simulation and WebSocket input')
     p.add_argument('--teleop-mode',choices=('ordinary','tool','both'),default='both')
     p.add_argument('--websocket-input',action='store_true')
@@ -821,7 +763,7 @@ def main():
     try:
         result=[]
         for run in range(args.runs):
-            for m in (('simulation','real') if args.mode=='both' else (args.mode,)):
+            for m in (args.mode,):
                 for ordinary in ((True,False) if args.teleop_mode=='both' else (args.teleop_mode=='ordinary',)):
                     out=args.output/(('ordinary-' if ordinary else 'tool-')+m+('' if args.runs==1 else f'-{run:02}'));out.mkdir()
                     case=scenario(out,m,args.websocket_input,ordinary,physics=args.physics,replay=replay,

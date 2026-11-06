@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from snowbot_bringup.teleop.snowbot_diagnostics import DiagnosticWriter
-from snowbot_bringup.teleop.snowbot_pdo import (MASK, FaultWindow, PdoMonitor, PdoObserver,
+from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
+from snowbot_bringup.visualization.snowbot_pdo import (MASK, FaultWindow, PdoMonitor, PdoObserver,
                                        axis_status, observation_payload, statusword)
 
 

@@ -21,6 +21,8 @@ def assemble(context):
         raw=value(name,default)
         if raw not in ('true','false'):raise ValueError('TELEOP_BOOLEAN:'+name)
         return raw=='true'
+    if value('position_protocol'):
+        raise ValueError('SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol')
     single_enabled=enabled('single_arm_enabled')
     recorder_enabled=enabled('recorder_enabled')
     if not recorder_enabled and value('recording_mode')!='off':
@@ -90,9 +92,9 @@ def assemble(context):
     if mode=='real' or position_contract:
         execution.update(command_enabled=enabled('command_enabled','false'),
             **{key:value(key,default) for key,default in (
-                ('execution_mode','position'),('gripper_config',''),('parameters_config',''),('vendor_namespace','/snowbot'),('position_protocol','legacy_guard'),('arm_receiver_node',''),
+                ('execution_mode','position'),('gripper_config',''),('parameters_config',''),('vendor_namespace','/snowbot'),('arm_receiver_node',''),
                 ('servo_receiver_node',''),('mid_receiver_node',''))})
-    if mode=='real' and value('position_protocol')=='session_v3':
+    if mode=='real':
         limits={key:value(key,str(default)) for key,default in TARGET_STREAM_LIMIT_DEFAULTS.items()}
         limits['target_stream_brake_lead_s']=braking_lead(runtime_parameters,value('target_stream_brake_lead_s'))
         execution.update(target_stream_limits(limits))
@@ -135,7 +137,6 @@ def assemble(context):
                               'position_contract':position_contract,
                               **({'parameters_config':value('parameters_config')} if position_contract else {}),
                               'execution_mode':execution_mode,
-                              'position_protocol':value('position_protocol','legacy_guard'),
                               'gripper_config':value('gripper_config') if position_contract else '',
                               'tool_ground_policy':'report_only' if pico_demo else 'configured'}]))
     nodes.append(Node(package='bindu_runtime', executable='teleop_display', namespace=ns,
@@ -155,7 +156,6 @@ def assemble(context):
                          'gripper_config':value('gripper_config'),
                          'base_config':base_config, 'position_contract':position_contract, **tool, 'require_recording':recorder_enabled,
                          'tool_ground_policy':'report_only' if pico_demo else 'configured', 'command_enabled':enabled('command_enabled','false'),
-                         'position_protocol':value('position_protocol','legacy_guard'),
                          'simulation_demo':pico_demo}]))
     nodes.append(Node(package='bindu_runtime', executable='vr_input', namespace=ns,
                       condition=IfCondition(LaunchConfiguration('vr_enabled')), output='screen',

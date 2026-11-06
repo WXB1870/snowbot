@@ -52,9 +52,15 @@ def default_path():
     return package_share('snowbot_bringup')/'config/robots/snowbot/runtime_parameters.json'
 
 
+def _parameter_object(values):
+    """Discard JSON comment metadata before validating runtime settings."""
+    values.pop('_comment', None)
+    return values
+
+
 @lru_cache(maxsize=1)
 def _defaults():
-    result = json.loads(default_path().read_text())
+    result = json.loads(default_path().read_text(), object_hook=_parameter_object)
     if (set(result) != {'schema_version', 'remote_vr', *_FIELDS} or
             type(result.get('schema_version')) is not int or result['schema_version'] != 1 or
             any(not isinstance(result[g],dict) or set(result[g]) != set(keys) for g,keys in _FIELDS.items())):
@@ -65,7 +71,7 @@ def _defaults():
 def load_parameters(path=None):
     result = copy.deepcopy(_defaults())
     remote_defaults = result.pop('remote_vr')
-    raw = json.loads(Path(path).read_text()) if path else {}
+    raw = json.loads(Path(path).read_text(), object_hook=_parameter_object) if path else {}
     if (not isinstance(raw, dict) or type(raw.get('schema_version', 1)) is not int
             or raw.get('schema_version', 1) != 1):
         raise ValueError('SNOWBOT_PARAMETERS_SCHEMA')
