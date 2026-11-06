@@ -12,6 +12,7 @@ CONTROL_MASK = sum(SLOT_MASKS[g] for g in CONTROL_GROUPS)
 # ROS delivery can lag the local PDO sampler. Keep these budgets independent.
 ROS_FEEDBACK_TIMEOUT_S = .04
 PDO_MAX_AGE_S = .02
+SENSOR_MAX_AGE_S = .1
 TARGET_STREAM_MAX_TTL_S = .4
 SLOTS = [*(f'arm_l_joint_{i}' for i in range(1, 9)),
          *(f'arm_r_joint_{i}' for i in range(1, 9)),
@@ -231,8 +232,10 @@ class SessionHealth:
             # ROS delivery age is already checked by require_observation().
             if (getattr(obs, 'sensor_valid_mask', 0) != 3 or
                     obs.valid_mask != 0xfffff or not all(math.isfinite(x) for x in wrench) or
-                    not all(math.isfinite(a) and 0 <= a <= PDO_MAX_AGE_S for a in age)):
-                raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
+                    not all(math.isfinite(a) and 0 <= a <= SENSOR_MAX_AGE_S for a in age)):
+                # The RT watchdog owns consecutive-PDO confirmation during a session.
+                if acquiring or not obs.session_selected or obs.session_reason >= 3:
+                    raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
         if obs.session_reason >= 2 and not acquiring:
             raise RuntimeError('SNOWBOT_SESSION_STOPPED:'+str(obs.session_reason))
 
