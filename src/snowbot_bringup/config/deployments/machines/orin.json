@@ -1,6 +1,7 @@
 {
   "ros_domain_id": 88,
   "ethercat_interface": "enP5p5s0",
+  "position_control_fifo": true,
   "arguments": {
     "execution_mode": "impedance",
     "host": "127.0.0.1",

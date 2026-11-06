@@ -225,6 +225,14 @@ def write_loop_runtime_check(source, work, root):
     end=text.index('\n}',begin)+2
     fixture=(root/'test_position_loop_runtime.cpp').read_text()
     path=work/'test_position_loop_runtime.cpp'
+    if 'bool ServoNode::position_start_control()' in text:
+        header=(source/'servo_control/include/ros_controller/rosLoop.h').read_text()
+        fields=header[header.index('        bool position_control_fifo_'):header.index('        bool position_initialized_=false;')]
+        control_begin=text.index('bool ServoNode::position_start_control()')
+        methods=text[control_begin:text.index('// No enable, homing or zero targets during servo initialization.',control_begin)]
+        fixture='#define POSITION_FIFO_CONTROL 1\n'+fixture
+        fixture=fixture.replace('// @ACTUAL_CONTROL_FIELDS@',fields)
+        fixture=fixture.replace('// @ACTUAL_CONTROL_LOOP@',methods.replace('pthread_setschedparam(', 'fixture_setschedparam('))
     fixture=fixture.replace('// @ACTUAL_CALLBACK_PUMP@',text[begin:end])
     if 'position_feedback_timing_' in text:
         fixture='#define POSITION_FEEDBACK_SUBPHASES 1\n'+fixture

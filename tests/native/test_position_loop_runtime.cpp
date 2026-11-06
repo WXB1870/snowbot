@@ -10,6 +10,22 @@
 #include <cstring>
 #include <cstdio>
 #include <atomic>
+#ifdef POSITION_FIFO_CONTROL
+#include "servo_control/position_observation.h"
+#include <future>
+#include <cerrno>
+static std::atomic<bool> sigInterrupt{false};
+static int setup_result=0;
+static int fixture_setschedparam(pthread_t thread,int policy,const sched_param* param){
+ assert(policy==SCHED_FIFO&&param->sched_priority==20);
+ if(setup_result)return setup_result;
+ return std::getenv("SNOWBOT_NATIVE_FIFO")?pthread_setschedparam(thread,policy,param):0;
+}
+template<class... T>void runtime_log(T&&...){}
+#define RCLCPP_INFO(...) runtime_log(__VA_ARGS__)
+#define RCLCPP_ERROR(...) runtime_log(__VA_ARGS__)
+namespace rclcpp {static bool ok(){return true;}}
+#endif
 static bool count_memory=false;
 static unsigned allocations=0,deletions=0;
 void* operator new(std::size_t n){if(count_memory)++allocations;if(auto p=std::malloc(n))return p;throw std::bad_alloc();}
@@ -59,6 +75,22 @@ static void getGripperFb(int side,float& q,float& v,float& current,uint16_t& sta
 }
 #endif
 struct ServoNode {
+#ifdef POSITION_FIFO_CONTROL
+ // @ACTUAL_CONTROL_FIELDS@
+ int shutdown_exit_code_=0;
+ std::atomic<unsigned> cycles{0};std::atomic<bool> fail_step{false};
+ int get_logger(){return 0;}
+ void position_poll(){}
+ void position_step(){
+  if(fail_step.load())throw std::runtime_error("injected controller failure");
+  if(std::getenv("SNOWBOT_NATIVE_FIFO")){
+   int policy=0;sched_param param{};
+   assert(!pthread_getschedparam(pthread_self(),&policy,&param));
+   assert(policy==SCHED_FIFO&&param.sched_priority==20);
+  }
+  ++cycles;
+ }
+#endif
  rclcpp::executors::SingleThreadedExecutor ros_executor_;
  bool ros_executor_added_=false;
  void* get_node_base_interface(){return this;}
@@ -82,7 +114,48 @@ struct ServoNode {
 // @ACTUAL_FEEDBACK_PUBLISH@
 // @ACTUAL_FEEDBACK_SEND@
 // @ACTUAL_TRANSPORT_SETUP@
+#ifdef POSITION_FIFO_CONTROL
+// @ACTUAL_CONTROL_LOOP@
+static void check_control_cycle(){
+ const auto saved_clock=feedback_now.load();getter_delay=false;
+ int parent_policy=0;sched_param parent_param{};
+ assert(!pthread_getschedparam(pthread_self(),&parent_policy,&parent_param));
+ if(std::getenv("SNOWBOT_NATIVE_FIFO"))assert(parent_policy==SCHED_OTHER&&parent_param.sched_priority==0);
+ ServoNode node;node.position_control_fifo_=true;
+ setup_result=EPERM;assert(!node.position_start_control());
+ assert(!node.position_control_thread_.joinable());setup_result=0;
+ assert(node.position_start_control());
+ // A stalled ordinary DDS publisher must not hold the control-state mutex.
+ node.msg_publish();node.publisher.block=true;
+ std::thread publisher([&]{node.feedback_send();});
+ const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+ while(!node.publisher.entered.load()){assert(std::chrono::steady_clock::now()<deadline);std::this_thread::yield();}
+ const auto before=node.cycles.load();
+ while(node.cycles.load()<before+5){assert(std::chrono::steady_clock::now()<deadline);std::this_thread::yield();}
+ node.publisher.release=true;publisher.join();node.position_stop_control();
+ const auto stopped=node.cycles.load();std::this_thread::sleep_for(std::chrono::milliseconds(3));
+ assert(node.cycles.load()==stopped&&!node.position_control_thread_.joinable());
+ int after_policy=0;sched_param after_param{};
+ assert(!pthread_getschedparam(pthread_self(),&after_policy,&after_param));
+ assert(after_policy==parent_policy&&after_param.sched_priority==parent_param.sched_priority);
+ // Worker exceptions request the existing shutdown path and remain failures.
+ sigInterrupt=false;node.fail_step=true;assert(node.position_start_control());
+ while(!sigInterrupt.load()){assert(std::chrono::steady_clock::now()<deadline);std::this_thread::yield();}
+ node.position_stop_control();assert(node.shutdown_exit_code_==1);sigInterrupt=false;
+ // PDO keeps one producer; two serialized readers must see coherent snapshots.
+ position_session::ObservationCache cache;std::atomic<bool> done{false};
+ const auto read=[&]{do{const auto s=cache.read();assert(s.position[0]==float(s.sample));}while(!done.load());};
+ std::thread first(read),second(read);
+ for(unsigned i=1;i<=5000;++i){position_session::Observation s;s.sample=i;s.position[0]=float(i);cache.publish(s);}
+ done=true;first.join();second.join();
+ getter_delay=true;feedback_now=saved_clock;
+ std::cout<<"PASS isolated production cycle: FIFO20 setup/failure, blocked DDS independence, join before shutdown, exception propagation and coherent concurrent PDO readers\n";
+}
+#endif
 int main(){
+#ifdef POSITION_FIFO_CONTROL
+ check_control_cycle();
+#endif
 #ifdef POSITION_ASYNC_TRANSPORT
  unsetenv("RMW_FASTRTPS_PUBLICATION_MODE");assert(configure_transport()==0);
  assert(std::strcmp(std::getenv("RMW_FASTRTPS_PUBLICATION_MODE"),"ASYNCHRONOUS")==0);
@@ -101,12 +174,13 @@ int main(){
  assert(s.longest[Timing::SpinHead].end-s.longest[Timing::SpinHead].begin==25000000);
  timing.bind(42);assert(timing.snapshot(1028000000).session==42);
  timing.bind(43);s=timing.snapshot(1029000000);for(auto span:s.longest)assert(!span.begin);
- ServoNode node;assert(node.ros_executor_.instances==1&&!node.ros_executor_.adds);
+ const auto executors_before=rclcpp::executors::SingleThreadedExecutor::instances;
+ ServoNode node;assert(node.ros_executor_.instances==executors_before+1&&!node.ros_executor_.adds);
  // Both original pump sites use this actual method, in sequence on one thread.
  node.ctlmsg_get();count_memory=true;
  for(unsigned i=0;i<2000;++i){timing.mark(Timing::SpinTail,1030000000+i*1000000LL);(void)timing.snapshot(1030000001+i*1000000LL);node.ctlmsg_get();}
  count_memory=false;assert(!allocations&&!deletions);
- assert(node.ros_executor_.instances==1&&node.ros_executor_.adds==1&&node.ros_executor_.spins==2001&&node.ros_executor_.node==&node);
+ assert(node.ros_executor_.instances==executors_before+1&&node.ros_executor_.adds==1&&node.ros_executor_.spins==2001&&node.ros_executor_.node==&node);
 #ifdef POSITION_FEEDBACK_SUBPHASES
  // Actual feedback method with inert getter/publisher doubles. Long spans
  // retain the call boundary and cannot change the returned feedback values.

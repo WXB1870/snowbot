@@ -157,6 +157,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             if with_impedance:
                 subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'shutdown_impedance.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
                 patches=(*patches,'shutdown_impedance')
+                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'control_cycle.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                patches=(*patches,'control_cycle')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()

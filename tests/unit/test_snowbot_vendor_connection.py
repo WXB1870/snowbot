@@ -300,7 +300,7 @@ class DeploymentEntryTests(unittest.TestCase):
             self.assertEqual(args['key_file'],str(Path.home()/'.local/share/snowbot-vr/tls/server.key'))
             parameters=(workspace/'vendor-position.yaml').read_text()
             common=(deploy.ASSETS/'target_stream.yaml').read_text().rstrip()+'\n'
-            self.assertEqual(parameters,common+'    ethercat_interface: "enP5p5s0"\n')
+            self.assertEqual(parameters,common+'    ethercat_interface: "enP5p5s0"\n    position_control_fifo: true\n')
 
     def test_unselected_machine_preserves_site_and_runtime_domain_overrides(self):
         import contextlib,io

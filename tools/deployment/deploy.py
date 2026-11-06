@@ -64,6 +64,8 @@ def configure_machine(workspace, name, config):
     (workspace/'upper/site.json').write_text(json.dumps(site, indent=2)+'\n')
     parameters = (ASSETS/'target_stream.yaml').read_text().rstrip()+'\n'
     parameters += '    ethercat_interface: '+json.dumps(config['ethercat_interface'])+'\n'
+    if config.get('position_control_fifo'):
+        parameters += '    position_control_fifo: true\n'
     (workspace/'vendor-position.yaml').write_text(parameters)
 
 
