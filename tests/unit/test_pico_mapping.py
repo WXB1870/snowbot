@@ -16,6 +16,52 @@ from tests.support.pico import Rig
 
 
 class HeadsetMappingTests(unittest.TestCase):
+    def recorded_head_packets(self, *, head_stamp=100.):
+        import ast
+        import math
+        from threading import Event
+        from types import SimpleNamespace as S
+        from unittest.mock import patch
+        from msgpack import unpackb
+        path=Path(__file__).resolve().parents[1]/'integration/validate_position_teleop.py'
+        method=next(n for n in ast.parse(path.read_text()).body if getattr(n,'name','')=='websocket_input')
+        clock=[10.];stop=Event();errors=[];packets=[]
+        def pair(nanosec):
+            return [dict(pose=np.eye(4).ravel().tolist(),valid=True,buttons=0,grip=.8,trigger=0.,
+                stamp=dict(sec=100,nanosec=nanosec),head_pose=np.eye(4).ravel().tolist(),
+                head_stamp=dict(sec=int(head_stamp),nanosec=round((head_stamp-int(head_stamp))*1e9)),
+                head_source_id='recorded-headset',head_seq=7,head_age_s=.01) for _ in range(2)]
+        source=dict(stream=True,raw_replay=True,raw_index=0,raw_pair=pair(0),raw_held=True,seq=0)
+        class Peer:
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def send(self,packet):packets.append(unpackb(packet,raw=False))
+            def recv(self,timeout):
+                if len(packets)==1:
+                    source.update(raw_index=1,raw_pair=pair(100_000_000));clock[0]=10.1
+                else:stop.set()
+                raise TimeoutError
+        scope=dict(math=math,time=S(monotonic=lambda:clock[0],time=lambda:100.+clock[0]))
+        exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),scope)
+        with patch('websockets.sync.client.connect',return_value=Peer()):
+            scope['websocket_input'](0,source,stop,errors)
+        self.assertEqual(errors,[])
+        self.assertEqual(len(packets),2)
+        return packets
+
+    def test_recorded_repeated_head_sample_keeps_original_identity_and_expiry(self):
+        from bindu_teleoperation.vr.receiver import HeadsetSamples
+        packets=self.recorded_head_packets();headset=HeadsetSamples()
+        first=headset.ingest(packets[0]['bindu_head'],10.,packets[0]['value'])
+        second=headset.ingest(packets[1]['bindu_head'],10.1,packets[1]['value'])
+        self.assertEqual((first['head_seq'],second['head_seq']),(7,7))
+        self.assertEqual(second['head_stamp'],first['head_stamp'])
+
+    def test_recorded_stale_head_sample_is_not_refreshed_at_replay_start(self):
+        from bindu_teleoperation.vr.receiver import HeadsetSamples
+        packet=self.recorded_head_packets(head_stamp=99.)[0]
+        self.assertEqual(HeadsetSamples().ingest(packet['bindu_head'],10.,packet['value']),{})
+
     def frame(self, yaw=0.,pitch=0.,roll=0., **changes):
         from scipy.spatial.transform import Rotation
         from bindu_teleoperation.vr.mapping import OPENXR_TO_ROBOT

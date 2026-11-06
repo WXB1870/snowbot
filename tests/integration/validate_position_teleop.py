@@ -76,8 +76,12 @@ def websocket_input(port, source, stop, errors):
                         import numpy as np
                         d=source['raw_pair'][0]
                         if d.get('head_pose'):
-                            head_seq=source['seq']
-                            age=float(d.get('head_age_s',0.))*1000.
+                            head_seq=d['head_seq']
+                            # Repeated recorded samples must not gain a new identity or lifetime.
+                            recorded_at,head_at=d['stamp'],d['head_stamp']
+                            elapsed=(recorded_at['sec']-head_at['sec']+
+                                     (recorded_at['nanosec']-head_at['nanosec'])*1e-9)
+                            age=max(float(d.get('head_age_s',0.)),elapsed)*1000.
                             head=dict(version=1,samples=[dict(seq=head_seq,age_ms=age,
                                 frame_time_ms=timing['perf_ms']-age,frame_id='recorded',
                                 tracking_id=d['head_source_id'],mode='immersive-vr',
