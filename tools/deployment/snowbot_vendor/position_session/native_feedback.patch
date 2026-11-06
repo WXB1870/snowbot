@@ -1,0 +1,53 @@
+--- a/dual_arm_control/include/dual_arm_control/msgPublish.h
++++ b/dual_arm_control/include/dual_arm_control/msgPublish.h
+@@ -343,6 +343,7 @@
+         int64_t position_last_report_ns_=0;
+         std::string position_feedback_gid_;
+         bool position_endpoint();
++        bool position_native_feedback(const snowbot_ctl_msgs::msg::PositionObservation&,int64_t,int64_t);
+         bool position_ready();
+         int64_t position_next_tick_=0;
+         void position_wait();
+--- a/dual_arm_control/src/dual_arm_control/msgPublish.cpp
++++ b/dual_arm_control/src/dual_arm_control/msgPublish.cpp
+@@ -153,7 +153,8 @@
+             bool finite=true;for(unsigned i=0;i<14;++i)finite=finite&&std::isfinite(msg->reference_position[i])&&std::isfinite(msg->reference_speed[i]);
+             if(finite){position_nominal_stamp_=msg->sample_time_ns;position_nominal_session_=msg->session;
+                 for(unsigned i=0;i<14;++i){position_nominal_q_[i]=msg->reference_position[i];position_nominal_v_[i]=msg->reference_speed[i];}}}
+-        if(position_gate_.selected()&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_gate_.interrupt();position_pending_=false;}});
++        const bool feedback_ready=position_native_feedback(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++        if(position_gate_.selected()&&!feedback_ready){position_gate_.interrupt();position_pending_=false;}});
+     position_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1);
+     position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+@@ -177,11 +178,6 @@
+     mCtlData_pub = this->create_publisher<snowbot_ctl_msgs::msg::CtlInformation>(
+         "ctl_data_pub",
+         10
+-    );
+-    mRetData = this->create_subscription<snowbot_ctl_msgs::msg::RetInformation>(
+-        "dualArmCtl_fdback",			// 订阅的话题（必须与发布者一致)
+-        1,								// QoS历史深度
+-        std::bind(&ArmCtlNode::message_callback, this, std::placeholders::_1)
+     );
+ 
+     upperMonitorMsg_get = this->create_subscription<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(
+@@ -1535,6 +1531,18 @@
+  position_gate_.commit(m,now,steady);position_meta_=packet->meta;position_trajectory_=packet->trajectory;position_target_packet_=packet;position_rejection_.clear();
+ }
+ 
++// The validated PDO observation also owns the measured inputs used by IK/PD.
++// Keep arm motor-slot order and original units; no targets or timestamps are made.
++bool ArmCtlNode::position_native_feedback(const snowbot_ctl_msgs::msg::PositionObservation& msg,int64_t ros,int64_t steady){
++ const bool ready=position_feedback_.fresh(ros,steady);
++ if(position_initialized_ && ready){
++  for(unsigned i=0;i<LARMDOF;++i){lArm_pos_fdback[i]=msg.position[i];lArm_spd_fdback[i]=msg.speed[i];lArm_iq_fdback[i]=msg.current[i];}
++  for(unsigned i=0;i<RARMDOF;++i){rArm_pos_fdback[i]=msg.position[i+8];rArm_spd_fdback[i]=msg.speed[i+8];rArm_iq_fdback[i]=msg.current[i+8];}
++  native_feedback_seen_=true;has_received_command_=true;
++ }
++ return ready;
++}
++
+ bool ArmCtlNode::position_ready(){
+  if(!position_initialized_){position_wait_reason_=position_init_error_;return false;}
+  if(!position_endpoint())return false;

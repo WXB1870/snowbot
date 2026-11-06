@@ -9,7 +9,19 @@ struct Observation {
  int wkc=67,expected_wkc=67;uint32_t valid_mask=0xfffff;
  std::array<uint16_t,20> status{};
  std::array<double,20> position{},speed{};
+ std::array<double,20> current{};
 };
+#ifdef POSITION_NATIVE_OBSERVATION
+namespace snowbot_ctl_msgs {namespace msg {using PositionObservation=::Observation;}}
+constexpr unsigned LARMDOF=7,RARMDOF=7;
+struct ArmCtlNode {
+ position_session::Tracker position_feedback_;
+ bool position_initialized_=false,native_feedback_seen_=false,has_received_command_=false;
+ std::array<double,7> lArm_pos_fdback{},rArm_pos_fdback{},lArm_spd_fdback{},rArm_spd_fdback{},lArm_iq_fdback{},rArm_iq_fdback{};
+ bool position_native_feedback(const snowbot_ctl_msgs::msg::PositionObservation&,int64_t,int64_t);
+};
+// @ACTUAL_NATIVE_FEEDBACK@
+#endif
 static void receive(position_session::Tracker& tracker,Observation& msg,uint64_t seq,int64_t offset) {
  msg.pdo_sample=seq;msg.header.stamp.nanosec=uint32_t(offset);
  tracker.observe(msg,10000000000LL+offset,1000000000LL+offset);
@@ -19,6 +31,25 @@ static bool fresh(const position_session::Tracker& tracker,int64_t offset) {
 }
 int main() {
  unsigned failures=0;
+#ifdef POSITION_NATIVE_OBSERVATION
+ {
+  ArmCtlNode node;Observation msg;
+  for(unsigned i=0;i<20;++i){msg.position[i]=double(i+1);msg.speed[i]=-.01*(i+1);msg.current[i]=.25*(i+1);}
+  receive(node.position_feedback_,msg,1,0);receive(node.position_feedback_,msg,2,1000000);
+  node.position_native_feedback(msg,10001000000LL,1001000000LL);
+  if(node.native_feedback_seen_||node.has_received_command_)++failures;
+  node.position_initialized_=true;
+  if(!node.position_native_feedback(msg,10001000000LL,1001000000LL)||!node.native_feedback_seen_||!node.has_received_command_)++failures;
+  if(node.lArm_pos_fdback.front()!=1.||node.lArm_pos_fdback.back()!=7.||node.rArm_pos_fdback.front()!=9.||node.rArm_pos_fdback.back()!=15.)++failures;
+  if(node.rArm_spd_fdback.front()!=-.09||node.rArm_iq_fdback.front()!=2.25)++failures;
+  const auto previous=node.lArm_pos_fdback;
+  msg.pdo_age=.021;msg.position[0]=100.;receive(node.position_feedback_,msg,3,2000000);
+  if(node.position_native_feedback(msg,10002000000LL,1002000000LL)||node.lArm_pos_fdback!=previous)++failures;
+  msg.pdo_age=.001;msg.wkc=66;receive(node.position_feedback_,msg,4,3000000);
+  if(node.position_native_feedback(msg,10003000000LL,1003000000LL)||node.lArm_pos_fdback!=previous)++failures;
+  std::cout<<"PASS actual middle PDO feedback: initialization guard, measured left/right motor-slot mapping, original velocity/current units, stale/WKC rejection without fabricated fallback\n";
+ }
+#endif
  {position_session::Tracker tracker;Observation msg;
   receive(tracker,msg,1,0);receive(tracker,msg,2,1000000);
   if(!fresh(tracker,1000000)){std::cerr<<"valid baseline unavailable\n";return 2;}

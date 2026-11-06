@@ -371,6 +371,12 @@ def main():
                 copied=write_target_poll_check(args.source,work,root)
             else:
                 copied=work/(name+'.cpp');copied.write_bytes((root/(name+'.cpp')).read_bytes())
+                if name=='test_snowbot_reconnect_tracker':
+                    middle=(args.source/'dual_arm_control/src/dual_arm_control/msgPublish.cpp').read_text()
+                    begin=middle.find('bool ArmCtlNode::position_native_feedback(')
+                    if begin>=0:
+                        method=middle[begin:middle.index('bool ArmCtlNode::position_ready()',begin)]
+                        copied.write_text('#define POSITION_NATIVE_OBSERVATION 1\n'+copied.read_text().replace('// @ACTUAL_NATIVE_FEEDBACK@',method))
             command=[compiler,'-std=c++17','-Wall','-Wextra','-Werror','-pthread',
                 '-I'+str(args.source/'robot_control/include'),'-I'+str(args.source/'servo_control/include'),'-I'+str(native_include),'-I'+str(work),'-I'+str(root),
                 str(copied),'-o',str(binary)]
