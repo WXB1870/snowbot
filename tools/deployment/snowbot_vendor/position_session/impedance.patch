@@ -60,10 +60,11 @@
    const bool takeover=input.selected && input.operation==1 && input.admission_generation>seen_admission &&
     input.deadline>now && input.policy!=0 && input.failure_reason==0 && healthy &&
     (!input.trajectory || input.rt_deadline>now);
-@@ -70,6 +71,7 @@
+@@ -70,6 +71,8 @@
    else if(nominal_pause && !local)failure=CONTROL_SOURCE_CONFLICT;
    else if(!measured(obs,now))failure=FEEDBACK_INVALID;
    else if(fault_mask(obs)&controlled_mask)failure=DRIVE_FAULT;
++  else if(input.impedance && !measured(obs,now,0xfffff))failure=FEEDBACK_INVALID;
 +  else if(input.impedance && sensor_failures>=3)failure=IMPEDANCE_INVALID;
    else if(input.trajectory && (input.rt_deadline<=0 || now>=input.rt_deadline) &&
            (local || now<input.deadline || input.rt_deadline<input.deadline))failure=CYCLE_OR_TRACKING_ERROR;
@@ -383,7 +384,7 @@
   if(!position_feedback_.fresh(now,steady)){position_wait_reason_=(position_feedback_.faults&position_session::controlled_mask)?"drive_fault":"pdo_stale_or_not_advancing";return false;}
 + if(session_execution_mode_=="impedance"){
 +  const auto obs=EtherCAT_positionObservation();const auto steady=position_session::steady_ns();
-+  if(!impedance_inited_ || (!position_session::sensor_measured(obs,steady) && !(session_impedance_active_ && obs.session_selected && obs.session_reason<3))){
++  if(!impedance_inited_ || (!position_session::sensor_measured(obs,steady) && !(session_impedance_active_ && obs.session_selected && obs.session_reason<3 && position_session::measured(obs,position_session::steady_ns(),0xfffff)))){
 +   if(!impedance_inited_)position_wait_reason_="impedance_controller_not_initialized";
 +   else if(!obs.sample)position_wait_reason_="impedance_pdo_not_started";
 +   else if(obs.expected_wkc<=0 || obs.wkc!=obs.expected_wkc)position_wait_reason_="impedance_pdo_wkc_mismatch";
@@ -417,7 +418,7 @@
 +
 +bool ServoNode::session_impedance_ready() const {
 + const auto obs=EtherCAT_positionObservation();
-+ if(!impedance_inited_ || (!position_session::sensor_measured(obs,position_session::steady_ns()) && !(session_impedance_active_ && obs.session_selected && obs.session_reason<3)))return false;
++ if(!impedance_inited_ || (!position_session::sensor_measured(obs,position_session::steady_ns()) && !(session_impedance_active_ && obs.session_selected && obs.session_reason<3 && position_session::measured(obs,position_session::steady_ns(),0xfffff))))return false;
 + return true;
 +}
 +
@@ -444,7 +445,7 @@
 + const auto obs=EtherCAT_positionObservation();
 + if(!impedance_inited_){position_cycle_reason_="impedance_controller_not_initialized";return false;}
 + if(!position_session::sensor_measured(obs,position_session::steady_ns())){
-+  if(session_impedance_active_ && obs.session_selected && obs.session_reason<3)return true; // Keep the last output during the RT watchdog's sample buffer.
++  if(session_impedance_active_ && obs.session_selected && obs.session_reason<3 && position_session::measured(obs,position_session::steady_ns(),0xfffff))return true; // Keep the last output during the RT watchdog's sample buffer.
 +  position_cycle_reason_="impedance_force_sensor_invalid";return false;
 + }
 + if(!session_impedance_inputs(obs)){position_cycle_reason_="impedance_joint_input_invalid";return false;}

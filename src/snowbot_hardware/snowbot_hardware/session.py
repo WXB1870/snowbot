@@ -227,11 +227,13 @@ class SessionHealth:
                 raise RuntimeError('SNOWBOT_TRAJECTORY_PROTOCOL_CONFLICT:'+layer)
         if self.execution_mode == 'impedance':
             # The optional vendor build places force data in this exact PDO sample.
+            if obs.valid_mask != 0xfffff:
+                raise RuntimeError('SNOWBOT_POSITION_FEEDBACK_INVALID')
             wrench = getattr(obs, 'wrench', ())
             age = getattr(obs, 'sensor_age', ())
             # ROS delivery age is already checked by require_observation().
             if (getattr(obs, 'sensor_valid_mask', 0) != 3 or
-                    obs.valid_mask != 0xfffff or not all(math.isfinite(x) for x in wrench) or
+                    not all(math.isfinite(x) for x in wrench) or
                     not all(math.isfinite(a) and 0 <= a <= SENSOR_MAX_AGE_S for a in age)):
                 # The RT watchdog owns consecutive-PDO confirmation during a session.
                 if acquiring or not obs.session_selected or obs.session_reason >= 3:
