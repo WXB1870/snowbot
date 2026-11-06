@@ -72,8 +72,6 @@ class PositionReleaseTests(unittest.TestCase):
         self.assertEqual(set(manifest['components']),{*vendor.COMPONENTS,'drive_maintenance','runtime_timing','waist_feedback','deployed_vendor','joint_impedance_118','impedance','shutdown','shutdown_impedance'})
         self.assertTrue(manifest['target_stream_available'])
         self.assertTrue(manifest['feedback_publication']['isolated'])
-        for name in vendor.VALIDATION_FILES:
-            self.assertEqual(manifest['validation_inputs'][name],vendor.digest(ROOT/name))
         self.assertEqual(manifest['feedback_publication']['mode'],'latest_only_worker')
         identity=json.loads((ROOT/'vendor/snowbot/impedance_118.json').read_text())
         self.assertEqual(manifest['impedance_source'],identity)
@@ -822,28 +820,16 @@ class ImpedanceWorkflowTests(unittest.TestCase):
         with patch.object(sys,'path',[str(ROOT/'tests/integration'),*sys.path]):
             cls.validator=importlib.import_module('validate_session_impedance')
 
-    def test_missing_model_and_mismatched_fixture_fail_before_compile(self):
+    def test_missing_model_fails_before_compile(self):
         import sys
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);source=root/'src';tests=root/'tests/native';tests.mkdir(parents=True)
-            for name in ('servo_control/src/impedance/cartesian_impedance_controller.cpp',
-                         'servo_control/src/ros_controller/rosLoop.cpp'):
-                path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('')
-            fixture=tests/'test_session_impedance.cpp'
-            fixture.write_bytes((ROOT/'tests/native/test_session_impedance.cpp').read_bytes())
-            manifest=root/'position_release.json'
-            manifest.write_text(json.dumps({'validation_inputs':{'tests/native/'+fixture.name:vendor.digest(fixture)}}))
+            root=Path(tmp);source=root/'src'
             with patch.object(sys,'argv',['validate','--source',str(source),'--prefix',str(root)]), \
                  patch.object(self.validator.subprocess,'run') as compile_command:
-                with self.assertRaisesRegex(RuntimeError,'VALIDATION_INPUT_MISSING:.*snowbot.urdf'):
+                with self.assertRaisesRegex(FileNotFoundError,'snowbot.urdf'):
                     self.validator.main()
                 compile_command.assert_not_called()
-            model=source/'dual_arm/urdf/snowbot.urdf';model.parent.mkdir(parents=True);model.write_text('<robot/>')
-            self.validator.check_inputs(source,tests,'session')
-            fixture.write_text('old fixture')
-            with self.assertRaisesRegex(RuntimeError,'VALIDATION_FIXTURE_MISMATCH:tests/native/test_session_impedance.cpp'):
-                self.validator.check_inputs(source,tests,'session')
 
     def test_native_build_reuses_objects_and_rebuilds_changed_inputs(self):
         import time

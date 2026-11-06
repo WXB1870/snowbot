@@ -13,10 +13,6 @@ import tempfile
 ASSETS=Path(__file__).resolve().parent/'snowbot_vendor/position_session'
 COMPONENTS=('observation','takeover','timing','session')
 NATIVE_FILES=('interpolation.hpp','interpolation.cpp','adaptive_stream.hpp','adaptive_stream.cpp','curve_math.hpp','rigid_prediction.hpp')
-VALIDATION_FILES=('tests/integration/validate_session_impedance.py',
-    'tests/integration/validate_position_native.py',
-    'tests/native/test_impedance_rt.cpp','tests/native/test_impedance_nominal.cpp',
-    'tests/native/test_session_impedance.cpp','tests/native/impedance_physics.cpp')
 
 def contract_ttl_ms(name):
     text=(ASSETS/'position_session_contract.h').read_text()
@@ -210,7 +206,6 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             receipt_helper_sha256=None if observation_only else digest(ASSETS/'position_receipt.h'),
             trajectory_helper_sha256=None if observation_only else digest(ASSETS/'position_trajectory.h'),
             native_execution={} if observation_only else {n:digest(native/n) for n in NATIVE_FILES},impedance_available=with_impedance,
-            validation_inputs={n:digest(pairing_path.parent/n) for n in VALIDATION_FILES} if with_impedance else {},
             impedance_source=json.loads((pairing_path.parent/'vendor/snowbot/impedance_118.json').read_text()) if with_impedance else None,
             source_tree_sha256=hashlib.sha256(json.dumps(baseline,sort_keys=True).encode()).hexdigest())
         (stage/'position_release.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')

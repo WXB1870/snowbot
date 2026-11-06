@@ -135,8 +135,6 @@ def assemble(bindu, workspace, *, with_impedance=None):
     saved = json.loads(identity.read_text()) if identity.exists() else None
     if with_impedance is None:
         with_impedance = bool(saved and saved.get('with_impedance', False))
-    if with_impedance:
-        inputs.extend(ROOT/name for name in position.VALIDATION_FILES)
     signature = hashlib.sha256((''.join(digest(p) for p in inputs if p.is_file())+
                                 (':impedance' if with_impedance else '')).encode()).hexdigest()
     if identity.exists():

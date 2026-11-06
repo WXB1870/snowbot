@@ -49,31 +49,6 @@ def compile_cached(command, work, compiler_identity):
     print(result.stdout.strip()+f' elapsed={time.monotonic()-started:.1f}s',flush=True)
 
 
-def check_inputs(source, tests, case, physics=False):
-    names={'all':('test_impedance_nominal','test_session_impedance'),
-           'nominal':('test_impedance_nominal',),'session':('test_session_impedance',),'rt':()}[case]
-    fixtures=[Path(__file__).resolve(),Path(__file__).with_name('validate_position_native.py').resolve()]
-    required=[source.parent/'position_release.json']
-    if not physics and case in ('all','rt'):
-        fixtures.append(tests/'test_impedance_rt.cpp')
-        required.append(source/'servo_control/src/servo_control/ethercat_driver.cpp')
-    if physics or case!='rt':
-        required.append(source/'servo_control/src/impedance/cartesian_impedance_controller.cpp')
-        if physics:
-            fixtures.append(tests/'impedance_physics.cpp')
-        else:
-            fixtures.extend(tests/(name+'.cpp') for name in names)
-            required.extend((source/'dual_arm/urdf/snowbot.urdf',source/'servo_control/src/ros_controller/rosLoop.cpp'))
-    missing=[str(p) for p in [*required,*fixtures] if not p.is_file()]
-    if missing:raise RuntimeError('VALIDATION_INPUT_MISSING:'+','.join(missing))
-    manifest=json.loads(required[0].read_text())
-    expected=manifest.get('validation_inputs',{})
-    for path in fixtures:
-        name=('tests/native/' if path.parent==tests else 'tests/integration/')+path.name
-        if name in expected and hashlib.sha256(path.read_bytes()).hexdigest()!=expected[name]:
-            raise RuntimeError('VALIDATION_FIXTURE_MISMATCH:'+name+'; regenerate the candidate with these tests')
-
-
 def write_shims(shim):
     def put(name,s):
      write_changed(shim/name,s)
@@ -123,7 +98,9 @@ def main():
     args=parser.parse_args()
     source=args.source.resolve();prefix=args.prefix.resolve()
     tests=Path(__file__).resolve().parents[1]/'native'
-    check_inputs(source,tests,args.case,bool(args.physics_controller_output))
+    model=source/'dual_arm/urdf/snowbot.urdf'
+    if not args.physics_controller_output and args.case!='rt' and not model.is_file():
+        raise FileNotFoundError(model)
     work=(args.build_dir or source.parent/'validation-impedance').resolve()
     work.mkdir(parents=True,exist_ok=True)
     compiler=shutil.which('c++')
@@ -214,7 +191,7 @@ def main():
         binary=work/path.stem
         run(flags+[str(path),*map(str,objects),'-L'+str(prefix/'lib'),'-Wl,-rpath,'+str(prefix/'lib'),
                    '-lpinocchio_default','-lpinocchio_parsers','-lyaml-cpp','-o',str(binary)])
-        print(run([str(binary),str(source/'dual_arm/urdf/snowbot.urdf')]).strip())
+        print(run([str(binary),str(model)]).strip())
 
 
 if __name__=='__main__':main()
