@@ -163,6 +163,13 @@
      //反馈值发送器初始化
      RetData_pub = this->create_publisher<snowbot_ctl_msgs::msg::RetInformation>(
          "dualArmCtl_fdback",
+@@ -84,5 +100,5 @@
+         200
+     );
+-
++    netCard_name=declare_parameter<std::string>("ethercat_interface",netCard_name);
+     // Independent non-RT observation publication, 100 Hz. Legacy publishing is untouched.
+     position_observation_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS());
 @@ -112,6 +128,11 @@
          m.output_position=s.output_position;m.output_speed=s.output_speed;m.output_torque=s.output_torque;m.output_kp=s.output_kp;m.output_kd=s.output_kd;
          for(unsigned i=0;i<position_session::joint_count;++i)m.hold_position[i]=s.hold_position[i];

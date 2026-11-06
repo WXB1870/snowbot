@@ -19,7 +19,11 @@ _bindu_vendor_env_118() {
     if [[ -r "$bindu_vendor_profile" ]]; then
         bindu_vendor_distro="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ros"])' "$bindu_vendor_profile")" || return 2
         case "$bindu_vendor_distro" in
-            humble) bindu_vendor_pinocchio=3.9.0 ;;
+            humble)
+                bindu_vendor_pinocchio=3.9.0
+                export PYTHONNOUSERSITE=1
+                export PINOCCHIO_CASADI_PATH=/opt/openrobots/lib/python3.10/site-packages
+                ;;
             jazzy) ;;
             *) echo "Unsupported deployment ROS distro: $bindu_vendor_distro" >&2; return 2 ;;
         esac

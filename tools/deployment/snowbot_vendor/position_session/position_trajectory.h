@@ -332,7 +332,7 @@ public:
    for(unsigned i=0;i<joint_count;++i){
     if(std::abs(measured_v[i])>tuning_.takeover_velocity_tolerance_rad_s||std::abs(input.q[i]-measured_q[i])>(input.held_takeover?tuning_.held_takeover_position_tolerance_rad:tuning_.takeover_position_tolerance_rad)||
        std::abs(input.v[i])>=1e-8||std::abs(input.a[i])>=1e-8)return "trajectory_takeover_seed";
-    if(input.held_takeover&&std::abs(input.q[i]-held[i])>=1e-6)return "trajectory_hold_discontinuous";
+    if(input.held_takeover&&std::abs(input.q[i]-held[i])>0.017453292519943295)return "trajectory_hold_discontinuous";
    }
   }else{
    if(!count_ || start<=entries_[count_-1].start || start>=entries_[count_-1].deadline)return "trajectory_order_or_takeover";

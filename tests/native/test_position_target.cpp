@@ -403,4 +403,45 @@ void check_prepared_replay_recipes(){
   wire.version=1;rejects([&]{TrajectoryQueue::prepare(wire,source,.25,.5,162.);});
  }
 }
-int main(int argc,char** argv){check_prepared_replay_recipes();if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+void held_replay_offset(){
+ using namespace bindu::execution;
+ JointLimits limits;for(unsigned i=0;i<16;++i)limits.push_back({lower[i],upper[i],.25,.5,162.});
+ auto measured=seed();std::array<double,16> speed{};
+ JointState initial;initial.q.assign(measured.begin(),measured.end());initial.v.assign(16,0.);initial.a=initial.v;
+ const auto wire=[](const PreparedSegment& segment,uint64_t id,int64_t effective){
+  Wire w;w.segment_id=id;w.effective_at_ns=effective;
+  for(const auto& d:segment.describe()){
+   w.piece_start.push_back(d.start);w.duration.push_back(d.duration);w.source_duration.push_back(d.source_duration);w.source_elapsed.push_back(d.source_elapsed);
+   for(const auto& axis:d.controls){w.control_count.push_back(axis.size());w.controls.insert(w.controls.end(),axis.begin(),axis.end());}
+  }
+  return w;
+ };
+ // Nominal held-reference offsets up to and including 1 degree are accepted.
+ // The larger measured-following budget remains independent of this boundary.
+ for(double offset: {-.017454292519943295,-.017453292519943295,.0015192079031260824,
+                      .017453292519943295,.017454292519943295}){
+  TrajectoryQueue held;
+  Wire first;first.segment_id=1;TargetSnapshot starting;
+  assert(held.snapshot(1000000000,1000000000,1,20000000,measured,starting));
+  auto parked=TrajectoryQueue::prepare_target(first,Meta{91,1,1000000000,1250000000,1},starting,measured,.25,.5,162.);
+  assert(!held.commit(*parked,1000000000,1000000000,measured,speed));
+  TargetSnapshot braking;
+  assert(held.snapshot(1050000000,1050000000,2,20000000,measured,braking));
+  Wire pause;pause.version=2;pause.segment_id=2;pause.max_velocity.fill(.25);
+  pause.max_acceleration.fill(.5);pause.max_jerk.fill(162.);
+  auto stop=TrajectoryQueue::prepare_target(pause,Meta{91,2,1050000000,3050000000,2},
+                                           braking,measured,.25,.5,162.);
+  assert(!held.commit(*stop,1050000000,1050000000,measured,speed));
+  assert(held.sample(1300000000)&&held.phase(1300000000)==4);
+  JointState start=initial;start.q[0]+=offset;
+  auto replay=PreparedSegment::target(limits,start,start.q,0.,30.,.2);
+  auto full=wire(replay,1,1450000000);full.version=4;
+  TargetSnapshot snapshot;snapshot.held_takeover=true;
+  auto ready=TrajectoryQueue::prepare_replay(full,Meta{92,1,1400000000,1650000000,1},snapshot,.25,.5,162.);
+  const char* error=held.commit(*ready,1400000000,1400000000,measured,speed);
+  if(std::abs(offset)<=.017453292519943295)assert(!error);
+  else assert(error&&std::string(error)=="trajectory_hold_discontinuous");
+ }
+ std::cout<<"PASS held replay nominal offset accepts observed error and +/-1 degree; larger offsets rejected\n";
+}
+int main(int argc,char** argv){held_replay_offset();if(argc==2&&std::string(argv[1])=="--held-offset")return 0;check_prepared_replay_recipes();if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
