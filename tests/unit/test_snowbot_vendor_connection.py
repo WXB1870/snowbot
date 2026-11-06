@@ -280,6 +280,38 @@ int main(){for(bool left:{false,true}){
 
 
 class DeploymentEntryTests(unittest.TestCase):
+    def test_python310_process_group_preserves_session_and_accepts_sigint(self):
+        import select
+        import signal
+        import sys
+        from unittest.mock import patch
+        from tools.deployment import deploy
+        probe = (
+            'import json,os,signal,sys; '
+            'signal.signal(signal.SIGINT,lambda *_:sys.exit(0)); '
+            'print(json.dumps([os.getpid(),os.getpgrp(),os.getsid(0),'
+            'os.getcwd(),os.environ["SNOWBOT_GROUP_TEST"],sys.argv[1]]),flush=True); '
+            'signal.pause()')
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(deploy.sys, 'version_info', (3, 10)):
+            child = deploy.popen_group([sys.executable, '-c', probe, 'argument with spaces'],
+                cwd=tmp, env={**os.environ, 'SNOWBOT_GROUP_TEST': 'inherited'},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 5.)[0])
+                pid, group, session, cwd, env, arg = json.loads(child.stdout.readline())
+                self.assertEqual((pid, group, session), (child.pid, child.pid, os.getsid(0)))
+                self.assertEqual(Path(cwd).resolve(), Path(tmp).resolve())
+                self.assertEqual((env, arg), ('inherited', 'argument with spaces'))
+                os.killpg(group, signal.SIGINT)
+                _, errors = child.communicate(timeout=5.)
+                self.assertEqual(child.returncode, 0, errors)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                child.stdout.close(); child.stderr.close()
+
     def test_home_is_opt_in_and_terminal_two_only(self):
         from unittest.mock import patch
         from tools.deployment import deploy

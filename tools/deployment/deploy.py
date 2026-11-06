@@ -312,6 +312,16 @@ def stop_services(children):
     return success
 
 
+def popen_group(command, **kwargs):
+    # Keep the tty session (and sudo cache), with a separate group for SIGINT.
+    if sys.version_info >= (3, 11):
+        return subprocess.Popen(command, process_group=0, **kwargs)
+    # Run setpgid after exec: preexec_fn is unsafe with the log reader threads.
+    return subprocess.Popen([sys.executable, '-c',
+        'import os,sys; os.setpgid(0,0); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)',
+        *command], **kwargs)
+
+
 def copy_service_output(name, child, writer):
     try:
         for line in child.stdout:
@@ -374,7 +384,7 @@ def services(bindu, workspace, execution_mode='impedance'):
                 if stopped.is_set():
                     break
                 # Separate groups for ordered signals; keep the tty session's sudo cache.
-                child = subprocess.Popen(command, cwd=ROOT, env=env, process_group=0,
+                child = popen_group(command, cwd=ROOT, env=env,
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, errors='replace')
                 children.append((name, child))
@@ -491,8 +501,8 @@ def operator(bindu, workspace, frontend, *, home=False):
                         message=msg.state+':'+msg.code, text=f'[executor] {msg.state}: {msg.code}\n'), text=True)
             node.create_subscription(RuntimeEvent, '/'+namespace+'/events', event, 100)
             cfg = Path(get_package_share_directory('snowbot_bringup'))/'config/robots/snowbot'
-            child = subprocess.Popen(executor_command(cfg, runs, mode, namespace),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', process_group=0)
+            child = popen_group(executor_command(cfg, runs, mode, namespace),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
             children.append(('executor', child))
             reader = threading.Thread(target=copy_service_output, args=('executor', child, writer), daemon=True)
             reader.start(); readers.append(reader)
