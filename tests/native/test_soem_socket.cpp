@@ -1,4 +1,4 @@
-// Actual SOEM RX/indexing over AF_UNIX only. Never calls NIC setup or a driver.
+// Actual SOEM RX over software sockets. Never calls NIC setup or a driver.
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -46,6 +46,37 @@ struct SocketPort {
  }
 };
 int main(int argc,char** argv){
+ if(argc>1 && std::string(argv[1])=="--timeout-probe"){
+  const int timeout_us=std::stoi(argv[2]),count=std::stoi(argv[3]),pause_ms=std::stoi(argv[4]);
+  const bool packet=argc>5 && std::string(argv[5])=="--isolated-packet";
+  if(packet)assert(unshare(CLONE_NEWNET)==0); // Fresh namespace has no physical NIC.
+  SocketPort s;timeval timeout{timeout_us/1000000,timeout_us%1000000};
+  if(packet){
+   close(s.mainfd[0]);s.mainfd[0]=socket(AF_PACKET,SOCK_RAW,htons(ETH_P_ECAT));
+   assert(s.mainfd[0]>=0);s.port.sockhandle=s.mainfd[0];
+  }
+  assert(setsockopt(s.port.sockhandle,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout))==0);
+  timeval effective{};socklen_t length=sizeof(effective);
+  assert(getsockopt(s.port.sockhandle,SOL_SOCKET,SO_RCVTIMEO,&effective,&length)==0);
+  std::cout<<"{\"ready\":true,\"tid\":"<<syscall(SYS_gettid)<<",\"effective_timeout_us\":"
+   <<effective.tv_sec*1000000+effective.tv_usec<<",\"isolated_packet\":"<<(packet?"true":"false")
+   <<",\"hardware_accessed\":false}"<<std::endl;
+  std::cin.get(); // Let the external collector arm before the measured calls.
+  struct Sample {int64_t begin,end,used;int result;};
+  std::vector<Sample> samples;samples.reserve(count);
+  for(int i=0;i<count;++i){
+   std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
+   s.port.rxbufstat[12]=EC_BUF_TX;const auto begin=mono(),used=cpu();
+   const int result=ecx_inframe(&s.port,12,0);const auto end=mono();
+   samples.push_back({begin,end,cpu()-used,result});
+  }
+  std::cout<<"{\"timeout_us\":"<<timeout_us<<",\"hardware_accessed\":false,\"samples\":[";
+  for(size_t i=0;i<samples.size();++i){const auto& s=samples[i];
+   if(i)std::cout<<',';
+   std::cout<<"{\"begin_ns\":"<<s.begin<<",\"end_ns\":"<<s.end<<",\"cpu_ns\":"<<s.used<<",\"result\":"<<s.result<<'}';
+  }
+  std::cout<<"]}"<<std::endl;return 0;
+ }
  const bool runnable=argc>2 && std::string(argv[2])=="runnable";
  std::ofstream log;if(argc>1)log.open(argv[1]);
  SocketPort s;std::atomic<bool> go{false},stop{false};std::promise<int> started;auto ready=started.get_future();
