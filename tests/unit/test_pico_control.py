@@ -16,6 +16,26 @@ from tests.support.pico import Rig
 
 
 class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rpc_timing_preserves_result_exception_and_timeout(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        for outcome in ('completed','exception','timeout'):
+            with self.subTest(outcome=outcome):
+                node=self.production('wait');node.event=Mock();node.pause=AsyncMock()
+                clock=node.wait.__func__.__globals__['time']
+                clock.monotonic=Mock(side_effect=[0.,1.1,1.2] if outcome=='timeout' else [0.,.02])
+                future=S(done=lambda:outcome!='timeout',result=Mock(return_value='reply'))
+                if outcome=='exception':future.result.side_effect=RuntimeError('ORIGINAL_ERROR')
+                if outcome=='completed':self.assertEqual(await node.wait(future,1.),'reply')
+                else:
+                    with self.assertRaisesRegex(RuntimeError,'PICO_RPC_TIMEOUT' if outcome=='timeout' else 'ORIGINAL_ERROR'):
+                        await node.wait(future,1.)
+                state,code=node.event.call_args.args
+                self.assertEqual(state,'PICO_RPC_TIMING')
+                data=json.loads(code)
+                self.assertEqual(data['outcome'],outcome);self.assertEqual(data['timeout_s'],1.)
+                self.assertGreater(data['elapsed_s'],0.)
+
     def test_execution_contract_is_supplied_by_assembly(self):
         import ast
         from types import SimpleNamespace as S

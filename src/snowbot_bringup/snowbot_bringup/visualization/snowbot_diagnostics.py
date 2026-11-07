@@ -51,6 +51,90 @@ def _analog_state(value, settings=None, kind='grip'):
     return (value < settings[kind+'_release_threshold'], value > settings[kind+'_press_threshold'])
 
 
+class TimingStatistics:
+    """Five-second observed distributions, collected before diagnostic sampling."""
+    def __init__(self, parameters, now=None):
+        self.parameters = parameters
+        self.started = time.monotonic() if now is None else now
+        self.metrics = {}
+        self.sample_gap_limit = None
+        self.lock = threading.Lock()
+
+    def add(self, name, value, limit=None, outcome=None):
+        if not isinstance(value, (int, float)) or not math.isfinite(value):return
+        metric = self.metrics.setdefault(name, dict(values=[], count=0, maximum=value,
+            over_limit_count=0, limits=[], outcomes={}))
+        metric['count'] += 1
+        metric['maximum'] = max(metric['maximum'], value)
+        # Bound memory if the writer is delayed; expose any percentile truncation.
+        if len(metric['values']) < 8192:metric['values'].append(value)
+        if limit is not None:
+            metric['over_limit_count'] += value > limit
+            metric['limits'] = [min(metric['limits']+[limit]), max(metric['limits']+[limit])]
+        if outcome is not None:
+            metric['outcomes'][outcome] = metric['outcomes'].get(outcome, 0)+1
+
+    def observe(self, stream, value, wall):
+        p = self.parameters
+        with self.lock:
+            if stream == 'teleop-state':
+                for field, limit in (('input_age_s', p['pico']['remote_input_timeout_s']),
+                                     ('feedback_age_s', p['teleop']['feedback_max_age_s'])):
+                    self.add(field, _field(value, field), limit)
+            elif stream == 'vr-health':
+                self.add('server_controller_interval_s', _field(value, 'server_controller_interval_s'),
+                         p['pico']['remote_input_timeout_s'])
+                self.add('client_controller_interval_s', _field(value, 'client_controller_interval_s'))
+                self.add('transport_interval_excess_s', _field(value, 'transport_interval_excess_s'))
+                # Linux SRTT to the TCP peer, possibly a proxy; not headset-to-actuator latency.
+                rtt = _field(value, 'socket', {}).get('rtt_s')
+                if rtt is not None and rtt > 0:self.add('tcp_peer_srtt_s', rtt)
+                probe = _field(value, 'browser_http_probe')
+                if probe:
+                    self.add('browser_http_probe_wait_s', probe['elapsed_ms']*.001, outcome=probe['outcome'])
+                    if probe['outcome']=='completed':self.add('browser_http_round_trip_s', probe['elapsed_ms']*.001)
+                for name, maximum in _field(value, 'maxima', {}).items():
+                    self.add('pipeline_window_max_'+name+'_s', maximum['seconds'])
+            elif stream == 'accepted-commands':
+                stamp = _field(value, 'stamp')
+                self.add('observer_command_age_s', wall-(_field(stamp, 'sec')+_field(stamp, 'nanosec')*1e-9),
+                         _field(value, 'valid_for'))
+            elif stream == 'runtime-events':
+                state = _field(value, 'state')
+                if state not in ('PICO_RPC_TIMING', 'BIMANUAL_STARTED', 'BIMANUAL_QP_RESULT',
+                                 'BIMANUAL_SUBMIT_TIMING'):return False
+                data = json.loads(_field(value, 'code'))
+                if state == 'BIMANUAL_STARTED':
+                    self.sample_gap_limit = data['max_sample_gap']
+                elif state == 'PICO_RPC_TIMING':
+                    self.add('pico_service_action_wait_s', data['elapsed_s'], data['timeout_s'], data['outcome'])
+                    return True  # Only the five-second summary is written for this new stream.
+                elif state == 'BIMANUAL_QP_RESULT':
+                    self.add('solve_s', data['solve_us']*1e-6, p['solver']['timeout_s'])
+                    self.add('worker_result_age_s', data.get('result_age_s'), p['solver']['worker_timeout_s'])
+                    self.add('sample_gap_s', data.get('sample_gap_s'), self.sample_gap_limit)
+                elif state == 'BIMANUAL_SUBMIT_TIMING':
+                    self.add('submit_round_trip_s', data['submit_round_trip_s'])
+        return False
+
+    def flush(self, now, *, final=False):
+        with self.lock:
+            if not final and now-self.started < 5.:return None
+            metrics, self.metrics = self.metrics, {}
+            start, self.started = self.started, now
+        if not metrics:return None
+        result = {}
+        for name, metric in metrics.items():
+            values = sorted(metric['values'])
+            result[name] = dict(count=metric['count'], percentile_sample_count=len(values),
+                p50_s=values[math.ceil(len(values)*.5)-1], p95_s=values[math.ceil(len(values)*.95)-1],
+                max_s=metric['maximum'], over_limit_count=metric['over_limit_count'] if metric['limits'] else None,
+                limit_range_s=metric['limits'] or None, outcomes=metric['outcomes'])
+        return dict(window_s=now-start, final=final, metrics=result,
+                    scope='observer_received_before_sampling; RPC includes local scheduling and action waits',
+                    network_scope='browser HTTP HEAD round trip and TCP peer SRTT; not end-to-end motion latency')
+
+
 def sampling_policy(stream, value, settings=None, input_settings=None):
     """Small state keys only; do not serialize ROS arrays before sampling."""
     key = stream
@@ -301,14 +385,17 @@ class WrenchObserver:
 
 class DiagnosticWriter:
     def __init__(self, path, *, capacity=None, chunk_bytes=None, sampling=True,
-                 health_filename='diagnostics-health.json', echo=False, full_streams=(), settings=None, input_settings=None):
-        settings = settings or load_parameters()['diagnostics']
+                 health_filename='diagnostics-health.json', echo=False, full_streams=(), settings=None, input_settings=None,
+                 runtime_parameters=None):
+        runtime_parameters = runtime_parameters or load_parameters()
+        settings = settings or runtime_parameters['diagnostics']
         capacity = settings['queue_capacity'] if capacity is None else capacity
         chunk_bytes = settings['chunk_bytes'] if chunk_bytes is None else chunk_bytes
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
         self.queue=queue.Queue(capacity);self.chunk_bytes=chunk_bytes
         self.stop=threading.Event();self.error='';self.dropped=0;self.written=0
         self.sampler=DiagnosticSampler(settings, input_settings) if sampling else None
+        self.timings=TimingStatistics(runtime_parameters)
         self.full_streams=frozenset(full_streams)
         self.received_by_stream={};self.dropped_by_stream={};self.written_by_stream={}
         self.repeats=RepeatedLogs(self._emit_log)
@@ -320,6 +407,7 @@ class DiagnosticWriter:
         self.received_by_stream[stream]=self.received_by_stream.get(stream,0)+1
         if self.error or self.stop.is_set():
             self._drop(stream);return
+        if self.timings.observe(stream, value, time.time()):return
         if stream not in self.full_streams and self.sampler and not self.sampler.keep(stream,value,time.monotonic()):return
         self._enqueue(stream, value, ros)
 
@@ -374,6 +462,8 @@ class DiagnosticWriter:
             temporary.replace(health)
         try:
             while not self.stop.is_set() or not self.queue.empty():
+                summary=self.timings.flush(time.monotonic())
+                if summary:self._enqueue('timing-summary', summary, False)
                 if not self.stop.is_set() and time.monotonic()-last_repeat >= 1.:
                     self.repeats.flush();last_repeat=time.monotonic()
                 try:stream,envelope,value,mode=self.queue.get(timeout=.1)
@@ -413,5 +503,7 @@ class DiagnosticWriter:
 
     def close(self):
         self.repeats.flush(final=True)
+        summary=self.timings.flush(time.monotonic(), final=True)
+        if summary:self._enqueue('timing-summary', summary, False)
         self.stop.set();self.thread.join(timeout=5.)
         if self.thread.is_alive():raise RuntimeError('DIAGNOSTICS_FLUSH_TIMEOUT')

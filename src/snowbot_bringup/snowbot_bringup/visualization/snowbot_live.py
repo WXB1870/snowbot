@@ -84,7 +84,7 @@ def observe(args, publish=None, stop=None):
     real_vendor = args.runtime_mode == 'real' and args.device_backend == 'snowbot_vendor'
     # Prehistory uses the startup sampling limit; the monitor checks every frame.
     diagnostics=DiagnosticWriter(args.trace_file,
-        settings=parameters['diagnostics'], input_settings=parameters['pico'],
+        settings=parameters['diagnostics'], input_settings=parameters['pico'], runtime_parameters=parameters,
         full_streams=VR_INPUT_STREAMS if getattr(args,'record_inputs',False) else ()) if args.trace_file else None
     pdo_observer = None
     ros_logs = None

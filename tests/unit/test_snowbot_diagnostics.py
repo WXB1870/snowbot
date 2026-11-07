@@ -16,6 +16,65 @@ diagnostics=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(diagnostics)
 
 
+class TimingStatisticsTests(unittest.TestCase):
+    def test_five_second_distribution_uses_configured_limits_and_keeps_short_spikes(self):
+        parameters=diagnostics.load_parameters()
+        parameters['teleop']['feedback_max_age_s']=.4
+        stats=diagnostics.TimingStatistics(parameters, now=0.)
+        for i in range(1,101):
+            stats.observe('teleop-state',dict(feedback_age_s=i*.01),wall=10.)
+        self.assertIsNone(stats.flush(4.999))
+        metric=stats.flush(5.)['metrics']['feedback_age_s']
+        self.assertEqual(metric['count'],100)
+        self.assertEqual(metric['p50_s'],.5);self.assertAlmostEqual(metric['p95_s'],.95)
+        self.assertEqual(metric['max_s'],1.)
+        self.assertEqual(metric['over_limit_count'],60)
+        self.assertEqual(metric['limit_range_s'],[.4,.4])
+        self.assertIsNone(stats.flush(10.))
+
+    def test_rpc_network_and_command_clocks_are_separate_and_partial_window_flushes(self):
+        stats=diagnostics.TimingStatistics(diagnostics.load_parameters(), now=0.)
+        rpc=S(state='PICO_RPC_TIMING',code=json.dumps(dict(elapsed_s=5.1,timeout_s=5.,outcome='timeout')))
+        self.assertTrue(stats.observe('runtime-events',rpc,wall=100.))
+        stats.observe('vr-health',dict(socket=dict(rtt_s=.5)),wall=100.)
+        stats.observe('vr-health',dict(browser_http_probe=dict(elapsed_ms=510.,outcome='completed')),wall=100.)
+        stats.observe('vr-health',dict(browser_http_probe=dict(elapsed_ms=4000.,outcome='timeout')),wall=100.)
+        stats.observe('accepted-commands',S(stamp=S(sec=99,nanosec=0),valid_for=.8),wall=100.)
+        for state, data in (
+                ('BIMANUAL_STARTED',dict(max_sample_gap=1.)),
+                ('BIMANUAL_QP_RESULT',dict(solve_us=200000.,result_age_s=.6,sample_gap_s=1.1)),
+                ('BIMANUAL_SUBMIT_TIMING',dict(submit_round_trip_s=.03))):
+            self.assertFalse(stats.observe('runtime-events',S(state=state,code=json.dumps(data)),wall=100.))
+        report=stats.flush(2.,final=True);metrics=report['metrics']
+        self.assertEqual(metrics['pico_service_action_wait_s']['outcomes'],{'timeout':1})
+        self.assertEqual(metrics['pico_service_action_wait_s']['over_limit_count'],1)
+        self.assertEqual(metrics['observer_command_age_s']['over_limit_count'],1)
+        self.assertEqual(metrics['tcp_peer_srtt_s']['p50_s'],.5)
+        self.assertEqual(metrics['browser_http_round_trip_s']['count'],1)
+        self.assertEqual(metrics['browser_http_round_trip_s']['max_s'],.51)
+        self.assertEqual(metrics['browser_http_probe_wait_s']['outcomes'],dict(completed=1,timeout=1))
+        for name in ('solve_s','worker_result_age_s','sample_gap_s'):
+            self.assertEqual(metrics[name]['over_limit_count'],1)
+        self.assertEqual(metrics['submit_round_trip_s']['max_s'],.03)
+        self.assertIsNone(metrics['tcp_peer_srtt_s']['over_limit_count'])
+        self.assertIn('not end-to-end',report['network_scope'])
+        self.assertTrue(report['final']);self.assertIsNone(stats.flush(2.,final=True))
+
+    def test_writer_counts_before_sampling_without_writing_each_rpc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);writer=diagnostics.DiagnosticWriter(root/'diagnostics.jsonl')
+            for i in range(100):writer.record('teleop-state',dict(feedback_age_s=i*.001))
+            writer.record('runtime-events',S(state='PICO_RPC_TIMING',code=json.dumps(
+                dict(elapsed_s=.02,timeout_s=5.,outcome='completed'))))
+            writer.close()
+            rows=[json.loads(line) for line in (root/'timing-summary.jsonl').read_text().splitlines()]
+            self.assertEqual(len(rows),1)
+            self.assertEqual(rows[0]['data']['metrics']['feedback_age_s']['count'],100)
+            self.assertGreater(writer.status()['sampled_out'],0)
+            self.assertFalse((root/'runtime-events.jsonl').exists())
+            self.assertEqual(writer.status()['error'],'')
+
+
 class DiagnosticTests(unittest.TestCase):
     def test_rotation_retains_order_and_shutdown_drains_all_streams(self):
         with tempfile.TemporaryDirectory() as directory:

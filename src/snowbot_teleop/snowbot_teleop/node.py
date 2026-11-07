@@ -424,11 +424,18 @@ class PicoNode(RuntimeNode):
 
     async def wait(self,future,timeout=None):
         if timeout is None: timeout=parameters_for(self,'pico')['rpc_timeout_s']
-        end=time.monotonic()+timeout
-        while not future.done():
-            if time.monotonic()>end:raise RuntimeError('PICO_RPC_TIMEOUT')
-            await self.pause()
-        return future.result()
+        started=time.monotonic();end=started+timeout;outcome='exception'
+        try:
+            while not future.done():
+                if time.monotonic()>end:
+                    outcome='timeout'
+                    raise RuntimeError('PICO_RPC_TIMEOUT')
+                await self.pause()
+            result=future.result();outcome='completed'
+            return result
+        finally:
+            self.event('PICO_RPC_TIMING',json.dumps(dict(elapsed_s=time.monotonic()-started,
+                timeout_s=timeout,outcome=outcome)))
 
     def begin_stop_wait(self,instance_id,epoch,lease_active):
         if self.stop_request is not None:
