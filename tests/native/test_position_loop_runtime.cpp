@@ -1,3 +1,7 @@
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 // Production callback pump, with a deterministic executor double; no ROS/IO.
 #include "servo_control/position_clock.h"
 #include "position_session_contract.h"

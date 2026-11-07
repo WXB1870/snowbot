@@ -277,6 +277,99 @@ def keep_service_log(line, previous_wkc, now):
     return True
 
 
+def sched_event_filters(tids):
+    tids = sorted(set(map(int, tids)))
+    return {
+        'sched_switch': ' || '.join(f'prev_pid == {tid} || next_pid == {tid}' for tid in tids) or 'prev_pid < 0',
+        'sched_wakeup': ' || '.join(f'pid == {tid}' for tid in tids) or 'pid < 0'}
+
+
+def sched_trace_window(text, fault_ns, before_s=2.):
+    start = fault_ns/1e9-before_s
+    lines, times = [], []
+    for line in text.splitlines():
+        event = re.search(r'\s(\d+\.\d+): (?:sched:)?sched_(?:switch|wakeup):', line)
+        if line.startswith('#'):
+            lines.append(line)
+        elif event and float(event[1]) >= start:
+            lines.append(line); times.append(float(event[1]))
+    return '\n'.join(lines)+'\n', dict(first_event_s=min(times) if times else None,
+        last_event_s=max(times) if times else None, events=len(times))
+
+
+def trace_scheduling(workspace, *, tracefs=None):
+    """One diagnostic capture; never launches, signals or controls a robot process."""
+    if os.geteuid() != 0:
+        raise ValueError('trace-scheduling需要root；请现场用sudo运行该采集命令')
+    if tracefs is None:
+        tracefs = next((p for p in (Path('/sys/kernel/tracing'),Path('/sys/kernel/debug/tracing'))
+                        if (p/'available_events').is_file()), None)
+    if tracefs is None:
+        raise ValueError('tracefs不可用；未修改全局跟踪设置')
+    instance = tracefs/'instances'/('snowbot-sched-'+str(os.getpid()))
+    instance.mkdir()
+    stopped = threading.Event()
+    handlers = {s:signal.signal(s,lambda *_:stopped.set()) for s in (signal.SIGINT,signal.SIGTERM)}
+    def write(name, value): (instance/name).write_text(str(value))
+    source, offset, tids, fault_ns, noticed_ns = None, 0, {}, None, None
+    deadline, configured, simulation = None, set(), False
+    try:
+        write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
+        write('buffer_size_kb',2048); write('options/overwrite',1)
+        for event, expression in sched_event_filters([]).items():
+            write('events/sched/'+event+'/filter',expression)
+            write('events/sched/'+event+'/enable',1)
+        write('trace',''); write('tracing_on',1)
+        print('SCHED_TRACE_READY：独立内核环形缓冲；请在其他终端启动base。Ctrl+C仅结束采集。',flush=True)
+        while not stopped.is_set():
+            candidates = list((workspace/'startup-logs').glob('services-*/servo.log'))
+            latest = max(candidates,key=lambda p:p.stat().st_mtime_ns) if candidates else None
+            if latest is not None and latest != source and noticed_ns is None:
+                source, offset, tids = latest, 0, {}
+                write('tracing_on',0)
+                for event,expression in sched_event_filters([]).items():write('events/sched/'+event+'/filter',expression)
+                write('trace','');write('tracing_on',1);configured=set()
+            if source is not None:
+                with source.open() as stream:
+                    stream.seek(offset); lines = stream.readlines(); offset = stream.tell()
+                for line in lines:
+                    thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control) pid=(\d+) tid=(\d+)',line)
+                    if thread and Path('/proc/'+thread[3]).exists():
+                        tids[thread[1]] = int(thread[3])
+                        if set(tids.values()) != configured:
+                            for event, expression in sched_event_filters(tids.values()).items():
+                                write('events/sched/'+event+'/filter',expression)
+                            configured=set(tids.values())
+                            print('SCHED_TRACE_ARMED '+json.dumps(tids),flush=True)
+                    if configured and ('[ECAT-FAULT]' in line or 'POSITION_CYCLE_FIRST_FAULT' in line) and noticed_ns is None:
+                        noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
+                        simulation='simulation=1' in line
+                    first = 'first_bad=1' in line or 'POSITION_CYCLE_FIRST_FAULT' in line
+                    stamp = re.search(r'(?:recv_end_ns|steady_ns)=(\d+)',line) if first else None
+                    if stamp and noticed_ns is not None: fault_ns=int(stamp[1])
+            if deadline is not None and time.monotonic_ns() >= deadline:break
+            time.sleep(.02)
+        write('tracing_on',0)
+        frozen_ns=time.monotonic_ns()
+        if fault_ns is None:fault_ns=noticed_ns or frozen_ns
+        text,coverage=sched_trace_window((instance/'trace').read_text(),fault_ns)
+        output=workspace/'scheduler-traces'/(time.strftime('%Y%m%d-%H%M%S')+'-'+str(os.getpid()))
+        output.mkdir(parents=True)
+        (output/'sched.trace').write_text(text)
+        info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
+            requested_before_s=2.,post_notice_s=.2,buffer_kb_per_cpu=2048,
+            tids=tids,source_log=str(source) if source else None,coverage=coverage,
+            manual_stop=stopped.is_set(),simulation=simulation,hardware_started=False)
+        (output/'metadata.json').write_text(json.dumps(info,indent=2)+'\n')
+        print('SCHED_TRACE_SAVED '+str(output),flush=True)
+        return output
+    finally:
+        write('tracing_on',0)
+        for event in ('sched_switch','sched_wakeup'):write('events/sched/'+event+'/enable',0)
+        instance.rmdir()
+        for sig,handler in handlers.items():signal.signal(sig,handler)
+
+
 def failure_banner(message):
     text = '\n'+'!'*72+'\n!!! '+message.rstrip()+'\n'+'!'*72+'\n'
     return '\033[1;31m'+text+'\033[0m' if sys.stderr.isatty() and 'NO_COLOR' not in os.environ else text
@@ -692,7 +785,7 @@ def open_grippers(workspace):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers'))
+    parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers', 'trace-scheduling'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
@@ -718,6 +811,9 @@ def main(argv=None):
             raise ValueError('--home belongs to terminal 2 (operator) only')
         if options.validate and options.command not in ('prepare', 'build'):
             raise ValueError('--validate belongs to prepare/build only')
+        if options.command == 'trace-scheduling':
+            trace_scheduling(workspace)
+            return 0
         if options.command == 'plan':
             bindu = locked_bindu(existing)
             print(json.dumps(dict(snowbot=git(ROOT, 'rev-parse', 'HEAD'), bindu=git(bindu, 'rev-parse', 'HEAD'),

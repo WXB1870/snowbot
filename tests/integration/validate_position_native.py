@@ -283,6 +283,25 @@ def write_middle_check(source, work, root):
     return path
 
 
+def build_soem_socket(source, output):
+    """Build the actual Linux SOEM RX code; the fixture opens AF_UNIX only."""
+    output=Path(output);output.mkdir(parents=True,exist_ok=True)
+    soem=Path(source)/'servo_control/thirdparty/soem'
+    includes=[soem/p for p in ('soem','osal','osal/linux','oshw/linux')]
+    flags=['-O2','-D_GNU_SOURCE','-DEC_VER2','-pthread',*['-I'+str(p) for p in includes]]
+    objects=[]
+    for path in (soem/'oshw/linux/nicdrv.c',soem/'osal/linux/osal.c'):
+        obj=output/(path.stem+'.o')
+        result=subprocess.run([shutil.which('cc'),*flags,'-c',str(path),'-o',str(obj)],capture_output=True,text=True)
+        if result.returncode:raise RuntimeError(result.stdout+result.stderr)
+        objects.append(obj)
+    fixture=Path(__file__).resolve().parents[1]/'native/test_soem_socket.cpp'
+    binary=output/'soem-socket'
+    result=subprocess.run([shutil.which('c++'),'-std=c++17',*flags,str(fixture),*map(str,objects),'-o',str(binary)],capture_output=True,text=True)
+    if result.returncode:raise RuntimeError(result.stdout+result.stderr)
+    return binary
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',type=Path,required=True,help='Unified vendor src root')
@@ -291,6 +310,17 @@ def main():
     parser.add_argument("--sanitize",action="store_true",help="AddressSanitizer and UndefinedBehaviorSanitizer, pure memory tests only")
     parser.add_argument('--tests',nargs='+',help='Run selected existing native cases')
     args=parser.parse_args()
+    if args.tests==['test_soem_socket']:
+        results={}
+        with tempfile.TemporaryDirectory(prefix='soem-socket-') as tmp:
+            for name,source in [('candidate',args.source)]+([('baseline',args.baseline)] if args.baseline else []):
+                binary=build_soem_socket(source,Path(tmp)/name)
+                result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=10)
+                if result.returncode:raise RuntimeError(result.stdout+result.stderr)
+                results[name]=json.loads(result.stdout)
+        data=dict(passed=True,tests=results,hardware_accessed=False,transport='AF_UNIX socketpair')
+        if args.output:args.output.write_text(json.dumps(data,indent=2)+'\n')
+        print(json.dumps(data));return
     root=Path(__file__).resolve().parents[1]/"native"
     compiler=shutil.which('c++')
     if not compiler:raise SystemExit('C++ compiler unavailable')

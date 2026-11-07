@@ -611,6 +611,23 @@ class DeploymentEntryTests(unittest.TestCase):
         states['servo'].reason='publisher_found_no_message'
         self.assertFalse(base_wait_status(states)[1])
 
+    def test_scheduler_filters_follow_wakeup_target_and_switch_both_sides(self):
+        from tools.deployment.deploy import sched_event_filters
+        filters=sched_event_filters([42,41,42])
+        self.assertEqual(filters['sched_wakeup'],'pid == 41 || pid == 42')
+        for field in ('prev_pid == 41','next_pid == 41','prev_pid == 42','next_pid == 42'):
+            self.assertIn(field,filters['sched_switch'])
+        self.assertNotIn('common_pid',filters['sched_wakeup'])
+
+    def test_scheduler_trace_uses_monotonic_fault_window(self):
+        from tools.deployment.deploy import sched_trace_window
+        text='# tracer: nop\nworker-41 [000] 2.900000: sched_switch: prev_pid=41 prev_state=S\n'
+        text+='irq-7 [000] 3.100000: sched_wakeup: pid=41\n'
+        text+='idle-0 [000] 5.200000: sched_switch: next_pid=41\n'
+        selected,coverage=sched_trace_window(text,5000000000)
+        self.assertNotIn('2.900000',selected);self.assertIn('3.100000',selected)
+        self.assertIn('5.200000',selected);self.assertEqual(coverage['events'],2)
+
     def test_replay_sequence_and_executor_use_same_observed_mode(self):
         from tools.deployment.deploy import executor_command,replay_commands
         cfg,runs=Path('/config'),Path('/runs')

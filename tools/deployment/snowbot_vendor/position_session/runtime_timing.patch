@@ -288,7 +288,7 @@
      uint64_t timing_io_sum_us_{0};
 +    position_session::PdoFaultTrace pdo_fault_trace_;
 +    int64_t pdo_deadline_ns_=0,pdo_wake_ns_=0,pdo_dc_adjust_ns_=0;
-+    int pdo_sleep_result_=0;
++    int pdo_sleep_result_=0,pdo_thread_tid_=0;
  };
 
  #endif // ETHERCAT_DRIVER_H
@@ -318,7 +318,7 @@
      if (pdo_timing_initialized_) {
          const auto period_us = static_cast<uint64_t>(
              std::chrono::duration_cast<std::chrono::microseconds>(
-@@ -901,9 +907,26 @@
+@@ -901,9 +907,27 @@
          }
      }
      csp_snapshot.send_attempt_ns=position_session::steady_ns();
@@ -331,9 +331,10 @@
      const auto io_end = std::chrono::steady_clock::now();
 +    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&io_cpu_end);
 +    position_session::PdoCycleTiming trace;
-+    trace.sequence=completed_pdo_cycles_.load()+1;
++    trace.sequence=completed_pdo_cycles_.load()+1;trace.tid=pdo_thread_tid_;
 +    trace.wake_ns=pdo_wake_ns_;trace.deadline_ns=pdo_deadline_ns_;
 +    trace.send_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(send_start.time_since_epoch()).count();
++    trace.recv_begin_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(send_end.time_since_epoch()).count();
 +    trace.receive_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(io_end.time_since_epoch()).count();
 +    trace.period_ns=pdo_period_ns;
 +    trace.send_elapsed_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(send_end-send_start).count();
@@ -355,11 +356,11 @@
 +            (unsigned long long)trace.trigger_sequence,trace.count,position_session::PdoFaultTrace::post_cycles);
 +        for(unsigned i=0;i<trace.count;++i){
 +            const auto& s=trace.cycles[(trace.next+position_session::PdoFaultTrace::capacity-trace.count+i)%position_session::PdoFaultTrace::capacity];
-+            printf("[ECAT-FAULT-CYCLE] sequence=%llu first_bad=%u wake_ns=%lld deadline_ns=%lld wake_late_us=%.3f pre_io_us=%.3f period_us=%.3f send_ns=%lld receive_ns=%lld send_us=%.3f receive_us=%.3f io_cpu_us=%.3f dc_time_ns=%lld dc_adjust_ns=%lld sleep_rc=%d WKC=%d/%d\n",
-+                (unsigned long long)s.sequence,unsigned(s.sequence==trace.trigger_sequence),
++            printf("[ECAT-FAULT-CYCLE] tid=%d sequence=%llu first_bad=%u wake_ns=%lld deadline_ns=%lld wake_late_us=%.3f pre_io_us=%.3f period_us=%.3f send_ns=%lld receive_ns=%lld recv_begin_ns=%lld recv_end_ns=%lld send_us=%.3f receive_us=%.3f io_cpu_us=%.3f dc_time_ns=%lld dc_adjust_ns=%lld sleep_rc=%d WKC=%d/%d\n",
++                s.tid,(unsigned long long)s.sequence,unsigned(s.sequence==trace.trigger_sequence),
 +                (long long)s.wake_ns,(long long)s.deadline_ns,
 +                s.deadline_ns ? (s.wake_ns-s.deadline_ns)*1e-3 : 0.,s.wake_ns ? (s.send_ns-s.wake_ns)*1e-3 : 0.,s.period_ns*1e-3,
-+                (long long)s.send_ns,(long long)s.receive_ns,s.send_elapsed_ns*1e-3,s.receive_elapsed_ns*1e-3,s.io_cpu_ns*1e-3,
++                (long long)s.send_ns,(long long)s.receive_ns,(long long)s.recv_begin_ns,(long long)s.receive_ns,s.send_elapsed_ns*1e-3,s.receive_elapsed_ns*1e-3,s.io_cpu_ns*1e-3,
 +                (long long)s.dc_time_ns,(long long)s.dc_adjust_ns,s.sleep_result,s.wkc,s.expected_wkc);
 +        }
 +    }
@@ -374,3 +375,35 @@
      if (timing_cycles_ > 0) {
          printf("[ECAT-TIMING] total=%llu period_us[min/avg/max]=%llu/%.1f/%llu "
                 "over_1ms=%llu io_us[min/avg/max]=%llu/%.1f/%llu\n",
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -21,6 +21,7 @@
+ #include <sys/time.h>
+ #include <time.h>
+ #include <unistd.h>
++#include <sys/syscall.h>
+
+ extern "C" {
+ #include "ethercat.h"
+@@ -526,6 +527,8 @@
+ }
+
+ void EtherCATDriver::realtimeLoop() {
++    pdo_thread_tid_=int(::syscall(SYS_gettid));
++    printf("[SCHED-THREAD] role=pdo pid=%d tid=%d mono_ns=%lld\n",int(::getpid()),pdo_thread_tid_,(long long)position_session::steady_ns());
+     // cycle_thread_ 在 mlockall 之前创建，栈已分配好。
+     // 这里设置 SCHED_FIFO（mlockall 已执行，但本线程栈已 mlockall(MCL_CURRENT) 锁定，
+     // 无 page fault）。
+--- a/servo_control/thirdparty/soem/oshw/linux/nicdrv.c
++++ b/servo_control/thirdparty/soem/oshw/linux/nicdrv.c
+@@ -348,7 +348,9 @@
+       stack = &(port->redport->stack);
+    }
+    lp = sizeof(port->tempinbuf);
+-   bytesrx = recv(*stack->sock, (*stack->tempbuf), lp, 0);
++   /* The outer monotonic timer owns the wait budget. A socket timeout
++    * can sleep for milliseconds on Linux, even when set to one microsecond. */
++   bytesrx = recv(*stack->sock, (*stack->tempbuf), lp, MSG_DONTWAIT);
+    port->tempinbufs = bytesrx;
+
+    return (bytesrx > 0);
