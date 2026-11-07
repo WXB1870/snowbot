@@ -6,6 +6,8 @@ from bindu_runtime.execution_node import ExecutionNode, run_execution
 
 
 def assemble_snowbot(node, profile):
+    node.gripper_only = node.declare_parameter('gripper_only', False,
+        descriptor=ParameterDescriptor(read_only=True)).value
     if 'position_protocol' in node._parameter_overrides:
         raise ValueError('SNOWBOT_POSITION_PROTOCOL_REMOVED: session_v3 is fixed; remove position_protocol')
     mode = node.declare_parameter('execution_mode', 'position',

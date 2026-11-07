@@ -1,5 +1,6 @@
 """Native Snowbot gripper commands; measured state comes from PositionObservation."""
 import json
+import math
 import time
 from pathlib import Path
 from rcl_interfaces.msg import ParameterDescriptor
@@ -28,12 +29,13 @@ class SnowbotGrippers:
         prefix = node.get_parameter('vendor_namespace').value.rstrip('/')
         self.topics = {side: prefix+'/gripper/'+side+'_cmd' for side in SIDES}
         self.sent_positions = {}
+        enabled = node.robot_io.command_enabled or getattr(node, 'gripper_only', False)
         self.publishers = ({side: node.create_publisher(devices.array_type, topic, 1)
                             for side, topic in self.topics.items()}
-                           if node.robot_io.command_enabled and (cfg.get('calibrated') or
+                           if enabled and (cfg.get('calibrated') or
                                cfg.get('allow_uncalibrated_direct', False)) else {})
         self.core = GripperController(node.profile, cfg, self.send, self.health, node.now, self.arms_idle,
-                                      enabled=node.robot_io.command_enabled, require_driver_ack=False,
+                                      enabled=enabled, require_driver_ack=False,
                                       runtime_parameters=getattr(devices,'runtime_parameters',None))
         self.bind_services()
 
@@ -48,6 +50,15 @@ class SnowbotGrippers:
 
     def arms_idle(self):
         engine = getattr(self.node, 'engine', None)
+        if getattr(self.node, 'gripper_only', False):
+            from .session import CONTROL_NAMES, CONTROL_MASK
+            obs = self.devices.health.require_observation()
+            velocities = self.devices.io.last_feedback.joint_velocities
+            return bool(engine and not engine.stop_fault and not engine.lease_id and
+                not engine.active and not engine.stopping and obs.valid_mask & CONTROL_MASK == CONTROL_MASK and
+                all(math.isfinite(velocities.get(n, math.inf)) and
+                    abs(velocities[n]) <= self.node.profile.feedback_tolerances['joint_velocity']
+                    for n in CONTROL_NAMES))
         # Independent fingers may move during arm execution; fault barriers remain.
         return bool(engine and not engine.stop_fault and
             (self.core.cfg.get('independent_trigger_control',False) or
@@ -137,3 +148,47 @@ class SnowbotGrippers:
     @property
     def stopping(self):
         return bool(self.core and any(c['state'] == 'STOPPING' for c in self.core.channels.values()))
+
+
+def run_gripper_open(node, spin, clock=time.monotonic):
+    """One explicit endpoint operation; never acquires the arm execution lease."""
+    core = node.grippers.core
+    deadline = clock()+5.
+    while core.feedback_stamp == 0. or node.snowbot_devices.health.progress is None:
+        if clock() >= deadline:
+            raise RuntimeError('GRIPPER_FEEDBACK_WAIT_TIMEOUT')
+        spin()
+    core.lease('acquire', 'open-grippers', tuple(GROUPS.values()))
+    lease, epoch = core.lease_id, core.epoch
+    failure = None
+    try:
+        sequence = 0
+        for operation, side in (('authorize_direct', ''), ('open', 'left'), ('open', 'right')):
+            sequence += 1
+            core.command(operation, side, lease, epoch, sequence, node.now(),
+                         core.cfg['command_ttl'], load_state='unknown')
+        renewed = clock()
+        deadline = renewed+core.cfg['motion_timeout']+core.cfg['stop_timeout']
+        while not all(c['state'] == 'SUCCEEDED' for c in core.channels.values()):
+            for c in core.channels.values():
+                if c['state'] in ('FAILED', 'CANCELED'):
+                    raise RuntimeError(c['code'])
+            if clock() >= deadline:
+                raise RuntimeError('GRIPPER_OPEN_TIMEOUT')
+            if clock()-renewed >= .5:
+                core.lease('renew', lease_id=lease, epoch=epoch)
+                renewed = clock()
+            spin()
+    except BaseException as exc:
+        failure = exc
+    finally:
+        if core.lease_id == lease and core.epoch == epoch:
+            core.lease('release', lease_id=lease, epoch=epoch)
+        deadline = clock()+core.cfg['stop_timeout']
+        while any(c['state'] == 'STOPPING' for c in core.channels.values()) and clock() < deadline:
+            spin()
+        if core.fault or any(c['state'] == 'STOPPING' for c in core.channels.values()):
+            raise RuntimeError(str(failure or '')+';'+(core.fault or 'GRIPPER_STOP_UNCONFIRMED')) from failure
+    if failure is not None:
+        raise failure
+    return {side: core.q[JOINTS[side]] for side in SIDES}

@@ -383,13 +383,13 @@ def copy_service_output(name, child, writer):
 
 def base_commands(workspace, execution_mode='impedance'):
     vendor_env = {k:v for k,v in os.environ.items() if k in
-        ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS')}
+        ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML')}
     vendor_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     shell = ['bash', '--noprofile', '--norc', '-ec',
              'source "$1/tools/deployment/snowbot_vendor/env_118.sh" "$2/vendor"; shift 2; exec stdbuf -oL -eL "$@"',
              'snowbot-vendor', str(ROOT), str(workspace)]
     sudo = ['sudo', '-n', 'env', *[k+'='+vendor_env[k] for k in
-            ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS') if k in vendor_env]]
+            ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML') if k in vendor_env]]
     return (
         ('servo', [*sudo, *shell, 'ros2', 'run', 'snowbot_servo_control', 'servo_node',
                    '--ros-args', '--params-file', str(workspace/'vendor-position.yaml'),
@@ -617,9 +617,46 @@ def operator(bindu, workspace, frontend, *, home=False):
     return result
 
 
+def open_grippers(workspace):
+    import rclpy
+    from rclpy.signals import SignalHandlerOptions
+    from ament_index_python.packages import get_package_share_directory
+    from snowbot_bringup.runtime.run_vr import startup_lock
+    from snowbot_hardware.adapter import SnowbotAdapter
+    from snowbot_hardware.gripper_node import run_gripper_open
+
+    site = json.loads((workspace/'upper/site.json').read_text())['arguments']
+    namespace = site['namespace'].strip('/')
+    lock = startup_lock(int(os.environ.get('ROS_DOMAIN_ID', '0')), namespace)
+    cfg = Path(get_package_share_directory('snowbot_bringup'))/'config/robots/snowbot'
+    parameters = dict(runtime_mode='real', profile=str(cfg/'snowbot_real_position.json'),
+        execution_mode=site['execution_mode'], command_enabled='false', gripper_only='true',
+        startup_home='false', gripper_config=str(cfg/'grippers.json'),
+        parameters_config=str(cfg/'runtime_parameters.json'))
+    args = ['--ros-args', '-r', '__ns:=/'+namespace]
+    for key, value in parameters.items():
+        args += ['-p', key+':='+value]
+    node = None
+    try:
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        node = SnowbotAdapter()
+        print('OPEN_GRIPPERS: 请先可靠支撑杆/铲；仅打开双爪，不接管双臂或腰部。', flush=True)
+        measured = run_gripper_open(node, lambda:rclpy.spin_once(node, timeout_sec=.005))
+        print('OPEN_GRIPPERS_SUCCEEDED measured_q_rad='+json.dumps(measured), flush=True)
+    finally:
+        if node is not None:
+            # The gripper runner has already released and confirmed its stop.
+            node.closing = True
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        lock.close()
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator'))
+    parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
@@ -654,6 +691,8 @@ def main(argv=None):
         if options.command in ('prepare', 'build'):
             distro = require_platform()
         bindu = locked_bindu(existing, acquire=options.command in ('prepare', 'build'))
+        if options.command == 'open-grippers':
+            return open_grippers(workspace)
         if options.command == 'services':
             return services(bindu, workspace, 'position' if options.no_impedance else 'impedance')
         if options.command == 'operator':
@@ -688,7 +727,7 @@ def main(argv=None):
         with build_stage('receipt'):
             receipt(bindu, workspace)
         print('Built without starting hardware. Site configuration: '+str(workspace/'upper/site.json'))
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print('Snowbot deployment: '+str(exc), file=sys.stderr)
         return 2
     return 0

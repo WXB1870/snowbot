@@ -12,6 +12,7 @@ CONTROL_MASK = sum(SLOT_MASKS[g] for g in CONTROL_GROUPS)
 # ROS delivery can lag the local PDO sampler. Keep these budgets independent.
 ROS_FEEDBACK_TIMEOUT_S = .04
 PDO_MAX_AGE_S = .02
+SENSOR_MAX_AGE_S = .1
 TARGET_STREAM_MAX_TTL_S = .4
 SLOTS = [*(f'arm_l_joint_{i}' for i in range(1, 9)),
          *(f'arm_r_joint_{i}' for i in range(1, 9)),
@@ -226,13 +227,17 @@ class SessionHealth:
                 raise RuntimeError('SNOWBOT_TRAJECTORY_PROTOCOL_CONFLICT:'+layer)
         if self.execution_mode == 'impedance':
             # The optional vendor build places force data in this exact PDO sample.
+            if obs.valid_mask != 0xfffff:
+                raise RuntimeError('SNOWBOT_POSITION_FEEDBACK_INVALID')
             wrench = getattr(obs, 'wrench', ())
             age = getattr(obs, 'sensor_age', ())
             # ROS delivery age is already checked by require_observation().
             if (getattr(obs, 'sensor_valid_mask', 0) != 3 or
-                    obs.valid_mask != 0xfffff or not all(math.isfinite(x) for x in wrench) or
-                    not all(math.isfinite(a) and 0 <= a <= PDO_MAX_AGE_S for a in age)):
-                raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
+                    not all(math.isfinite(x) for x in wrench) or
+                    not all(math.isfinite(a) and 0 <= a <= SENSOR_MAX_AGE_S for a in age)):
+                # The RT watchdog owns consecutive-PDO confirmation during a session.
+                if acquiring or not obs.session_selected or obs.session_reason >= 3:
+                    raise RuntimeError('SNOWBOT_IMPEDANCE_SENSOR_INVALID')
         if obs.session_reason >= 2 and not acquiring:
             raise RuntimeError('SNOWBOT_SESSION_STOPPED:'+str(obs.session_reason))
 
@@ -300,7 +305,8 @@ def stop_diagnostic(health, engine, now):
         observed={key:getattr(obs, key, None) for key in ('boot_id', 'pdo_sample', 'session',
             'command_sequence', 'session_reason', 'session_selected', 'hold_valid', 'hold_sample',
             'hold_basis', 'trajectory_phase', 'reference_valid', 'output_valid',
-            'wkc', 'expected_wkc', 'valid_mask', 'pdo_age')},
+            'wkc', 'expected_wkc', 'valid_mask', 'pdo_age',
+            'sensor_valid_mask', 'sensor_data_no', 'sensor_age')},
         controlled_mask=CONTROL_MASK,
         operation_enabled_mask=health.messages['servo'].get('operation_enabled_mask'),
         stop_requested_at=io.stop_requested_at, feedback_stamp=fb.stamp, feedback_fresh=fresh,
