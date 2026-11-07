@@ -645,7 +645,12 @@ class PositionSessionDevices:
                 ('max_jerk', self.io.profile.jerk, self.trajectory_limits.get('trajectory_max_jerk', 162.))):
             if getattr(self, 'startup_hold_state', '') == 'homing':
                 ceiling = min(ceiling, TARGET_STREAM_LIMIT_DEFAULTS['trajectory_'+field])
-            setattr(msg.trajectory, field, [min(ceiling, getter(n)) for n in CONTROL_NAMES])
+            limits = [min(ceiling, getter(n)) for n in CONTROL_NAMES]
+            if getattr(self, 'startup_hold_state', '') == 'homing' and field == 'max_velocity':
+                waist_speed = parameters_for(self, 'execution')['startup_home_waist_max_velocity_rad_s']
+                limits = [min(value, waist_speed) if n in GROUPS['waist'] else value
+                          for n, value in zip(CONTROL_NAMES, limits)]
+            setattr(msg.trajectory, field, limits)
         msg.command.l_arm_position = [float(target[n]) for n in GROUPS['left_arm']]
         msg.command.r_arm_position = [float(target[n]) for n in GROUPS['right_arm']]
         msg.waist_position = [float(target[n]) for n in GROUPS['waist']]

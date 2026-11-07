@@ -20,7 +20,9 @@ Orin 首次选择 `python3 -m tools.deployment.deploy prepare --with-impedance -
 
 完成构建后，按[现场配置](docs/运行与验证.md#首次现场配置)设置设备、标定和 PICO 网络，再按[启动顺序](docs/运行与验证.md#日常启动)运行。开发和仿真见[仿真与浏览器操作台](docs/运行与验证.md#仿真与浏览器操作台)。
 
-终端2可选 `bash tools/run_robot.sh vr --home` 或 `bash tools/run_robot.sh replay --home`：先确认原位使能保持，再通过现有轨迹生成器平滑将双臂和腰部回关节零位，头部／夹爪不参与；到位、停稳后开放业务。回零使用现有默认慢速上限（速度≤0.25 rad/s、加速度≤0.5 rad/s²、jerk≤162 rad/s³，同时服从关节配置），不改业务限值。默认不回零，Ctrl+C继续走原有停止流程；replay随后仍执行原有Prepare。
+终端2可选 `bash tools/run_robot.sh vr --home` 或 `bash tools/run_robot.sh replay --home`：先确认原位使能保持，再通过现有轨迹生成器平滑将双臂和腰部回关节零位，头部／夹爪不参与；到位、停稳后开放业务。回零时双臂速度≤0.25 rad/s，腰部两轴速度≤0.05 rad/s（由 `runtime_parameters.json` 的 `execution.startup_home_waist_max_velocity_rad_s` 调整）；加速度≤0.5 rad/s²、jerk≤162 rad/s³，同时服从关节配置，不改业务限值。默认不回零，Ctrl+C继续走原有停止流程；replay随后仍执行原有Prepare。
+
+VR 长按 A 的动态准备回位默认时长为15秒，由 `teleop.json` 的 `modes.real.prepare_duration` 调整；实际时长仍可被腰部同步约束延长，已认证动作库转场不使用此参数。
 
 直连和远程都用 `bash tools/run_robot.sh vr` 启动。手柄输入有效期和换源静默时间均为 1 秒，双手配对窗口为 50 毫秒，到帧间隔告警阈值为 1 秒。统一在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json) 的 `pico` 和 `diagnostics` 中调整。已有现场配置中的 `remote_vr` 覆盖值对所有 VR 连接生效。
 

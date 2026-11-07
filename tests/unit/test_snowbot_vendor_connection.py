@@ -416,6 +416,38 @@ class DeploymentEntryTests(unittest.TestCase):
                 self.assertEqual(operator.call_args.kwargs, {'home': enabled})
             self.assertEqual(deploy.main(['services', '--home']), 2)
 
+    def test_home_waist_speed_cap_preserves_arm_and_business_limits(self):
+        import ast
+        from types import SimpleNamespace as S
+        from bindu_contracts.profile import Profile
+        from bindu_contracts.resources import package_share
+        from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS
+        from snowbot_hardware.parameters import load_parameters, parameters_for
+        from snowbot_hardware.protocol import GROUPS
+        from snowbot_hardware.session import CONTROL_NAMES
+        path = ROOT/'src/snowbot_hardware/snowbot_hardware/position_session.py'
+        cls = next(n for n in ast.parse(path.read_text()).body
+                   if isinstance(n, ast.ClassDef) and n.name == 'PositionSessionDevices')
+        method = next(n for n in cls.body if getattr(n, 'name', '') == '_send_packet')
+        limits = next(n for n in method.body if isinstance(n, ast.For) and 'max_velocity' in ast.unparse(n.iter))
+        code = compile(ast.Module(body=[limits], type_ignores=[]), str(path), 'exec')
+        profile = Profile.load(package_share('snowbot_bringup')/'config/robots/snowbot/snowbot_real_position.json')
+        parameters = load_parameters()
+        self.assertEqual(parameters['execution']['startup_home_waist_max_velocity_rad_s'], .05)
+        device = S(io=S(profile=profile), runtime_parameters=parameters,
+                   trajectory_limits=dict(trajectory_max_velocity=1.25, trajectory_max_acceleration=4.5,
+                                          trajectory_max_jerk=259.2))
+        for state in ('homing', 'ready', 'stopping'):
+            device.startup_hold_state = state
+            msg = S(trajectory=S())
+            exec(code, dict(self=device, msg=msg, CONTROL_NAMES=CONTROL_NAMES, GROUPS=GROUPS,
+                            TARGET_STREAM_LIMIT_DEFAULTS=TARGET_STREAM_LIMIT_DEFAULTS, parameters_for=parameters_for))
+            expected = [min(profile.speed(n), .05 if n in GROUPS['waist'] else .25)
+                        if state == 'homing' else min(profile.speed(n), 1.25) for n in CONTROL_NAMES]
+            self.assertEqual(msg.trajectory.max_velocity, expected)
+            self.assertEqual(msg.trajectory.max_acceleration,
+                             [min(profile.acceleration(n), .5 if state == 'homing' else 4.5) for n in CONTROL_NAMES])
+
     def test_home_waits_for_powered_hold_and_measured_and_nominal_arrival(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock
