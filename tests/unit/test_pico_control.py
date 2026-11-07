@@ -617,7 +617,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(node.prepare_positions, dict(zip(NAMES, manifest['nodes'][manifest['home_node']])))
         self.assertFalse(hasattr(node, 'primitive_grasp_guard'))
 
-    async def test_primitive_a_targets_side_scoop_and_never_falls_back_while_holding(self):
+    async def test_primitive_a_uses_dynamic_prepare_when_start_is_not_a_certified_node(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock, AsyncMock, patch
         from snowbot_teleop.replay import NAMES
@@ -637,15 +637,16 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         node.move.reset_mock()
         for mode in ('bimanual_tool','independent_arms'):
             node.control.teleop_mode=mode
-            with patch('snowbot_teleop.replay.plan_from_current',
-                       side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
-                with self.assertRaisesRegex(RuntimeError,'UNKNOWN_START'):
-                    await node.prepare_primitive(S(token=1))
-            node.move.assert_not_awaited()
-        node.control.load='empty'
+            for load in ('held','unknown','empty'):
+                node.control.load=load
+                with patch('snowbot_teleop.replay.plan_from_current',
+                           side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
+                    self.assertFalse(await node.prepare_primitive(S(token=1)))
+                node.move.assert_not_awaited()
         with patch('snowbot_teleop.replay.plan_from_current',
-                   side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
-            self.assertFalse(await node.prepare_primitive(S(token=1)))
+                   side_effect=RuntimeError('REPLAY_MOTION_LIMITS')):
+            with self.assertRaisesRegex(RuntimeError,'REPLAY_MOTION_LIMITS'):
+                await node.prepare_primitive(S(token=1))
 
 
     def test_real_impedance_enable_flag_retains_simulation_and_mode_guards(self):
@@ -686,6 +687,12 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await node.prepare_primitive(S(token=1)))
             self.assertEqual(planner.call_args.args[2],held['positions'])
         node.move.assert_awaited_once()
+        node.move.reset_mock()
+        node.control.load='unknown'
+        with patch('snowbot_teleop.replay.plan_from_current',
+                   side_effect=RuntimeError('REPLAY_UNKNOWN_START')):
+            self.assertFalse(await node.prepare_primitive(S(token=1)))
+        node.move.assert_not_awaited()
 
 class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_exit_is_revalidated_before_full_prepare(self):

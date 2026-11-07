@@ -643,10 +643,8 @@ class PicoNode(RuntimeNode):
         try:
             plan = plan_from_current(self.primitive_library, 'Home', anchor)
         except RuntimeError as exc:
-            if (str(exc).startswith('REPLAY_UNKNOWN_START') and
-                    self.control.teleop_mode == 'independent_arms' and
-                    (self.control.load == 'empty' or self.unheld_test or self.feedback().modes == ('open', 'open'))):
-                # Ordinary-arm A remains an explicit empty-hand setup request.
+            if str(exc).startswith('REPLAY_UNKNOWN_START'):
+                # A validates a dynamic return when no certified node matches.
                 return False
             raise
         self.prepare_limit_reference=self.prepare_limit_start=self.prepare_recovery=None
