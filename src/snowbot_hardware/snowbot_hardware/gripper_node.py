@@ -154,9 +154,14 @@ def run_gripper_open(node, spin, clock=time.monotonic):
     """One explicit endpoint operation; never acquires the arm execution lease."""
     core = node.grippers.core
     deadline = clock()+5.
-    while core.feedback_stamp == 0. or node.snowbot_devices.health.progress is None:
+    # DDS can deliver feedback before resolving the command receiver's name.
+    while (core.feedback_stamp == 0. or node.snowbot_devices.health.progress is None or
+           not all(any(info.node_namespace.rstrip('/')+'/'+info.node_name == node.snowbot_devices.receivers['head']
+                       and info.topic_type == 'std_msgs/msg/Float64MultiArray'
+                       for info in node.snowbot_devices.graph.get_subscriptions_info_by_topic(node.grippers.topics[side]))
+                   for side in SIDES)):
         if clock() >= deadline:
-            raise RuntimeError('GRIPPER_FEEDBACK_WAIT_TIMEOUT')
+            raise RuntimeError('GRIPPER_FEEDBACK_OR_RECEIVER_WAIT_TIMEOUT')
         spin()
     core.lease('acquire', 'open-grippers', tuple(GROUPS.values()))
     lease, epoch = core.lease_id, core.epoch
