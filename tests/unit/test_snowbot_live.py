@@ -105,7 +105,7 @@ for(const mode of ['independent_arms','bimanual_tool']){
 
 
 class ModelVisibilityTests(unittest.TestCase):
-    def test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics(self):
+    def test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics(self, geometry_kind='rod'):
         import hashlib
         import threading
         import numpy as np
@@ -120,17 +120,18 @@ class ModelVisibilityTests(unittest.TestCase):
         geom=Mock();meshcat=S(Visualizer=lambda **kw:viewer,geometry=geom)
         config=dict(left_to_tool=np.eye(4).ravel().tolist(),left_frame='left',right_frame='right',
             demo=dict(ground={'z_in_base_m':0.},shaft_axis_in_tool=[0,0,1],grip_offset_m=[0,0,0],
-                      shaft_from_left_grip_m=[-.1,.1],shaft_radius_m=.01,geometry_kind='rod'))
+                      shaft_from_left_grip_m=[-.1,.1],shaft_radius_m=.01,geometry_kind=geometry_kind))
         def server(*args):
             args[4].put(('local','http://local/'))
             args[8].publish=lambda state:published.append(state)
+            if geometry_kind=='none':args[5].put(dict(action='tool',enabled=True))
         fake_thread=lambda target,**kw:S(start=target,is_alive=lambda:not stop.is_set(),join=Mock())
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'model.urdf';path.write_text('<robot name="test"/>')
             meta=dict(schema=1,run_id='run',profile_hash='profile',runtime_mode='simulation',
                 device_backend='kinematic',valid=True,written_at=10.,feedback_stamp=10.,q={'joint':.2},
                 display_urdf=str(path),display_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                joint_names=['joint'],pico={'run_id':'run','stamp':10.},instance_id='executor')
+                joint_names=['joint'],pico={'run_id':'run','stamp':10.,'teleop_mode':'bimanual_tool'},instance_id='executor')
             calls=[]
             def read():
                 index=len(calls);calls.append(index)
@@ -162,6 +163,14 @@ class ModelVisibilityTests(unittest.TestCase):
                          ['waiting_for_feedback','measured','last_measured','measured'])
         self.assertEqual([s['applied_frames'] for s in published],[0,1,1,2])
         self.assertTrue(all(s['robot_commands_published']==0 for s in published))
+        if geometry_kind=='none':
+            geom.Cylinder.assert_not_called()
+            geom.Box.assert_not_called()
+            nodes['shovel'].delete.assert_called_once()
+            self.assertTrue(all(not s['tool_visible'] for s in published))
+
+    def test_unconfigured_tool_has_no_mesh_and_cannot_be_toggled_visible(self):
+        self.test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics('none')
 
 
 class LiveFeedbackTests(unittest.TestCase):

@@ -361,6 +361,7 @@ def serve(args, read_state=None, stop=None):
         raise ValueError('LIVE_MODEL_JOINT_LAYOUT')
     config = display_tool_config(data)
     recipe = config['demo']
+    tool_present=recipe.get('geometry_kind')!='none'
     ready, views = queue.Queue(1), queue.Queue(8)
     model_status = LatestState()
     failures = []
@@ -387,6 +388,7 @@ def serve(args, read_state=None, stop=None):
         vis = MeshcatVisualizer(model, collision, visual)
         vis.initViewer(viewer=viewer, open=False)
         viewer['snowbot'].set_property('visible',False)
+        viewer['shovel'].delete()
         viewer['shovel'].set_property('visible',False)
         vis.loadViewerModel(rootNodeName='snowbot')
         # Assemble meshes while hidden; neutral is never a measured pose.
@@ -397,19 +399,20 @@ def serve(args, read_state=None, stop=None):
         ground = np.eye(4);ground[2,3]=recipe['ground']['z_in_base_m']
         viewer['/Grid'].set_transform(ground)
         mount = np.array(config['left_to_tool']).reshape(4,4)
-        axis = np.asarray(recipe['shaft_axis_in_tool'])
-        rear = (np.linalg.inv(mount) @ np.r_[recipe['grip_offset_m'],1.])[:3]
-        ends = recipe['shaft_from_left_grip_m']
-        ref = np.eye(3)[np.argmin(abs(axis))]
-        tangent = np.cross(ref,axis); tangent /= np.linalg.norm(tangent)
-        tf = np.eye(4);tf[:3,:3]=np.column_stack((tangent,axis,np.cross(tangent,axis)))
-        tf[:3,3]=rear+axis*sum(ends)/2
-        viewer['shovel/shaft'].set_object(geom.Cylinder(ends[1]-ends[0],recipe['shaft_radius_m']),
-                                        geom.MeshLambertMaterial(color=0x996b40))
-        viewer['shovel/shaft'].set_transform(tf)
-        if recipe.get('geometry_kind')!='rod':
-            viewer['shovel/tray'].set_object(geom.Box(recipe['pan_size_m']),geom.MeshLambertMaterial(color=0x4386ba))
-            tf=np.eye(4);tf[:3,3]=recipe['pan_center_m'];viewer['shovel/tray'].set_transform(tf)
+        if tool_present:
+            axis = np.asarray(recipe['shaft_axis_in_tool'])
+            rear = (np.linalg.inv(mount) @ np.r_[recipe['grip_offset_m'],1.])[:3]
+            ends = recipe['shaft_from_left_grip_m']
+            ref = np.eye(3)[np.argmin(abs(axis))]
+            tangent = np.cross(ref,axis); tangent /= np.linalg.norm(tangent)
+            tf = np.eye(4);tf[:3,:3]=np.column_stack((tangent,axis,np.cross(tangent,axis)))
+            tf[:3,3]=rear+axis*sum(ends)/2
+            viewer['shovel/shaft'].set_object(geom.Cylinder(ends[1]-ends[0],recipe['shaft_radius_m']),
+                                            geom.MeshLambertMaterial(color=0x996b40))
+            viewer['shovel/shaft'].set_transform(tf)
+            if recipe.get('geometry_kind')!='rod':
+                viewer['shovel/tray'].set_object(geom.Box(recipe['pan_size_m']),geom.MeshLambertMaterial(color=0x4386ba))
+                tf=np.eye(4);tf[:3,3]=recipe['pan_center_m'];viewer['shovel/tray'].set_transform(tf)
         for side,color in (('left',0x70aaff),('right',0x5bd6bb)):
             viewer[side+'_tip'].set_property('visible',False)
             viewer[side+'_tip'].set_object(geom.Sphere(.018),geom.MeshLambertMaterial(color=color))
@@ -452,7 +455,8 @@ def serve(args, read_state=None, stop=None):
                 pose_source='measured'
                 pico=value.get('pico',{})
                 left_pose=vis.data.oMf[model.getFrameId(config['left_frame'])].homogeneous
-                tool_pose,tool_source=tool_display_pose(value,left_pose,mount,time.time())
+                tool_pose,tool_source=(tool_display_pose(value,left_pose,mount,time.time())
+                                       if tool_present else (None,'unconfigured'))
                 if tool_pose is not None:
                     viewer['shovel'].set_transform(tool_pose)
                 tool_visible=bool(tool_enabled and tool_pose is not None)
