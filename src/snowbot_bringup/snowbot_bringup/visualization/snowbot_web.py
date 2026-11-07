@@ -263,7 +263,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
 
     class LocalApplication(tornado.web.Application):
         def listen(self, port, **kwargs):
-            server = super().listen(port, address=host, **kwargs)
+            server = super().listen(port, address='0.0.0.0', **kwargs)
             http_servers.append(server)
             return server
 
