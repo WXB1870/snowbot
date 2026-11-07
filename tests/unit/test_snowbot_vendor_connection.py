@@ -136,6 +136,55 @@ class PositionReleaseTests(unittest.TestCase):
                 '-I',str(output),str(source),'-o',str(binary)],check=True,capture_output=True,text=True)
             subprocess.run([str(binary)],check=True,capture_output=True,text=True)
 
+    def test_first_pdo_loss_keeps_bounded_history_and_publishes_after_freeze(self):
+        compiler=shutil.which('c++')
+        if not compiler:self.skipTest('C++ compiler unavailable')
+        source=self.work/'pdo-fault-trace.cpp'
+        source.write_text(r'''
+#include "servo_control/position_observation.h"
+#include <cassert>
+#include <thread>
+using position_session::PdoCycleTiming;
+using position_session::PdoFaultTrace;
+PdoCycleTiming cycle(unsigned seq,bool good) {
+ PdoCycleTiming s;s.sequence=seq;s.wkc=good ? 67 : 27;s.expected_wkc=67;
+ s.wake_ns=seq*1000000LL;s.deadline_ns=s.wake_ns-1000;
+ s.send_ns=s.wake_ns+2000;s.receive_ns=s.send_ns+150000;s.io_cpu_ns=12345;
+ s.dc_time_ns=seq*1000000LL+50000;return s;
+}
+const PdoCycleTiming& at(const PdoFaultTrace::Snapshot& s,unsigned i) {
+ return s.cycles[(s.next+PdoFaultTrace::capacity-s.count+i)%PdoFaultTrace::capacity];
+}
+int main() {
+ PdoFaultTrace trace;PdoFaultTrace::Snapshot out;
+ trace.record(cycle(1,false));trace.finish();assert(!trace.read_once(out));
+ for(unsigned i=2;i<=50;++i)trace.record(cycle(i,true));
+ trace.record(cycle(51,false));assert(!trace.read_once(out));
+ for(unsigned i=52;i<=58;++i)trace.record(cycle(i,true));
+ assert(!trace.read_once(out));trace.record(cycle(59,true));
+ assert(trace.read_once(out));assert(out.count==32 && out.trigger_sequence==51);
+ assert(at(out,0).sequence==28 && at(out,31).sequence==59);
+ assert(at(out,23).wkc==27 && at(out,23).io_cpu_ns==12345);
+ trace.record(cycle(60,false));trace.finish();assert(!trace.read_once(out));
+ assert(at(out,31).sequence==59);
+ PdoFaultTrace partial;partial.record(cycle(1,true));partial.record(cycle(2,false));
+ partial.finish();assert(partial.read_once(out));assert(out.count==2 && out.trigger_sequence==2);
+ PdoFaultTrace concurrent;
+ std::thread writer([&]{for(unsigned i=1;i<=2000;++i)concurrent.record(cycle(i,i<61));});
+ while(!concurrent.read_once(out))std::this_thread::yield();
+ writer.join();assert(out.trigger_sequence==61 && out.count==32);
+ for(unsigned i=0;i<32;++i){
+  const auto& s=at(out,i);assert(s.sequence==38+i);
+  assert(s.receive_ns-s.send_ns==150000 && s.wake_ns-s.deadline_ns==1000);
+ }
+}
+''')
+        binary=self.work/'pdo-fault-trace'
+        subprocess.run([compiler,'-std=c++17','-O2','-Wall','-Wextra','-Werror','-pthread',
+            '-I',str(self.release/'src/servo_control/include'),str(source),'-o',str(binary)],
+            check=True,capture_output=True,text=True)
+        subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=5)
+
     def test_waist_units_are_explicit_and_use_actual_pdo_writer(self):
         from tests.integration.validate_position_native import write_pdo_check, write_drive_cycle_check
         compiler=shutil.which('c++')

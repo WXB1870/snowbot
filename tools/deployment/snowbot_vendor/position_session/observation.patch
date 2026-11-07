@@ -99,7 +99,7 @@
      std::atomic<bool> motor_enable_mask_[TOTAL_SLAVES]{};  // 单电机使能 mask
 --- a/servo_control/include/servo_control/position_observation.h
 +++ b/servo_control/include/servo_control/position_observation.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,99 @@
 +#pragma once
 +#include <array>
 +#include <atomic>
@@ -147,6 +147,47 @@
 +  if(middle_.load(std::memory_order_acquire)&4u)
 +   front_=middle_.exchange(front_,std::memory_order_acq_rel)&3u;
 +  return slots_[front_];
++ }
++};
++// Single PDO writer freezes the first loss window; readers only copy after
++// release/acquire publication. No RT allocation, lock, formatting or bus query.
++struct PdoCycleTiming {
++ uint64_t sequence=0;
++ int64_t wake_ns=0,deadline_ns=0,send_ns=0,receive_ns=0;
++ int64_t period_ns=0,send_elapsed_ns=0,receive_elapsed_ns=0,io_cpu_ns=0;
++ int64_t dc_time_ns=0,dc_adjust_ns=0;
++ int wkc=0,expected_wkc=0,sleep_result=0;
++};
++class PdoFaultTrace {
++public:
++ static constexpr unsigned capacity=32,post_cycles=8;
++ struct Snapshot {
++  std::array<PdoCycleTiming,capacity> cycles{};
++  unsigned count=0,next=0;uint64_t trigger_sequence=0;
++ };
++private:
++ Snapshot window_{};
++ bool armed_=false;unsigned remaining_=0;
++ std::atomic<bool> ready_{false};
++ mutable std::atomic<bool> printed_{false};
++public:
++ void record(const PdoCycleTiming& cycle) {
++  if(ready_.load(std::memory_order_relaxed))return;
++  window_.cycles[window_.next]=cycle;
++  window_.next=(window_.next+1)%capacity;
++  if(window_.count<capacity)++window_.count;
++  if(window_.trigger_sequence){
++   if(--remaining_==0)ready_.store(true,std::memory_order_release);
++  }else if(armed_ && cycle.expected_wkc>0 && cycle.wkc!=cycle.expected_wkc){
++   window_.trigger_sequence=cycle.sequence;remaining_=post_cycles;
++  }
++  if(cycle.expected_wkc>0 && cycle.wkc==cycle.expected_wkc)armed_=true;
++ }
++ // Only after the PDO producer has joined: retain even a short final window.
++ void finish() {if(window_.trigger_sequence)ready_.store(true,std::memory_order_release);}
++ bool read_once(Snapshot& out) const {
++  if(!ready_.load(std::memory_order_acquire) || printed_.exchange(true))return false;
++  out=window_;return true;
 + }
 +};
 +inline uint32_t fault_mask(const Observation& s) {
