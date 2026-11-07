@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "teleop": {
-    "_comment": "默认时序（秒）。input_max_age_s 是通用工具输入默认有效期，PICO 手柄输入使用 pico.remote_input_timeout_s，feedback_max_age_s 是机器人反馈有效期，command_ttl_s 是运动命令有效期。",
-    "input_max_age_s": 0.25,
-    "feedback_max_age_s": 0.2,
-    "command_ttl_s": 0.8
+    "_comment": "测试阶段宽松时序（秒）。input_max_age_s 是通用工具输入默认有效期，PICO 手柄输入使用 pico.remote_input_timeout_s，feedback_max_age_s 是上层机器人反馈有效期，command_ttl_s 是运动命令有效期；底层PDO和驱动保护不随此放宽。",
+    "input_max_age_s": 1.0,
+    "feedback_max_age_s": 0.5,
+    "command_ttl_s": 1.5
   },
   "solver": {
     "_comment": "单位为秒。timeout_s 是单次求解预算，worker_timeout_s 是等待求解进程回复的时限，startup_timeout_s 只用于启动。",
-    "timeout_s": 0.08,
-    "worker_timeout_s": 0.23,
+    "timeout_s": 0.15,
+    "worker_timeout_s": 0.5,
     "startup_timeout_s": 30.0
   },
   "pico": {
@@ -23,19 +23,19 @@
     "prepare_command_period_s": 0.04,
     "prepare_command_ttl_s": 0.25,
     "reference_lookahead_s": 0.12,
-    "rpc_timeout_s": 2.0,
+    "rpc_timeout_s": 5.0,
     "stop_wait_margin_s": 1.0,
     "renewal_period_s": 0.2,
     "stop_renewal_period_s": 0.3,
     "renewal_timeout_s": 2.0,
     "motion_completion_grace_s": 6.0,
     "validation_worker_timeout_s": 30.0,
-    "remote_input_timeout_s": 0.6,
+    "remote_input_timeout_s": 1.0,
     "remote_source_timeout_s": 1.0,
     "controller_fps": 60
   },
   "gripper": {
-    "vr_input_max_age_s": 0.25,
+    "vr_input_max_age_s": 1.0,
     "max_tick_gap_s": 0.1,
     "lease_ttl_s": 2.0,
     "request_ttl_s": 0.25
@@ -63,7 +63,7 @@
     "health_period_s": 1.0,
     "wrench_period_s": 0.01,
     "input_gap_warning_s": 1.0,
-    "publish_warning_s": 0.02,
+    "publish_warning_s": 0.1,
     "pdo_before_s": 10.0,
     "pdo_after_s": 30.0,
     "pdo_capacity": 1200,
@@ -73,9 +73,9 @@
   },
   "display": {
     "poll_ms": 150,
-    "request_timeout_ms": 1800,
-    "stale_ms": 1500,
-    "reconnect_ms": 1500,
+    "request_timeout_ms": 5000,
+    "stale_ms": 3000,
+    "reconnect_ms": 3000,
     "report_ms": 3000
   }
 }

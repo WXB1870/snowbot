@@ -13,7 +13,7 @@ CONTROL_MASK = sum(SLOT_MASKS[g] for g in CONTROL_GROUPS)
 ROS_FEEDBACK_TIMEOUT_S = .04
 PDO_MAX_AGE_S = .02
 SENSOR_MAX_AGE_S = .1
-TARGET_STREAM_MAX_TTL_S = .8
+TARGET_STREAM_MAX_TTL_S = 1.5
 SLOTS = [*(f'arm_l_joint_{i}' for i in range(1, 9)),
          *(f'arm_r_joint_{i}' for i in range(1, 9)),
          'head_joint_1', 'head_joint_2', 'body_joint_1', 'body_joint_2']

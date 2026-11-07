@@ -82,7 +82,7 @@ void stale_and_invalid(){
 }
 void target_pause_window(){
  using namespace bindu::execution;
- static_assert(maximum_target_ttl==800000000&&maximum_target_pause_ttl==2000000000LL);
+ static_assert(maximum_target_ttl==1500000000&&maximum_target_pause_ttl==2000000000LL);
  const int64_t now=1000000000;Meta take{44,1,now,now+200000000,1};assert(fresh(take,now));
  auto over=take;over.expires=over.stamp+maximum_target_ttl+1;assert(!fresh(over,now,maximum_target_pause_ttl));
  auto target=take;target.expires=target.stamp+maximum_target_ttl;
@@ -113,7 +113,7 @@ void target_pause_window(){
  }
  assert(feasible>1000&&impossible>0);
  TargetSnapshot unsafe;unsafe.q=seed();unsafe.q[0]=upper[0]-.0001;unsafe.v[0]=.25;unsafe.valid=true;unsafe.effective_ros=unsafe.effective_steady=pause.stamp+10000000;rejects([&]{TrajectoryQueue::prepare_target(w,pause,unsafe,unsafe.q);});
- std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 800ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
+ std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 1500ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
 }
 
 void allowed_limit_seeds(){

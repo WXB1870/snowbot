@@ -14,12 +14,12 @@ class RuntimeParameterTests(unittest.TestCase):
 
     def test_default_snapshot_preserves_existing_policy(self):
         cfg=load_parameters()
-        self.assertEqual(cfg['pico']['remote_input_timeout_s'],.6)
-        self.assertEqual(cfg['teleop']['feedback_max_age_s'],.2)
-        self.assertEqual(cfg['teleop']['command_ttl_s'],.8)
+        self.assertEqual(cfg['pico']['remote_input_timeout_s'],1.)
+        self.assertEqual(cfg['teleop']['feedback_max_age_s'],.5)
+        self.assertEqual(cfg['teleop']['command_ttl_s'],1.5)
         self.assertEqual(cfg['pico']['prepare_command_period_s'],.04)
         self.assertEqual(cfg['pico']['prepare_command_ttl_s'],.25)
-        self.assertEqual(cfg['gripper']['vr_input_max_age_s'],.25)
+        self.assertEqual(cfg['gripper']['vr_input_max_age_s'],1.)
         self.assertEqual(cfg['execution']['stop_confirmation_window_s'],.1)
         self.assertEqual(cfg['diagnostics']['pdo_capacity'],1200)
         self.assertEqual(cfg['display']['poll_ms'],150)
@@ -81,20 +81,20 @@ class RuntimeParameterTests(unittest.TestCase):
         for name in ('bimanual_snowbot_real.json',):
             original=load_tool_config(base/name)
             effective=apply_tool_timing(original,load_parameters())
-            self.assertEqual(effective['input_max_age'], .6)
+            self.assertEqual(effective['input_max_age'], 1.)
             for key in ('feedback_max_age','command_max_age',
                         'solve_timeout_us','worker_timeout','worker_startup_timeout'):
                 self.assertEqual(effective[key],original[key],(name,key))
-            selected=self.load({'pico':{'remote_input_timeout_s':.7},'teleop':{'feedback_max_age_s':.15,'command_ttl_s':.35},
+            selected=self.load({'pico':{'remote_input_timeout_s':1.2},'teleop':{'input_max_age_s':.25,'feedback_max_age_s':.15,'command_ttl_s':.35},
                                 'solver':{'timeout_s':.1,'worker_timeout_s':.4,'startup_timeout_s':10.}})
             changed=apply_tool_timing(original,selected)
             self.assertEqual([changed[k] for k in ('input_max_age','feedback_max_age','command_max_age',
                               'solve_timeout_us','worker_timeout','worker_startup_timeout')],
-                             [.7,.15,.35,100000,.4,10.])
+                             [1.2,.15,.35,100000,.4,10.])
             self.assertIs(type(changed['solve_timeout_us']),int)
             keys = ('input_max_age','feedback_max_age','command_max_age','solve_timeout_us',
                     'worker_timeout','worker_startup_timeout')
-            self.assertEqual([original[key] for key in keys], [.25,.2,.8,80000,.23,30.])
+            self.assertEqual([original[key] for key in keys], [1.,.5,1.5,150000,.5,30.])
             self.assertTrue(set(keys).isdisjoint(json.loads((base/name).read_text())))
 
     def test_shared_input_deadline_reaches_actual_session(self):
@@ -143,7 +143,7 @@ class RuntimeParameterTests(unittest.TestCase):
             with patch.dict('sys.modules',modules):
                 exec(compile(ast.Module(body=init.body[start:start+2],type_ignores=[]),str(base_source),'exec'),
                      dict(self=node,load_tool_config=load_tool_config,Path=Path,tool_config_loader=namespace['load_tool']))
-            self.assertEqual(node.cfg['command_max_age'],.8)
+            self.assertEqual(node.cfg['command_max_age'],1.5)
             self.assertEqual(node.cfg['solve_timeout_us'],100000)
             self.assertEqual(node.cfg['worker_timeout'],.4)
             self.assertEqual(node.runtime_parameters['solver']['timeout_s'],.1)
@@ -279,8 +279,8 @@ class RuntimeParameterTests(unittest.TestCase):
                     {'pico':{'trigger_release_threshold':.8}},
                     {'diagnostics':{'pdo_sample_hz':200}},
                     {'execution':{'startup_hold_ttl_s':.5}},
-                    {'teleop':{'command_ttl_s':.81}},
-                    {'solver':{'timeout_s':.3}},
+                    {'teleop':{'command_ttl_s':1.51}},
+                    {'solver':{'timeout_s':.6}},
                     {'execution':{'target_stream_brake_lead_s':.4}}):
             with self.subTest(value=bad),self.assertRaises(ValueError):self.load(bad)
 
