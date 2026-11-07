@@ -277,6 +277,26 @@ def keep_service_log(line, previous_wkc, now):
     return True
 
 
+def failure_banner(message):
+    text = '\n'+'!'*72+'\n!!! '+message.rstrip()+'\n'+'!'*72+'\n'
+    return '\033[1;31m'+text+'\033[0m' if sys.stderr.isatty() and 'NO_COLOR' not in os.environ else text
+
+
+def base_wait_status(states):
+    lines, fault = [], False
+    for layer in ('servo', 'middle', 'upper'):
+        state = states.get(layer)
+        if state is None:
+            lines.append(layer+': 未收到状态')
+            continue
+        reason = getattr(state, 'reason', '') or '-'
+        status = getattr(state, 'state', 'unknown')
+        fault |= status == 'initialization_failed' or bool(re.search('fault|invalid|failed|pdo_stale', reason, re.I))
+        lines.append(f'{layer}: initialized={int(state.startup_complete)} '
+                     f'feedback_ready={int(getattr(state,"feedback_ready",False))} state={status} reason={reason}')
+    return '\n'.join(lines), fault
+
+
 class ServiceConsole:
     """Select brief console messages after the complete output has been saved."""
     def __init__(self):
@@ -297,6 +317,8 @@ class ServiceConsole:
         raw = line.removeprefix(f'[{stream}] ')
         value = console_log(raw, stream)
         if value is None:
+            if re.search(r'\b(?:ERROR|FATAL|START_FAILED|SERVICE_EXITED)\b|\[ECAT-FAULT\]', raw):
+                return failure_banner(line)
             if re.search(r'\[EtherCAT\] \d+ slaves found|\b(?:WARN(?:ING)?|ERROR|FATAL|FAULT|FAILED|TARGET_REJECTED|DEVICE_FEEDBACK_DETAIL|Traceback|\w*Error|\w*Exception)\b|警告|错误|失败|异常|回零|回位|安全退出', raw, re.IGNORECASE):
                 return line
             if 'TARGET_PREDICTION ' in raw:
@@ -316,10 +338,12 @@ class ServiceConsole:
                 return None
             count = previous[2]
             previous[1:] = [now, 0]
-            return f'[{stream}] {key[2]} (repeat +{count}; details in log)\n'
+            summary = f'[{stream}] {key[2]} (repeat +{count}; details in log)\n'
+            return failure_banner(summary) if value['level'] >= 40 or re.search('fault|failed|invalid|pdo_stale', message, re.I) else summary
         self.repeats[stream] = [key, now, 0]
         level = {30:'WARN', 40:'ERROR', 50:'FATAL'}[value['level']]
-        return f'[{stream}] {level} {message}\n'
+        text = f'[{stream}] {level} {message}\n'
+        return failure_banner(text) if value['level'] >= 40 or re.search('fault|failed|invalid|pdo_stale', message, re.I) else text
 
 
 def wait_service(children, ready, spin, stopped, timeout=120.):
@@ -450,7 +474,7 @@ def services(bindu, workspace, execution_mode='impedance'):
                 print(f'SNOWBOT_BASE_STARTED execution_mode={execution_mode}; initialization complete, see feedback warnings', flush=True)
         except (OSError, RuntimeError) as exc:
             result = 1
-            print(f'START_FAILED {name}: {exc}; startup paused, Ctrl+C for ordered exit',
+            print(failure_banner(f'START_FAILED {name}: {exc}; 启动未完成，Ctrl+C按顺序退出；日志：{logdir}'),
                   file=sys.stderr, flush=True)
         exited = set()
         while not stopped.is_set():
@@ -458,7 +482,7 @@ def services(bindu, workspace, execution_mode='impedance'):
             for name, child in children:
                 if child.poll() is not None and name not in exited:
                     exited.add(name); result = 1
-                    print(f'SERVICE_EXITED {name}: code={child.returncode}; no automatic restart',
+                    print(failure_banner(f'SERVICE_EXITED {name}: code={child.returncode}; 不自动重启；日志：{logdir}'),
                           file=sys.stderr, flush=True)
     finally:
         if not stop_services(children):
@@ -532,8 +556,20 @@ def operator(bindu, workspace, frontend, *, home=False):
     children, readers, client, writer, lock = [], [], None, None, None
     mode, result = None, 0
     try:
-        print('WAIT_BASE', flush=True)
-        if not wait_service([], lambda:base_mode(states) is not None,
+        print('WAIT_BASE：检查终端1的servo／middle／upper初始化；本终端尚未启动执行器', flush=True)
+        last_wait, last_wait_at = None, -float('inf')
+        def base_ready():
+            nonlocal last_wait, last_wait_at
+            ready = base_mode(states) is not None
+            if not ready:
+                detail, fault = base_wait_status(states)
+                now = time.monotonic()
+                if detail != last_wait or now-last_wait_at >= 5.:
+                    message = 'WAIT_BASE：底层初始化未完成\n'+detail+'\n请查看终端1的首个故障；不会自动重启底层。'
+                    print(failure_banner(message) if fault else message, flush=True)
+                    last_wait, last_wait_at = detail, now
+            return ready
+        if not wait_service([], base_ready,
                             lambda:rclpy.spin_once(node, timeout_sec=.05), stopped):
             return 0
         mode = base_mode(states)
@@ -595,7 +631,7 @@ def operator(bindu, workspace, frontend, *, home=False):
                         raise RuntimeError(f'EXECUTOR_EXITED:code={child.returncode}')
     except (OSError, RuntimeError) as exc:
         result = 1
-        print(f'UPPER_FAILED: {exc}', file=sys.stderr, flush=True)
+        print(failure_banner(f'UPPER_FAILED: {exc}; 请查看终端1及上述底层状态'), file=sys.stderr, flush=True)
     finally:
         if client is not None and client.poll() is None:
             if stop_signal != [signal.SIGINT]:

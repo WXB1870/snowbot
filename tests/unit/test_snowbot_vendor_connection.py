@@ -598,6 +598,19 @@ class DeploymentEntryTests(unittest.TestCase):
         states.pop('middle')
         self.assertIsNone(base_mode(states))
 
+    def test_base_wait_reports_fault_and_missing_layer_without_changing_readiness(self):
+        from types import SimpleNamespace as State
+        from tools.deployment.deploy import base_wait_status, base_mode, failure_banner
+        states = dict(servo=State(startup_complete=True,feedback_ready=False,
+            state='waiting_feedback_or_fault',reason='drive_fault',control_source='impedance'))
+        detail, fault = base_wait_status(states)
+        self.assertTrue(fault);self.assertIn('drive_fault',detail)
+        self.assertIn('middle: 未收到状态',detail);self.assertIn('upper: 未收到状态',detail)
+        self.assertIsNone(base_mode(states))
+        self.assertIn('!!!',failure_banner(detail))
+        states['servo'].reason='publisher_found_no_message'
+        self.assertFalse(base_wait_status(states)[1])
+
     def test_replay_sequence_and_executor_use_same_observed_mode(self):
         from tools.deployment.deploy import executor_command,replay_commands
         cfg,runs=Path('/config'),Path('/runs')
