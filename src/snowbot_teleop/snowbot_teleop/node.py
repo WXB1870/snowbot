@@ -167,8 +167,7 @@ class PicoNode(RuntimeNode):
         if self.simulation:
             self.prepare_limit_max=0.
         self.control=PicoControl(initial_load=initial_load,simulation_demo=self.simulation_demo,
-                                 max_age=(self.runtime_parameters['teleop']['input_max_age_s'] if self.position_contract
-                                          else float(self.tool_cfg['input_max_age'])),guided_loading=self.position_contract,
+                                 max_age=self.tool_cfg['feedback_max_age'],guided_loading=self.position_contract,
                                  dual_modes=self.position_contract,direct_grippers=self.position_contract,
                                  initial_mode=self.cfg.get('initial_teleop_mode','independent_arms'),
                                  pose_jump_translation_m=self.cfg.get('pose_jump_translation_m',.35),

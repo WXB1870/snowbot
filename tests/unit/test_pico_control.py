@@ -1525,11 +1525,23 @@ class StateTests(unittest.TestCase):
         return load_parameters(config)
 
     def test_remote_pair_window_and_stream_timeout(self):
+        import ast
+        from types import SimpleNamespace as S
         from snowbot_hardware.parameters import apply_tool_timing
         params = self.remote_parameters()
         tool = apply_tool_timing({}, params)
         self.assertEqual((tool['input_max_age'], tool['command_max_age'], tool['feedback_max_age']),
-                         (1., .4, .2))
+                         (.5, .8, .2))
+        path=Path(find_spec('snowbot_teleop.node').origin)
+        tree=ast.parse(path.read_text())
+        cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='PicoNode')
+        init=next(n for n in cls.body if getattr(n,'name','')=='__init__')
+        control=next(n for n in init.body if isinstance(n,ast.Assign) and
+                     isinstance(n.targets[0],ast.Attribute) and n.targets[0].attr=='control')
+        node=S(tool_cfg=tool,runtime_parameters=params,cfg={},simulation_demo=False,position_contract=True)
+        exec(compile(ast.Module(body=[control],type_ignores=[]),str(path),'exec'),
+             dict(self=node,PicoControl=PicoControl,initial_load='empty'))
+        self.assertEqual((node.control.max_age,node.control.feedback_max_age),(.5,.2))
         for settings, skew, expected in ((None, .04, 'standby'),
                                         (params['pico'], .04, 'standby'),
                                         (params['pico'], .051, 'locked')):
@@ -1543,14 +1555,14 @@ class StateTests(unittest.TestCase):
         rig = Rig(settings=params['pico'])
         core = rig.core
         core.phase = 'following'
-        for gap in (.5, 1.01):
+        for gap in (.49, .51):
             now = rig.now + gap
             core.update_feedback(PicoFeedback(now, True), now)
             core.tick(now)
-            if gap == .5:
+            if gap == .49:
                 self.assertEqual(core.phase, 'following')
         self.assertEqual(core.reason, 'PICO_INPUT_TIMEOUT')
-        self.assertEqual(core.last_input_timeout['input_max_age_s'], 1.)
+        self.assertEqual(core.last_input_timeout['input_max_age_s'], .5)
         rig = Rig(settings=params['pico'])
         rig.core.tick(rig.now + .3)
         self.assertEqual(rig.core.reason, 'PICO_FEEDBACK_STALE')
