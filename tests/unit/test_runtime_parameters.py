@@ -82,16 +82,16 @@ class RuntimeParameterTests(unittest.TestCase):
             for key in ('feedback_max_age','command_max_age',
                         'solve_timeout_us','worker_timeout','worker_startup_timeout'):
                 self.assertEqual(effective[key],original[key],(name,key))
-            selected=self.load({'pico':{'remote_input_timeout_s':.3},'teleop':{'feedback_max_age_s':.15,'command_ttl_s':.35},
+            selected=self.load({'pico':{'remote_input_timeout_s':.7},'teleop':{'feedback_max_age_s':.15,'command_ttl_s':.35},
                                 'solver':{'timeout_s':.1,'worker_timeout_s':.4,'startup_timeout_s':10.}})
             changed=apply_tool_timing(original,selected)
             self.assertEqual([changed[k] for k in ('input_max_age','feedback_max_age','command_max_age',
                               'solve_timeout_us','worker_timeout','worker_startup_timeout')],
-                             [.3,.15,.35,100000,.4,10.])
+                             [.7,.15,.35,100000,.4,10.])
             self.assertIs(type(changed['solve_timeout_us']),int)
             keys = ('input_max_age','feedback_max_age','command_max_age','solve_timeout_us',
                     'worker_timeout','worker_startup_timeout')
-            self.assertEqual([original[key] for key in keys], [.25,.2,.4,80000,.23,30.])
+            self.assertEqual([original[key] for key in keys], [.25,.6,.8,80000,.23,30.])
             self.assertTrue(set(keys).isdisjoint(json.loads((base/name).read_text())))
 
     def test_shared_input_deadline_reaches_actual_session(self):
@@ -140,7 +140,7 @@ class RuntimeParameterTests(unittest.TestCase):
             with patch.dict('sys.modules',modules):
                 exec(compile(ast.Module(body=init.body[start:start+2],type_ignores=[]),str(base_source),'exec'),
                      dict(self=node,load_tool_config=load_tool_config,Path=Path,tool_config_loader=namespace['load_tool']))
-            self.assertEqual(node.cfg['command_max_age'],.4)
+            self.assertEqual(node.cfg['command_max_age'],.8)
             self.assertEqual(node.cfg['solve_timeout_us'],100000)
             self.assertEqual(node.cfg['worker_timeout'],.4)
             self.assertEqual(node.runtime_parameters['solver']['timeout_s'],.1)
@@ -276,7 +276,7 @@ class RuntimeParameterTests(unittest.TestCase):
                     {'pico':{'trigger_release_threshold':.8}},
                     {'diagnostics':{'pdo_sample_hz':200}},
                     {'execution':{'startup_hold_ttl_s':.5}},
-                    {'teleop':{'command_ttl_s':.5}},
+                    {'teleop':{'command_ttl_s':.81}},
                     {'solver':{'timeout_s':.3}},
                     {'execution':{'target_stream_brake_lead_s':.4}}):
             with self.subTest(value=bad),self.assertRaises(ValueError):self.load(bad)

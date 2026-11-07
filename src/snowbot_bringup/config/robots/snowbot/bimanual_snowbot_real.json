@@ -39,7 +39,7 @@
   "operator_yaw_rad": 0.0,
   "sample_period": 0.01,
   "max_integration_interval": 0.1,
-  "integration_max_sample_gap": 0.25,
+  "integration_max_sample_gap": 0.6,
   "max_reference_error": 0.15,
   "impedance_reference_limits": {
     "joint_reference_error_limits": {

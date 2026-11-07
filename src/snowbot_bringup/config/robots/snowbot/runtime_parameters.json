@@ -3,8 +3,8 @@
   "teleop": {
     "_comment": "默认时序（秒）。input_max_age_s 是通用工具输入默认有效期，PICO 手柄输入使用 pico.remote_input_timeout_s，feedback_max_age_s 是机器人反馈有效期，command_ttl_s 是运动命令有效期。",
     "input_max_age_s": 0.25,
-    "feedback_max_age_s": 0.2,
-    "command_ttl_s": 0.4
+    "feedback_max_age_s": 0.6,
+    "command_ttl_s": 0.8
   },
   "solver": {
     "_comment": "单位为秒。timeout_s 是单次求解预算，worker_timeout_s 是等待求解进程回复的时限，startup_timeout_s 只用于启动。",

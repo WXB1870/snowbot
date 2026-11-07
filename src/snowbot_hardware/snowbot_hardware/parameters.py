@@ -101,7 +101,7 @@ def load_parameters(path=None):
             if key not in _INTEGER_FIELDS:
                 values[key] = float(value)
     t, s = result['teleop'], result['solver']
-    if not t['input_max_age_s'] <= t['command_ttl_s'] <= .4:
+    if not t['input_max_age_s'] <= t['command_ttl_s'] <= .8:
         raise ValueError('SNOWBOT_TELEOP_FRESHNESS')
     if (not math.isfinite(s['timeout_s']*1e6) or round(s['timeout_s']*1e6) < 1 or
             s['timeout_s'] >= s['worker_timeout_s']):

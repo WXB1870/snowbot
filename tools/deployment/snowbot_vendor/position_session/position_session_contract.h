@@ -6,7 +6,7 @@
 #include <chrono>
 namespace position_session {
 // session_v3 source deadlines are fixed at admission and never renewed by relays.
-constexpr int64_t maximum_target_ttl=400000000;
+constexpr int64_t maximum_target_ttl=800000000;
 // A target-stream PAUSE is a separate stop command, never a motion renewal.
 constexpr int64_t maximum_target_pause_ttl=2000000000;
 // ROS delivery and progress budget; the raw PDO age limit remains 20 ms.

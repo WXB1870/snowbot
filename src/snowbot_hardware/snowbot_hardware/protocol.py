@@ -237,6 +237,4 @@ class SnowbotIO:
     def read_feedback(self, now, dt):
         if self.invalid:
             raise RuntimeError(self.invalid)
-        if self.check_health is not None and (self.targets or self.stop_targets):
-            self.check_health(self.owned_groups)
         return self.last_feedback

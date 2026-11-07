@@ -82,7 +82,7 @@ void stale_and_invalid(){
 }
 void target_pause_window(){
  using namespace bindu::execution;
- static_assert(maximum_target_ttl==400000000&&maximum_target_pause_ttl==2000000000LL);
+ static_assert(maximum_target_ttl==800000000&&maximum_target_pause_ttl==2000000000LL);
  const int64_t now=1000000000;Meta take{44,1,now,now+200000000,1};assert(fresh(take,now));
  auto over=take;over.expires=over.stamp+maximum_target_ttl+1;assert(!fresh(over,now,maximum_target_pause_ttl));
  auto target=take;target.expires=target.stamp+maximum_target_ttl;
@@ -113,7 +113,7 @@ void target_pause_window(){
  }
  assert(feasible>1000&&impossible>0);
  TargetSnapshot unsafe;unsafe.q=seed();unsafe.q[0]=upper[0]-.0001;unsafe.v[0]=.25;unsafe.valid=true;unsafe.effective_ros=unsafe.effective_steady=pause.stamp+10000000;rejects([&]{TrajectoryQueue::prepare_target(w,pause,unsafe,unsafe.q);});
- std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 400ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
+ std::cout<<"PASS distinct fixed 2s target PAUSE; target ordinary 800ms; expired/overlong reject; 16-axis kernel stop grid feasible="<<feasible<<" impossible="<<impossible<<" longest="<<longest<<"s with 110ms source-age/switch deduction; near-limit impossible stop rejected\n";
 }
 
 void allowed_limit_seeds(){
@@ -444,4 +444,4 @@ void held_replay_offset(){
  }
  std::cout<<"PASS held replay nominal offset accepts observed error and +/-1 degree; larger offsets rejected\n";
 }
-int main(int argc,char** argv){held_replay_offset();if(argc==2&&std::string(argv[1])=="--held-offset")return 0;check_prepared_replay_recipes();if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
+int main(int argc,char** argv){if(argc==2&&std::string(argv[1])=="--ttl"){target_pause_window();return 0;}held_replay_offset();if(argc==2&&std::string(argv[1])=="--held-offset")return 0;check_prepared_replay_recipes();if(argc>1)return replay_targets(argc==2,argc>3&&std::string(argv[3])=="--trace");independent_waist_timing();tool_reference_reserve();rigid_reference_recipe();target_trend_history();configurable_target_tuning();velocity_target_generation();allowed_limit_seeds();stream(20,false);stream(10,false);stream(20,true);stream(10,true);stale_and_invalid();target_pause_window();}
