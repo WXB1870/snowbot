@@ -392,9 +392,10 @@ def base_wait_status(states):
 
 class ServiceConsole:
     """Select brief console messages after the complete output has been saved."""
-    def __init__(self):
+    def __init__(self, *, initializing=False):
         self.wkc, self.repeats = {}, {}
         self.notices = set()
+        self.initializing = initializing
 
     def __call__(self, stream, line):
         from snowbot_bringup.visualization.snowbot_diagnostics import console_log
@@ -424,6 +425,8 @@ class ServiceConsole:
                 return None
             self.notices.add(stream)
             return f'[{stream}] INFO target_stream: legacy input ignored\n'
+        fault = (value['level'] >= 40 or re.search('fault|failed|invalid', message, re.I) or
+                 not self.initializing and 'pdo_stale' in message)
         previous = self.repeats.get(stream)
         if previous is not None and previous[0] == key:
             previous[2] += 1
@@ -432,11 +435,11 @@ class ServiceConsole:
             count = previous[2]
             previous[1:] = [now, 0]
             summary = f'[{stream}] {key[2]} (repeat +{count}; details in log)\n'
-            return failure_banner(summary) if value['level'] >= 40 or re.search('fault|failed|invalid|pdo_stale', message, re.I) else summary
+            return failure_banner(summary) if fault else summary
         self.repeats[stream] = [key, now, 0]
         level = {30:'WARN', 40:'ERROR', 50:'FATAL'}[value['level']]
         text = f'[{stream}] {level} {message}\n'
-        return failure_banner(text) if value['level'] >= 40 or re.search('fault|failed|invalid|pdo_stale', message, re.I) else text
+        return failure_banner(text) if fault else text
 
 
 def wait_service(children, ready, spin, stopped, timeout=120.):
@@ -524,7 +527,8 @@ def services(bindu, workspace, execution_mode='impedance'):
 
     require_stopped(bindu)  # Do not start a second EtherCAT/controller chain.
     logdir = workspace/'startup-logs'/('services-'+time.strftime('%Y%m%d-%H%M%S')+f'-{os.getpid()}')
-    writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=ServiceConsole())
+    console = ServiceConsole(initializing=True)
+    writer = DiagnosticWriter(logdir/'process-output.jsonl', echo=console)
     stopped, children, readers = threading.Event(), [], []
     handlers = {s: signal.signal(s, lambda *_: stopped.set())
                 for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
@@ -572,6 +576,9 @@ def services(bindu, workspace, execution_mode='impedance'):
         exited = set()
         while not stopped.is_set():
             rclpy.spin_once(node, timeout_sec=.1)
+            if console.initializing and all(layer in states and states[layer].startup_complete and
+                    states[layer].feedback_ready for layer in ('servo', 'middle', 'upper')):
+                console.initializing = False
             for name, child in children:
                 if child.poll() is not None and name not in exited:
                     exited.add(name); result = 1
@@ -649,16 +656,18 @@ def operator(bindu, workspace, frontend, *, home=False):
     children, readers, client, writer, lock = [], [], None, None, None
     mode, result = None, 0
     try:
-        print('WAIT_BASE：检查终端1的servo／middle／upper初始化；本终端尚未启动执行器', flush=True)
-        last_wait, last_wait_at = None, -float('inf')
+        print('WAIT_BASE：正在连接底层，请稍候…', flush=True)
+        last_wait, last_wait_at = None, time.monotonic()
         def base_ready():
             nonlocal last_wait, last_wait_at
             ready = base_mode(states) is not None
             if not ready:
                 detail, fault = base_wait_status(states)
                 now = time.monotonic()
-                if detail != last_wait or now-last_wait_at >= 5.:
-                    message = 'WAIT_BASE：底层初始化未完成\n'+detail+'\n请查看终端1的首个故障；不会自动重启底层。'
+                if detail != last_wait and (fault or now-last_wait_at >= 5.):
+                    message = 'WAIT_BASE：等待底层就绪\n'+detail
+                    if fault:
+                        message += '\n请查看终端1的首个故障；不会自动重启底层。'
                     print(failure_banner(message) if fault else message, flush=True)
                     last_wait, last_wait_at = detail, now
             return ready
