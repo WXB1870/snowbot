@@ -14,7 +14,7 @@ class RuntimeParameterTests(unittest.TestCase):
 
     def test_default_snapshot_preserves_existing_policy(self):
         cfg=load_parameters()
-        self.assertEqual(cfg['pico']['remote_input_timeout_s'],.5)
+        self.assertEqual(cfg['pico']['remote_input_timeout_s'],.6)
         self.assertEqual(cfg['teleop']['feedback_max_age_s'],.2)
         self.assertEqual(cfg['teleop']['command_ttl_s'],.8)
         self.assertEqual(cfg['pico']['prepare_command_period_s'],.04)
@@ -81,7 +81,7 @@ class RuntimeParameterTests(unittest.TestCase):
         for name in ('bimanual_snowbot_real.json',):
             original=load_tool_config(base/name)
             effective=apply_tool_timing(original,load_parameters())
-            self.assertEqual(effective['input_max_age'], .5)
+            self.assertEqual(effective['input_max_age'], .6)
             for key in ('feedback_max_age','command_max_age',
                         'solve_timeout_us','worker_timeout','worker_startup_timeout'):
                 self.assertEqual(effective[key],original[key],(name,key))
