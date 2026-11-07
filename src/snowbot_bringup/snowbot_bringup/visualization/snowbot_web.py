@@ -1,4 +1,4 @@
-"""Loopback-only Meshcat operator view; all robot feedback is read-only."""
+"""LAN-accessible Meshcat operator view; all robot feedback is read-only."""
 import json
 import asyncio
 import threading
@@ -177,6 +177,8 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
         StaticFileHandlerNoCache, VIEWER_ROOT, VIEWER_HTML)
     html = package_share('snowbot_bringup')/'web/snowbot.html'
     from snowbot_hardware.parameters import load_parameters
+    from snowbot_bringup.visualization.snowbot_diagnostics import access_host
+    host = access_host()
     parameters = parameters or load_parameters()
     log = EventLog(Path(output)/'events.jsonl' if trace_file else None,parameters)
     latest = {}
@@ -212,7 +214,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
 
         def check_origin(self, origin):
             from urllib.parse import urlsplit
-            return urlsplit(origin).hostname in ('127.0.0.1','localhost')
+            return urlsplit(origin).hostname in (host,'127.0.0.1','localhost')
 
     class State(tornado.web.RequestHandler):
         def get(self):
@@ -223,7 +225,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
         def post(self):
             from urllib.parse import urlsplit
             origin = self.request.headers.get('Origin')
-            if origin and urlsplit(origin).hostname not in ('127.0.0.1','localhost'):
+            if origin and urlsplit(origin).hostname not in (host,'127.0.0.1','localhost'):
                 raise tornado.web.HTTPError(403)
             try:
                 value = json.loads(self.request.body)
@@ -246,7 +248,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
         def post(self):
             nonlocal client_status
             from urllib.parse import urlsplit
-            if urlsplit(self.request.headers.get('Origin','')).hostname not in ('127.0.0.1','localhost'):
+            if urlsplit(self.request.headers.get('Origin','')).hostname not in (host,'127.0.0.1','localhost'):
                 raise tornado.web.HTTPError(403)
             if len(self.request.body)>4096:raise tornado.web.HTTPError(400)
             try:
@@ -261,8 +263,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
 
     class LocalApplication(tornado.web.Application):
         def listen(self, port, **kwargs):
-            # Meshcat 0.3.2 otherwise binds its HTTP socket on all interfaces.
-            server = super().listen(port, address='127.0.0.1', **kwargs)
+            server = super().listen(port, address=host, **kwargs)
             http_servers.append(server)
             return server
 
@@ -291,9 +292,10 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
     timer = tornado.ioloop.PeriodicCallback(tick,100)
     try:
         bridge = LocalBridge(host='127.0.0.1', port=port)
+        bridge.web_url = f'http://{host}:{port}/static/'
         sample()
         timer.start()
-        ready.put((bridge.zmq_url, f'http://127.0.0.1:{port}/'))
+        ready.put((bridge.zmq_url, f'http://{host}:{port}/'))
         bridge.run()
         if sample_errors:
             raise sample_errors[0]

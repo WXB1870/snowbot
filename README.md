@@ -24,6 +24,8 @@ Orin 首次选择 `python3 -m tools.deployment.deploy prepare --with-impedance -
 
 直连和远程都用 `bash tools/run_robot.sh vr` 启动。手柄输入有效期和换源静默时间均为 1 秒，双手配对窗口为 50 毫秒，到帧间隔告警阈值为 1 秒。统一在 [runtime_parameters.json](src/snowbot_bringup/config/robots/snowbot/runtime_parameters.json) 的 `pico` 和 `diagnostics` 中调整。已有现场配置中的 `remote_vr` 覆盖值对所有 VR 连接生效。
 
+终端直接显示电脑只读界面和头显入口的实际局域网 IP。同一局域网的电脑可打开打印的 `http://机器IP:8013/`，头显使用打印的 HTTPS 入口；内部显示通信仍仅限本机。
+
 只需松开持杆夹爪时，先可靠支撑杆／铲，保持 `base` 运行并退出 VR／replay 等上层，再执行 `bash tools/run_robot.sh open-grippers`。该入口独占当前 ROS 域和命名空间，禁止双臂／腰部写权限、启动保持和回零，只按现有配置打开双爪；实测到位、停稳并释放夹爪租约后退出，不自动闭爪。反馈过期、故障、手臂未停稳或控制权冲突会拒绝／中止，未到位不报成功。执行入口存在不代表已部署或通过真机验收。
 
 正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。`main` 同时支持 `position` 与 `impedance`；编入阻抗后端仍由已有 `--with-impedance` 选择，现场版本不自动升级。

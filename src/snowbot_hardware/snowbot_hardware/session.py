@@ -302,11 +302,13 @@ def stop_diagnostic(health, engine, now):
         servo_rejection={key:getattr(servo,key,None) for key in
                          ('rejected_session','rejected_sequence','reason')},
         boot_id=boot, baseline_sample=baseline,
-        observed={key:getattr(obs, key, None) for key in ('boot_id', 'pdo_sample', 'session',
+        observed={key:(value.tolist() if hasattr(value, 'tolist') else value)
+            for key in ('boot_id', 'pdo_sample', 'session',
             'command_sequence', 'session_reason', 'session_selected', 'hold_valid', 'hold_sample',
             'hold_basis', 'trajectory_phase', 'reference_valid', 'output_valid',
             'wkc', 'expected_wkc', 'valid_mask', 'pdo_age',
-            'sensor_valid_mask', 'sensor_data_no', 'sensor_age')},
+            'sensor_valid_mask', 'sensor_data_no', 'sensor_age')
+            for value in (getattr(obs, key, None),)},
         controlled_mask=CONTROL_MASK,
         operation_enabled_mask=health.messages['servo'].get('operation_enabled_mask'),
         stop_requested_at=io.stop_requested_at, feedback_stamp=fb.stamp, feedback_fresh=fresh,

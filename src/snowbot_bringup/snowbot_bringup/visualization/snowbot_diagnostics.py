@@ -5,12 +5,22 @@ from collections import OrderedDict
 from pathlib import Path
 import queue
 import re
+import socket
 import sys
 import threading
 import time
 from snowbot_hardware.parameters import load_parameters
 
 VR_INPUT_STREAMS = ('vr-raw', 'vr-projected', 'vr-health')
+
+
+def access_host(host='0.0.0.0'):
+    """Resolve the outgoing LAN address without sending a datagram."""
+    if host not in ('0.0.0.0', '::'):
+        return host
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        route.connect(('192.0.2.1', 9))
+        return route.getsockname()[0]
 
 
 def finite_json(value):

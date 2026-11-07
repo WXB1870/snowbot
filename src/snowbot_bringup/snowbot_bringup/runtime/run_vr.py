@@ -263,8 +263,9 @@ def run_session(args, manifest):
                             raise RuntimeError('ISAAC_STARTUP_NOT_READY：请检查physics.log')
             print(f'遥操作会话 {args.run_id}，ROS 域 {args.domain_id}，/{args.namespace}', flush=True)
             print(f'日志目录：{args.output}', flush=True)
-            print(f'电脑界面：http://127.0.0.1:{args.port}/\n'
-                  f'头显：{"https" if args.cert_file else "http"}://{"<开发机局域网 IP>" if args.host=="0.0.0.0" else args.host}:{args.vr_port}/\n'
+            from snowbot_bringup.visualization.snowbot_diagnostics import access_host
+            print(f'电脑界面：http://{access_host()}:{args.port}/\n'
+                  f'头显：{"https" if args.cert_file else "http"}://{access_host(args.host)}:{args.vr_port}/\n'
                   '等待 SNOWBOT_WEB_READY 后打开页面；Ctrl+C 统一停止。', flush=True)
             start = time.monotonic()
             manifest['phase']='running'
