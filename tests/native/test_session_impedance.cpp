@@ -150,7 +150,12 @@ void check_target_impedance(ServoNode& previous){
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
  }while(steady_ns()<deadline+20000000);
  assert(applied.torque!=old_torque); // Feedback changes torque, not nominal position.
- auto invalid=guard;auto feedback=snapshot;feedback.sensor_valid_mask=1;invalid.evaluate(applied,feedback,steady_ns());
+ auto invalid=guard;auto feedback=snapshot;feedback.sensor_valid_mask=1;
+ for(unsigned i=0;i<3;++i){
+  ++feedback.sample;feedback.sampled_ns=feedback.attempted_ns=steady_ns();
+  invalid.evaluate(applied,feedback,feedback.attempted_ns);
+  if(i<2)assert(!invalid.disabled);
+ }
  assert(invalid.disabled&&invalid.reason==IMPEDANCE_INVALID);
  // Both waist CSP axes permit lag beyond the arm following threshold.
  for(unsigned axis:{14u,15u}){

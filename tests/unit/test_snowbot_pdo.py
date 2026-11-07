@@ -20,6 +20,31 @@ def frame(sample=1, stamp=10., **changes):
                      position=[.2]*20, speed=[0.]*20, status=[0x231]*20), **changes)
 
 
+class SessionSensorBudgetTests(unittest.TestCase):
+    def test_sensor_budget_and_rt_buffer_do_not_delay_joint_or_pdo_failures(self):
+        from snowbot_hardware.session import SessionHealth, CONTROL_GROUPS
+        health=SessionHealth(lambda:10.,lambda:20.,execution_mode='impedance')
+        header=S(stamp=S(sec=10,nanosec=0))
+        obs=S(header=header,boot_id=1,pdo_sample=1,pdo_age=.001,wkc=67,expected_wkc=67,
+            valid_mask=MASK,position=[0.]*20,speed=[0.]*20,current=[0.]*20,status=[0x27]*20,
+            wrench=[0.]*12,sensor_valid_mask=3,sensor_age=[.1,.1],session_selected=True,session_reason=0)
+        health.observe(obs)
+        for layer in ('upper','middle','servo'):
+            health.state(layer,S(header=header,layer=layer,startup_complete=True,feedback_ready=True,
+                instance_id=1,wire_version=5,reference_mode=2,stop_policy='measured_hold',
+                control_source='topic' if layer=='upper' else 'impedance' if layer=='servo' else 'position'))
+        health.require(CONTROL_GROUPS,acquiring=True)
+        obs.sensor_age[0]=.100001
+        with self.assertRaisesRegex(RuntimeError,'IMPEDANCE_SENSOR_INVALID'):
+            health.require(CONTROL_GROUPS,acquiring=True)
+        health.require(CONTROL_GROUPS)  # Selected-session debounce belongs to the RT watchdog.
+        obs.valid_mask &= ~(1<<16)  # Head feedback is also required in impedance mode.
+        with self.assertRaisesRegex(RuntimeError,'POSITION_FEEDBACK_INVALID'):
+            health.require(CONTROL_GROUPS)
+        obs.valid_mask=MASK;obs.pdo_age=.020001
+        with self.assertRaisesRegex(ValueError,'PDO_STALE'):health.observe(obs)
+
+
 class Writer:
     def __init__(self):
         self.records = []

@@ -13,7 +13,8 @@ void sensors(){
  sample();assert(obs.sensor_valid_mask==0); // A present but static sensor is not ready.
  ++left.DataNo;++right.DataNo;sample();assert(obs.sensor_valid_mask==3&&obs.wrench[0]==1&&obs.wrench[11]==6);
  ++left.DataNo;++right.DataNo;obs.attempted_ns+=1000000;sample();assert(obs.sensor_valid_mask==3&&obs.sensor_data_no[0]==0); // uint16 wrap.
- obs.attempted_ns+=21000000;sample();assert(obs.sensor_valid_mask==0); // Joints may advance while force DataNo freezes.
+ obs.attempted_ns+=100000000;sample();assert(obs.sensor_valid_mask==3); // Existing 100ms force budget includes its boundary.
+ ++obs.attempted_ns;sample();assert(obs.sensor_valid_mask==0); // Frozen force DataNo expires independently of PDO.
  ++left.DataNo;++right.DataNo;sample();assert(obs.sensor_valid_mask==3);
  s_tx_[1]=nullptr;sample();assert(obs.sensor_valid_mask==1);
  s_tx_[1]=&right;sample();assert(obs.sensor_valid_mask==1);
@@ -43,10 +44,21 @@ int main(){
  };
  assert(write()==controlled_mask);assert(pt[0].KP==1&&pt[0].KD==.2f&&pt[0].target_torque==3);assert(csp[18].position==csp_counts(.1f));
  assert(pt[7].KP==99&&pt[15].KP==99&&csp[16].position==99&&csp[17].position==99);
- obs.sampled_ns=1200000000;obs.sensor_sampled_ns.fill(1200000000);session_watchdog_.evaluate(session_packet,obs,1200000000);assert(!session_watchdog_.disabled);
+ obs.sampled_ns=obs.attempted_ns=1200000000;obs.sensor_sampled_ns.fill(1200000000);session_watchdog_.evaluate(session_packet,obs,1200000000);assert(!session_watchdog_.disabled);
  assert(write()==controlled_mask);assert(pt[0].KP==40&&pt[0].KD==2&&pt[0].target_torque==4&&pt[0].target_position==.2f);
- // RT notices missing force samples without waiting for a ROS callback.
+ // Joint feedback failures remain immediate, including non-arm joints.
+ auto joint_guard=session_watchdog_;auto broken=obs;broken.valid_mask&=~(1u<<16);
+ joint_guard.evaluate(session_packet,broken,1200000000);
+ assert(joint_guard.disabled&&joint_guard.reason==FEEDBACK_INVALID);
+ // Only distinct new PDO samples count; a valid force sample resets the streak.
  ++session_packet.sequence;session_packet.deadline=1400000000;obs.sensor_valid_mask=1;
- session_watchdog_.evaluate(session_packet,obs,1200000000);assert(session_watchdog_.disabled&&session_watchdog_.reason==IMPEDANCE_INVALID);assert(write()==0);
+ auto sample_fault=[&](bool good){++obs.sample;obs.sampled_ns=obs.attempted_ns+=1000000;obs.sensor_valid_mask=good?3:1;obs.sensor_sampled_ns.fill(obs.attempted_ns);session_watchdog_.evaluate(session_packet,obs,obs.attempted_ns);};
+ sample_fault(false);assert(!session_watchdog_.disabled);
+ for(unsigned i=0;i<4;++i)session_watchdog_.evaluate(session_packet,obs,obs.attempted_ns);
+ assert(!session_watchdog_.disabled);
+ sample_fault(true);assert(!session_watchdog_.disabled);
+ sample_fault(false);assert(!session_watchdog_.disabled);
+ sample_fault(false);assert(!session_watchdog_.disabled);
+ sample_fault(false);assert(session_watchdog_.disabled&&session_watchdog_.reason==IMPEDANCE_INVALID);assert(write()==0);
  std::cout<<"PASS actual sensor PDO capture and final PT/CSP writes: validity, torque precedence, RT fallback and resource isolation\n";
 }
