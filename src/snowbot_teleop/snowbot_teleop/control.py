@@ -366,14 +366,12 @@ class PicoControl:
                 if now-self.ground_recovery_since>=self.prepare_hold:
                     self.phase='ground_recovery';self.emit('ground_recovery')
             else:self.ground_recovery_since=None
-            if presses[5] and not self.pending and all(f.grip<self.settings['grip_release_threshold'] and f.trigger<self.settings['trigger_release_threshold'] for f in pair):
-                if self.rest(now) and not self.recovery_required and not self.stop_failure:
-                    self.phase,self.reason='standby','RECOVERED_TO_STANDBY'
-                    self.fault_active=False
-                    self.fault_acknowledged_at=now
-                    self.loading_opened=[False,False]
-                    self.armed=[not h for h in states]
-                    self.squeeze_released=[True,True]
+            if presses[5]:
+                if self.pending:
+                    self.reason='RECOVERY_WAIT_OPERATION'
+                elif any(f.grip>=self.settings['grip_release_threshold'] or
+                         f.trigger>=self.settings['trigger_release_threshold'] for f in pair):
+                    self.reason='RECOVERY_RELEASE_CONTROLS'
                 else:
                     self.reason='RECOVERY_CHECK'
                     self.emit('recover')
@@ -691,6 +689,15 @@ class PicoControl:
 
 def loading_guide(view, modes):
     """One operator instruction shared by the headset and computer view."""
+    if view.get('phase')=='locked' and view.get('reason','').startswith('RECOVERY_BLOCKED:'):
+        return dict(title='恢复仍被阻止',detail=view['reason'].split(':',1)[1]+'；条件解除后重新按右手 B',key='B',step='recovery_blocked')
+    if view.get('phase')=='locked' and view.get('reason') in ('RECOVERY_WAIT_OPERATION','RECOVERY_RELEASE_CONTROLS','RECOVERY_CHECK'):
+        detail={'RECOVERY_WAIT_OPERATION':'等待当前操作收尾后，重新按右手 B',
+                'RECOVERY_RELEASE_CONTROLS':'松开双侧握把和扳机后，重新按右手 B',
+                'RECOVERY_CHECK':'正在复核停止状态及失败组件，请保持握把和扳机松开'}[view['reason']]
+        return dict(title='等待恢复待命',detail=detail,key='B',step='recovery_wait')
+    if view.get('phase')=='standby' and view.get('reason')=='RECOVERED_TO_STANDBY':
+        return dict(title='已恢复待命',detail='等待新的手柄操作；重新跟随时仍会检查当前模式的姿态、碰撞与反馈',key='握',step='recovered')
     if view.get('phase')=='ground_recovery':
         return dict(title='正在人工抬升退让',detail='继续按住左手 X；松开 X 或按 A/B/Y 停止。结束后按右手 B 复核',key='X',step='ground_recovery')
     if view.get('phase')=='locked' and view.get('ground_recovery_candidate'):

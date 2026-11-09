@@ -54,11 +54,17 @@ class PositionOperations:
     async def recover(self, intent):
         """Recheck a revoked manual hold without resending any gripper target."""
         n=self.node
-        if self.acquire_future is not None:raise RuntimeError('PICO_GRIPPER_ACQUIRE_UNRESOLVED')
+        grant=None
+        if self.acquire_future is not None:
+            if not self.acquire_future.done():raise RuntimeError('PICO_GRIPPER_ACQUIRE_UNRESOLVED')
+            grant=self.acquire_future.result()
+            if grant.profile_hash!=n.profile.digest or not grant.ok and grant.lease_id:
+                raise RuntimeError('PICO_GRIPPER_ACQUIRE_UNRESOLVED')
         states=[self.reading(side,recovery=True) for side in SIDES]
         if any(s.lease_active or s.state in ('MOVING','STOPPING') for s in states):
             raise RuntimeError('PICO_GRIPPER_RECOVERY_REQUIRES_STOP')
         if (any(s.epoch!=states[0].epoch for s in states) or
+                grant is not None and states[0].epoch!=grant.epoch+int(grant.ok) or
                 self.lease is not None and states[0].epoch<=self.lease.epoch):
             raise RuntimeError('PICO_GRIPPER_RECOVERY_EPOCH')
         if any(s.state=='FAULT' for s in states):
@@ -79,6 +85,7 @@ class PositionOperations:
         if any(abs(s.measured_velocity)>self.config['velocity_tolerance'] for s in states):
             raise RuntimeError('PICO_GRIPPER_RECOVERY_REQUIRES_REST')
         self.lease=None;self.lease_instance=None
+        self.acquire_future=None
         self.release_pending=self.stop_unconfirmed=False
 
     def modes(self, *, require_stationary=True):

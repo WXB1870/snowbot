@@ -393,6 +393,75 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.stop_request=barrier;node.position_ops.recover.reset_mock()
             with self.assertRaisesRegex(RuntimeError,'STOP_NOT_CONFIRMED'):await node.recover(S(token=2))
             self.assertIs(node.stop_request,barrier);node.position_ops.recover.assert_not_awaited()
+        state.lease_epoch=2;state.lease_active=False;state.stop_failures=[]
+        context=dict(instance_id='executor',epoch=1)
+        node.tool_request=context;node.tool_goal=S(accepted=True)
+        node.tool_result=S(done=lambda:False)
+        with self.assertRaisesRegex(RuntimeError,'OWNERSHIP_UNRESOLVED:TOOL_RESULT'):
+            await node.recover(S(token=3))
+        self.assertIs(node.tool_request,context)
+        node.tool_result=S(done=lambda:True,result=lambda:S(result=S(code='BIMANUAL_WORKER_TIMEOUT:STOP_UNCONFIRMED')))
+        node.tool_recover_client.call_async.return_value=S(ok=False,code='BIMANUAL_RECOVERY_STOP_NOT_CONFIRMED:DRIVE_FAULT')
+        with self.assertRaisesRegex(RuntimeError,'DRIVE_FAULT'):await node.recover(S(token=4))
+        self.assertIs(node.tool_request,context)
+        node.tool_recover_client.call_async.return_value=S(ok=True)
+        await node.recover(S(token=5))
+        self.assertIsNone(node.tool_request);self.assertIsNone(node.tool_goal);self.assertIsNone(node.tool_result)
+        self.assertEqual(node.tool_phase,'inactive')
+        # A timed-out tool acquisition may later be explicitly denied at the
+        # baseline epoch. Only the tool recovery service can attest that case.
+        state.lease_epoch=0;node.tool_request=context;node.tool_goal=S(accepted=True)
+        node.tool_result=S(done=lambda:True,result=lambda:S(result=S(code='LEASE_TIMEOUT:STOP_UNCONFIRMED')))
+        node.stop_request=barrier
+        await node.recover(S(token=6))
+        self.assertIsNone(node.tool_request)
+        self.assertEqual(node.tool_recover_client.call_async.call_args.args[0].epoch,0)
+
+    async def test_b_restarts_failed_validator_only_and_discards_its_old_results(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        node=self.production('recover')
+        node.current=Mock();node.lease=node.tool_request=node.tool_goal=None
+        node.profile=S(digest='profile',feedback_tolerances={});node.simulation=False;node.now=lambda:10.
+        node.tool_cfg={'feedback_max_age':.5};node.names=('joint',)
+        state=S(instance_id='executor',lease_epoch=2,lease_active=False,state='CANCELED',code='CANCELED',
+                stop_failures=[],reference=S(name=[]),joints=S(name=['joint'],velocity=[0.]))
+        node.reading=Mock(return_value=(state,{'joint':0.}));node.stop_request=None;node.position_ops=None
+        node.control=S(update_feedback=Mock(),rest=lambda _:True);node.feedback=Mock()
+        old=S(failure='BIMANUAL_WORKER_TIMEOUT',grasp_checkpoint=([.1],[[1]],None),close=Mock())
+        node.validator=old;node.validation_cfg={'original':True};node.validation_result=('result',3,'old')
+        node.ground_recovery_plan='old'
+        factory=Mock(return_value=S(ready=True,failure=''))
+        node.recover.__func__.__globals__['BimanualWorker']=factory
+        await node.recover(S(token=1))
+        old.close.assert_called_once()
+        factory.assert_called_once_with(node.validation_cfg,node.profile,preload_path_checks=True,grasp_checkpoint=old.grasp_checkpoint)
+        self.assertIsNone(node.validation_result);self.assertIsNone(node.ground_recovery_plan)
+        await node.recover(S(token=2))
+        self.assertEqual(factory.call_count,1)
+
+    async def test_gripper_recovery_settles_a_late_acquisition_without_dropping_live_authority(self):
+        import ast
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        path=Path(find_spec('snowbot_teleop.position').origin)
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PositionOperations')
+        method=next(n for n in cls.body if getattr(n,'name','')=='recover')
+        scope={'SIDES':('left','right')}
+        exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),scope)
+        future=Mock();future.done.return_value=False
+        states=[S(lease_active=False,state='CANCELED',epoch=11,measured_velocity=0.) for _ in range(2)]
+        owner=S(node=S(profile=S(digest='profile')),acquire_future=future,
+                reading=Mock(side_effect=lambda *a,**kw:states[0 if a[0]=='left' else 1]),
+                lease=None,lease_instance='executor',config={'velocity_tolerance':.01},stop_unconfirmed=True)
+        with self.assertRaisesRegex(RuntimeError,'ACQUIRE_UNRESOLVED'):await scope['recover'](owner,object())
+        future.done.return_value=True
+        future.result.return_value=S(ok=True,epoch=11,profile_hash='profile')
+        with self.assertRaisesRegex(RuntimeError,'RECOVERY_EPOCH'):await scope['recover'](owner,object())
+        self.assertIs(owner.acquire_future,future);self.assertTrue(owner.stop_unconfirmed)
+        future.result.return_value.epoch=10
+        await scope['recover'](owner,object())
+        self.assertIsNone(owner.acquire_future);self.assertFalse(owner.stop_unconfirmed)
 
     async def test_feedback_fault_recovery_needs_completed_stop_and_fresh_device_hold(self):
         from types import SimpleNamespace as S
@@ -490,8 +559,12 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         exec(compile(ast.Module(body=helpers,type_ignores=[]),str(path),'exec'),namespace)
         exec(compile(ast.fix_missing_locations(module),str(path),'exec'),namespace)
         actual=namespace['Actual']()
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock,Mock
         if 'reset_grasp_reference' not in names:actual.reset_grasp_reference=AsyncMock()
+        if 'recover' in names:
+            actual.validator=S(failure='')
+            actual.tool_recover_client=S(call_async=Mock(return_value=S(ok=True)))
+            actual.wait=AsyncMock(side_effect=lambda reply,timeout:reply)
         actual.position_contract=False  # Legacy-only cases opt in explicitly below.
         return actual
 
@@ -1440,6 +1513,21 @@ class DualModeTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_b_explains_unmet_conditions_and_success_means_standby_only(self):
+        from snowbot_teleop.control import loading_guide
+        r=Rig();r.core.lock('BIMANUAL_WORKER_TIMEOUT',r.now);r.core.drain();r.complete()
+        r.grips=[1.,0.];r.step();r.click(1,1)
+        self.assertEqual(r.core.reason,'RECOVERY_RELEASE_CONTROLS')
+        self.assertIn('握把和扳机',loading_guide(r.core.snapshot(),r.modes)['detail'])
+        r.grips=[0.,0.];r.step();r.click(1,1)
+        self.assertEqual(r.core.pending.operation,'recover')
+        r.complete(False,'DRIVE_FAULT')
+        self.assertIn('DRIVE_FAULT',loading_guide(r.core.snapshot(),r.modes)['detail'])
+        self.assertEqual(r.core.first_fault['code'],'BIMANUAL_WORKER_TIMEOUT')
+        r.click(1,1);r.complete()
+        self.assertEqual(loading_guide(r.core.snapshot(),r.modes)['title'],'已恢复待命')
+        self.assertIsNone(r.core.pending);self.assertEqual(r.step(),[])
+
     def test_b_rechecks_latched_stop_and_restores_standby_only_after_confirmation(self):
         r=Rig();r.core.lock('PICO_STOP_UNCONFIRMED',r.now);r.core.drain();r.complete(False,'PICO_STOP_UNCONFIRMED')
         intent=r.click(1,1)[-1]
@@ -1497,6 +1585,9 @@ class StateTests(unittest.TestCase):
         r.grips=[1.,0.];r.step();r.click(1,1)
         self.assertEqual(r.core.phase,'locked')
         r.grips=[0.,0.];r.step();r.click(1,1)
+        self.assertEqual(r.core.pending.operation,'recover')
+        self.assertEqual(r.core.phase,'locked')
+        r.complete()
         self.assertEqual(r.core.phase,'standby');self.assertFalse(r.core.fault_active)
         self.assertEqual(r.core.first_fault['code'],'PICO_INPUT_TIMEOUT')
         self.assertIsNone(r.core.pending)

@@ -185,6 +185,7 @@ class PicoNode(RuntimeNode):
             validation_cfg['prepare_collision_recovery']=InitialSelfCollisionRecovery(recovery).config
         validation_cfg['prepare_limit_recovery_max_rad']=self.prepare_limit_max
         validation_cfg['prepare_reference_max_offset_rad']=self.prepare_position_tolerance
+        self.validation_cfg=validation_cfg
         self.validator=BimanualWorker(validation_cfg,self.profile,preload_path_checks=True)
         self.validation_result=None
         self.prepare_recovery=None
@@ -216,6 +217,7 @@ class PicoNode(RuntimeNode):
                                   if self.position_contract and not self.simulation else None)
         self.ready_client=self.create_client(Trigger,'teleop/tool_ready')
         self.grasp_reference_reset_client=self.create_client(ResetToolReference,'teleop/tool_reference_reset')
+        self.tool_recover_client=self.create_client(ResetToolReference,'teleop/tool_recover')
         self.arms_ready_client=self.create_client(Trigger,'teleop/arms_ready') if self.position_contract else None
         self.record_client=self.create_client(SetBool,'recorder/capture') if self.recording_enabled else None
         self.modes=ActionClient(self,SelectTeleopMode,'teleop/select_mode')
@@ -1149,11 +1151,52 @@ class PicoNode(RuntimeNode):
     async def recover(self,intent):
         """B rechecks current stop evidence; it never retries motion or enable."""
         self.current(intent)
-        if self.lease is not None or self.tool_request is not None or self.tool_goal is not None:
-            raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED')
+        scope=None
+        uncertain_tool=False
+        context=self.tool_request
+        if context is not None:
+            goal=self.tool_goal
+            if goal is None:
+                if not context['future'].done():raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:TOOL_REQUEST')
+                goal=context['future'].result()
+            epoch=context['epoch']-1
+            if goal.accepted:
+                result=self.tool_result or goal.get_result_async()
+                if not result.done():raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:TOOL_RESULT')
+                code=result.result().result.code
+                uncertain_tool='STOP_UNCONFIRMED' in code
+                epoch=context['epoch']+1
+                prefix='BIMANUAL_LEASE_NOT_ACQUIRED:'
+                if code.startswith(prefix):
+                    proof=json.loads(code[len(prefix):])
+                    if (proof['instance_id']!=context['instance_id'] or proof['profile_hash']!=self.profile.digest or
+                            proof['epoch']!=context['epoch']-1):
+                        raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:NO_GRANT')
+                    epoch=proof['epoch']
+            scope=(context['instance_id'],epoch)
+        elif self.tool_goal is not None:
+            raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:TOOL_CONTEXT')
+        if self.lease is not None:
+            lease,instance=self.lease
+            if hasattr(lease,'done'):
+                if not lease.done():raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:LEASE_REQUEST')
+                lease=lease.result()
+            if lease.profile_hash!=self.profile.digest or not lease.ok and lease.lease_id:
+                raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:LEASE_REPLY')
+            if lease.ok and self.stop_request is None:
+                raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:LEASE_STOP')
+            scope=(instance,lease.epoch+int(lease.ok))
         s,_=self.reading()
+        if uncertain_tool and s.lease_epoch in (context['epoch']-1,context['epoch']+1):
+            # The tool service settles its exact acquisition future below.
+            # A historical timeout result alone cannot attest grant vs rejection.
+            scope=(context['instance_id'],s.lease_epoch)
+        if scope is not None and (s.instance_id,s.lease_epoch)!=scope:
+            raise RuntimeError('PICO_RECOVERY_OWNERSHIP_UNRESOLVED:SCOPE')
         pending=self.stop_request
         request=pending or getattr(self,'confirmed_stop',None)
+        if uncertain_tool and request is not None:
+            request=dict(request,epoch=scope[1])
         feedback_fault=s.state=='FAILED' and s.code=='DEVICE_FEEDBACK_ERROR'
         if request is not None:
             matches=not request['lease_active'] and stop_feedback_matches(s,instance_id=request['instance_id'],epoch=request['epoch'],
@@ -1168,13 +1211,27 @@ class PicoNode(RuntimeNode):
         # fresh idle display alone cannot authorize FAILED or erase a barrier.
         if (not matches or s.state not in ('READY','CANCELED','SUCCEEDED') and
                 not (feedback_fault and request is not None and not request['failed'] and pending is None)):
-            raise RuntimeError('PICO_RECOVERY_STOP_NOT_CONFIRMED')
+            raise RuntimeError('PICO_RECOVERY_STOP_NOT_CONFIRMED:'+s.code)
         hold=None
         if feedback_fault:
             hold=await self.prepare_hold_reference(intent,allow_feedback_fault=True)
         if self.position_ops:await self.position_ops.recover(intent)
         if hold is not None:
             await self.prepare_hold_reference(intent,previous=hold,allow_feedback_fault=True)
+        reply=await self.wait(self.tool_recover_client.call_async(ResetToolReference.Request(
+            execution_instance_id=s.instance_id,epoch=s.lease_epoch)),
+            self.tool_cfg.get('worker_startup_timeout',30.)+parameters_for(self,'pico')['rpc_timeout_s'])
+        if not reply.ok:raise RuntimeError(reply.code)
+        if self.validator.failure:
+            self.validator.close()
+            self.validator=BimanualWorker(self.validation_cfg,self.profile,preload_path_checks=True,
+                                         grasp_checkpoint=self.validator.grasp_checkpoint)
+            self.validation_result=None
+            self.ground_recovery_plan=None
+            while not self.validator.ready:
+                self.current(intent)
+                if self.validator.failure:raise RuntimeError(self.validator.failure)
+                await self.pause()
         self.current(intent)
         # Recheck after the service await; a changed owner or fault invalidates recovery.
         current,_=self.reading()
@@ -1189,6 +1246,9 @@ class PicoNode(RuntimeNode):
         if not self.control.rest(self.now()):
             self.stop_request=pending
             raise RuntimeError('PICO_RECOVERY_FEEDBACK_NOT_READY')
+        self.lease=None
+        self.tool_request=self.tool_goal=self.tool_result=None
+        self.tool_phase='inactive'
         self.handoff_complete=True
 
     async def perform(self,intent):

@@ -177,11 +177,11 @@ class DirectGripperTests(unittest.TestCase):
                 if cause=='squeeze':r.grips=[1.,0.];effects=r.step()
                 elif cause=='Y':effects=r.click(0,1)
                 else:
-                    r.now+=.3;r.core.update_feedback(PicoFeedback(r.now,True,r.modes),r.now)
+                    r.now+=r.core.max_age+.01;r.core.update_feedback(PicoFeedback(r.now,True,r.modes),r.now)
                     r.core.tick(r.now);effects=r.core.drain()
                 self.assertEqual([e.operation for e in effects],['stop']);r.complete()
                 r.grips=[0.,0.];r.triggers=[0.,0.];self.assertFalse(r.step())
-                if cause!='squeeze':r.click(1,1)
+                if cause!='squeeze':r.click(1,1);r.complete()
                 self.assertFalse(r.step())
                 r.triggers=[1.,0.];self.assertEqual(r.step()[-1].operation,'manual_grippers')
 
@@ -339,11 +339,12 @@ class GuidedLoadingTests(unittest.TestCase):
 
     def test_interrupted_loading_recovery_returns_standby_until_new_request(self):
         r=Rig('unknown',guided=True);self.start_loading(r)
-        r.now+=.3;r.core.update_feedback(PicoFeedback(r.now,True),r.now);r.core.tick(r.now)
+        r.now+=r.core.max_age+.01;r.core.update_feedback(PicoFeedback(r.now,True),r.now);r.core.tick(r.now)
         self.assertEqual(r.core.phase,'locked');r.complete();r.step()
-        r.click(1,1)
+        r.click(1,1);r.complete()
         self.assertEqual(r.core.phase,'standby');self.assertFalse(r.core.supported)
         self.assertIsNone(r.core.pending)
+        r.step()  # Fresh released baseline after backend recovery.
         r.click(0,2);r.complete();r.click(1,1)
         self.assertEqual(r.core.phase,'loading');self.assertEqual(r.core.load,'unknown')
         self.assertTrue(r.core.supported)
@@ -384,6 +385,7 @@ class GuidedLoadingTests(unittest.TestCase):
         r.click(0,1);r.complete();r.click(1,1)
         self.assertEqual(r.core.phase,'locked')
         r.grips=[0.,0.];r.step();r.click(1,1)
+        self.assertEqual(r.core.pending.operation,'recover');r.complete()
         self.assertEqual(r.core.phase,'standby');self.assertIsNone(r.core.pending)
         r.step();self.assertIsNone(r.core.pending)
 
