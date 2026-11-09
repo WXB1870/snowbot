@@ -13,7 +13,7 @@
     "startup_timeout_s": 30.0
   },
   "pico": {
-    "_comment": "prepare_button_hold_s 是触发准备动作所需的长按时间（秒）。pair_max_skew_s 是左右手输入时间戳允许相差的秒数。grip 和 trigger 分别是握把和扳机，press / release 是按下和松开的阈值（0～1）。 remote_input_timeout_s 和 remote_source_timeout_s 分别是所有 VR 连接的输入有效期和旧源静默等待时间（秒），controller_fps 是手柄发送帧率。",
+    "_comment": "prepare_button_hold_s 是 A 准备与人工抬升 X 共用的长按时间（秒）。pair_max_skew_s 是左右手输入时间戳允许相差的秒数。grip 和 trigger 分别是握把和扳机，press / release 是按下和松开的阈值（0～1）。 remote_input_timeout_s 和 remote_source_timeout_s 分别是所有 VR 连接的输入有效期和旧源静默等待时间（秒），controller_fps 是手柄发送帧率。",
     "prepare_button_hold_s": 1.0,
     "pair_max_skew_s": 0.05,
     "grip_press_threshold": 0.7,

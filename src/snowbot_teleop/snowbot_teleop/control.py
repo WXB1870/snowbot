@@ -198,6 +198,7 @@ class PicoControl:
                     input_max_age_s=self.max_age,hand_stamps={f.side:f.stamp for f in self.frames or ()})
             self.phase,self.reason,self.changed_at='locked',reason,now
             self.a_since=None
+            self.ground_recovery_since=None;self.armed[0]=False
             self.supported=False
             self.emit('stop')
 
@@ -358,7 +359,7 @@ class PicoControl:
             self.prepare_blocked=True;self.emit('stop');return
         if self.phase=='locked':
             if (self.ground_recovery_candidate() and not self.pending and self.rest(now) and
-                    states[0] and self.armed[0] and
+                    states[0] and self.armed[0] and not states[4] and not states[5] and
                     all(f.grip<self.settings['grip_release_threshold'] and
                         f.trigger<self.settings['trigger_release_threshold'] for f in pair)):
                 if self.ground_recovery_since is None:self.ground_recovery_since=now
@@ -378,7 +379,7 @@ class PicoControl:
                     self.emit('recover')
             return
         if self.phase=='ground_recovery':
-            if not states[0] or any(f.grip>=self.settings['grip_release_threshold'] or
+            if not states[0] or states[4] or states[5] or any(f.grip>=self.settings['grip_release_threshold'] or
                                    f.trigger>=self.settings['trigger_release_threshold'] for f in pair):
                 self.lock('GROUND_RECOVERY_OPERATOR_RELEASED',now)
             return
@@ -576,6 +577,7 @@ class PicoControl:
             retry=(((rejected or arrival_failure) and self.guided_loading or capture_failure) and self.rest(now) and
                    self.frames and 0<=now-self.stamp<=self.max_age)
             if not retry:
+                self.ground_recovery_since=None;self.armed[0]=False
                 self.record_fault(reason or 'PICO_OPERATION_FAILED', now,
                                   kind='stop' if operation=='stop' else 'fault')
             self.phase,self.reason='standby' if retry else 'locked',reason or 'PICO_OPERATION_FAILED'
@@ -690,9 +692,9 @@ class PicoControl:
 def loading_guide(view, modes):
     """One operator instruction shared by the headset and computer view."""
     if view.get('phase')=='ground_recovery':
-        return dict(title='正在低速抬升退让',detail='继续按住 X；松开 X 或按 Y 停止。结束后按 B 复核',key='X',step='ground_recovery')
+        return dict(title='正在人工抬升退让',detail='继续按住左手 X；松开 X 或按 A/B/Y 停止。结束后按右手 B 复核',key='X',step='ground_recovery')
     if view.get('phase')=='locked' and view.get('ground_recovery_candidate'):
-        return dict(title='可请求触地抬升复核',detail='确认杆触地后松开双侧握及扳机，长按 X；仅接近地面才执行5厘米抬升',key='X',step='ground_recovery_request')
+        return dict(title='可请求人工抬升退让',detail='负载大不等于触地。确认适合向上退让，松开双侧握、扳机及 X，再长按左手 X；右手 B 仅复核待命',key='X',step='ground_recovery_request')
     phase, goal = view['phase'], view.get('loading_goal')
     operation = '装夹' if goal=='held' else '卸载'
     if view.get('measured_limit_joints') and phase in ('standby','tool_standby','preparing'):

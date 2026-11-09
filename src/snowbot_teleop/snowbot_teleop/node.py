@@ -721,7 +721,7 @@ class PicoNode(RuntimeNode):
         if (value['relative_position_error_m']>initial['relative_position_error_m']+cfg['relative_position_margin_m'] or
                 value['relative_rotation_error_rad']>initial['relative_rotation_error_rad']+cfg['relative_rotation_margin_rad'] or
                 value['height_m']<initial['height_m']-cfg['relative_position_margin_m']):
-            raise RuntimeError('GROUND_RECOVERY_CONTACT_WORSENED')
+            raise RuntimeError('GROUND_RECOVERY_GEOMETRY_WORSENED')
         self.ground_recovery_observation=value
 
     def monitor_ground_recovery(self,intent,state=None,measured=None,lease=None):

@@ -19,11 +19,14 @@ class GroundRecoveryHudTests(unittest.TestCase):
         base=dict(mode='locked',reason='BIMANUAL_MEASURED_GRASP_ERROR',fault_active=True,
                   ground_recovery_candidate=True,stop_confirmed=True)
         self.assertIn('X',hud_spec(base)['action'])
+        self.assertIn('负载大不等于触地',hud_spec(base)['detail'])
+        self.assertIn('右 B 仅复核',hud_spec(base)['action'])
         for extra in (dict(stop_confirmed=False),dict(recovery_required='device_inspection'),
                       dict(stop_failure={'code':'STOP_UNCONFIRMED'})):
             self.assertNotIn('X',hud_spec(dict(base,**extra))['action'])
         active=hud_spec(dict(base,mode='ground_recovery'))
-        self.assertIn('松开停止',active['action']);self.assertEqual(active['status'],'触地抬升中')
+        self.assertIn('松开停止',active['action']);self.assertEqual(active['status'],'人工抬升中')
+        self.assertIn('A/B/Y 停止',active['action']);self.assertIn('腰部固定',active['mode_hint'])
 
 
 class PicoHUDTests(unittest.TestCase):

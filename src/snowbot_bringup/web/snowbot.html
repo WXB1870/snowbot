@@ -376,7 +376,7 @@ details[open]>summary:after { transform: rotate(225deg); }
 'use strict';
 const displaySettings=__SNOWBOT_DISPLAY_CONFIG__;
 const $=id=>document.getElementById(id);
-const phases={checking:'连接检查',standby:'待命',preparing:'准备中',ground_recovery:'触地抬升中',confirming_tool:'工具检查中',tool_standby:'已暂停',engaging:'正在接合',following:'跟随中',switching:'正在换握',locked:'控制已锁定',loading:'装卸操作中',load_check:'等待装卸确认'};
+const phases={checking:'连接检查',standby:'待命',preparing:'准备中',ground_recovery:'人工抬升中',confirming_tool:'工具检查中',tool_standby:'已暂停',engaging:'正在接合',following:'跟随中',switching:'正在换握',locked:'控制已锁定',loading:'装卸操作中',load_check:'等待装卸确认'};
 Object.assign(phases,{selecting_mode:'模式切换中',gripper_control:'夹爪开合中'});
 const reasons={WAITING_FOR_INPUT_AND_FEEDBACK:'等待有效的双手输入与关节反馈。',READY_FOR_OPERATOR:'控制链已就绪，尚未执行准备。',PREPARED:'已到达装夹准备姿态。',SIMULATED_TOOL_PREFLIGHT:'正在检查工具与跟随条件。',TOOL_GRASP_VERIFIED:'工具控制检查通过，可以接合跟随。',FOLLOWING:'双手位移控制工具，松开任一侧握可暂停。',SQUEEZE_RELEASED:'已松开侧握，工具跟随已暂停。',PICO_Y_STOP:'已收到 Y 停止请求。',PICO_INPUT_TIMEOUT:'手柄数据未及时更新。',PICO_PAIR_INVALID:'双手柄输入未通过有效性检查。',PICO_POSE_INVALID:'手柄位姿无效。',PICO_CONNECTION_CHANGED:'检测到新的 VR 连接，需要重新接管。',RECOVERED_TO_STANDBY:'已恢复待命，等待工具检查。',PICO_POSE_ORIGIN_JUMP:'手柄坐标发生突变，控制已阻断。',PREPARE_RELEASED:'准备操作已中断。',PREPARE_REQUIRES_EMPTY_AND_RELEASED_SQUEEZE:'准备条件未满足：需要空手并松开双侧握。',PICO_FEEDBACK_UNAVAILABLE:'执行反馈不可用，控制已阻断。',PICO_FEEDBACK_STALE:'执行反馈已过期，控制已阻断。',OPEN_REQUIRES_LOADING_AND_SUPPORT:'收到开爪输入，工具跟随已中断。',GRASP_MODE_CONFIRMED:'握持切换已确认。',CONFIRM_GRASP_CHANGE_BEFORE_REENGAGE:'握持方式尚未确认，暂不能接合。'};
 Object.assign(reasons,{
@@ -440,7 +440,8 @@ function explainReason(reason){
   if((reason||'').includes('PICO_GRASP_POSITION_CHANGED'))return '夹爪开度偏离当前握持方式，已停止跟随。';
   if((reason||'').includes('LEFT_GRIPPER_NOT_CLOSED')||(reason||'').includes('LEFT_NOT_CLOSED_STATIONARY'))return '左夹爪尚未闭合停稳，无法换握。';
   if((reason||'').includes('PREPARE_TOOL_COUPLING'))return '回准备位的候选路径会改变双手握持关系，已拒绝执行。';
-  if((reason||'').includes('BIMANUAL_GRASP_POSE'))return '当前双臂姿态不满足工具握点几何；保持待命，请核对当前姿态和工具配置。';
+  if((reason||'').includes('GROUND_RECOVERY_GEOMETRY_WORSENED'))return '退让过程中握持偏差增大或杆体继续下沉，已停止；这不是触地原因识别。';
+  if((reason||'').includes('BIMANUAL_GRASP_POSE')||(reason||'').includes('BIMANUAL_MEASURED_GRASP_ERROR')||(reason||'').includes('relative pose safety threshold'))return '双手相对握持几何偏差超限，原因未判明；正常铲雪也可能有大负载，不能据此判定触地。';
   if((reason||'').includes('PICO_GRIPPER_CONFIRMATION_REQUIRED'))return '接合需要夹爪实际闭合并停稳；当前反馈尚未满足。';
   if((reason||'').includes('PICO_PREPARE_PRESET_REQUIRED'))return '尚未配置现场准备位。';
   if((reason||'').includes('CALIBRATION'))return '夹爪标定未完成，当前不能执行开合。';
@@ -470,7 +471,7 @@ function operatorState(p,online,fresh,pcFresh,tracked,execution={}){
     if(p.reason?.startsWith('RECOVERY_BLOCKED:'))return {...result,status:'恢复条件未满足',reason:explainReason(p.reason.slice(17)),next:'松开握把和扳机，排除提示原因后按 B 重新复核。',key:'B',tone:'bad'};
     if(p.recovery_required)return {...result,status:'设备／采样异常 · 锁定',next:'排除设备／采样异常，松开握把和扳机后按 B 复核；通过后仅恢复待命。',key:'B',tone:'bad'};
     if(p.stop_failure)return {...result,status:'停止未确认',next:'松开握把和扳机后按 B 复核停止状态；未确认时保持锁定并显示原因。',key:'B',tone:'bad'};
-    if(p.ground_recovery_candidate&&p.stop_confirmed===true)return {...result,status:p.reason==='GROUND_RECOVERY_STEP_COMPLETE'?'抬升步骤结束 · 待复核':'可请求触地抬升复核',next:'确认杆触地后，松开双侧握及扳机，长按 X 请求抬升5厘米；松开 X 停止，B 复核恢复待命。',key:'X',tone:'warn'};
+    if(p.ground_recovery_candidate&&p.stop_confirmed===true)return {...result,status:p.reason==='GROUND_RECOVERY_STEP_COMPLETE'?'抬升步骤结束 · 待复核':'可请求人工抬升退让',next:'确认适合向上退让，松开双侧握、扳机及 X，再长按左手 X 请求单段抬升；松开 X 或按 A/B/Y 停止，右手 B 仅复核待命。',key:'X',tone:'warn'};
     return {...result,status:p.stop_confirmed===true?'已停止（锁定）':'停止未确认',next:p.stop_confirmed===true?'排除原因，松开双侧握后按 B 恢复待命。':'保持双侧握松开，等待停稳确认。',key:p.stop_confirmed===true?'B':'',tone:'bad'};
   }
   if(p.idle_input_lost&&['standby','tool_standby','load_check'].includes(p.phase))return {...result,status:'等待手柄输入',reason:'手柄输入暂停，机器人已停稳，当前操作步骤已保留。',next:'保持松握，等待输入恢复后继续当前步骤。'};
@@ -486,7 +487,7 @@ function operatorState(p,online,fresh,pcFresh,tracked,execution={}){
   if(p.phase==='following')return tracked?{...result,status:'跟随中',next:'移动双手柄控制工具；松握即可暂停。',tone:'good'}:{...result,status:'输入失效，停止待确认',reason:'当前手柄输入不可用，尚不能确认机器人已停稳。',next:'松开双侧握，等待停止反馈。',tone:'bad'};
   if(p.phase==='tool_standby')return {...result,status:p.stop_confirmed===true?'已暂停，可以接合':'正在暂停',reason:p.stop_confirmed===true?'机器人已停稳，工具保持当前姿态。':'已收到暂停请求，正在等待停稳反馈。',next:p.stop_confirmed===true?'先松开双侧握，再同时握住开始跟随。':'保持双侧握松开，等待停稳确认。',tone:p.stop_confirmed===true?'good':'warn'};
   if(p.phase==='preparing')return {...result,status:'正在前往准备姿态',reason:'机器人正移动到装夹准备位置。',next:'继续按住 A；松开 A 可中断准备。',key:'A'};
-  if(p.phase==='ground_recovery')return {...result,status:'正在低速抬升退让',reason:Number.isFinite(p.ground_recovery?.height_m)?`模型估计距地 ${(p.ground_recovery.height_m*100).toFixed(1)} 厘米`:'正在复核距地高度和抬升路径。',next:'继续按住 X；松开 X 或按 Y 停止，结束后按 B 复核。',key:'X'};
+  if(p.phase==='ground_recovery')return {...result,status:'正在人工抬升退让',reason:Number.isFinite(p.ground_recovery?.height_m)?`模型估计距地 ${(p.ground_recovery.height_m*100).toFixed(1)} 厘米，仅作参考`:'正在检查抬升路径；负载大小不作为触地判据。',next:'继续按住左手 X；松开 X 或按 A/B/Y 停止，结束后按右手 B 复核。',key:'X'};
   if(p.phase==='engaging')return {...result,reason:'正在以当前手柄和工具姿态建立跟随基准。',next:'保持双侧握；松开任一侧可暂停。'};
   if(p.phase==='switching'){
     const target=p.grasp_requested==='right_axial'?'右手虚握':p.grasp_requested==='rigid'?'双手刚握':'新握持方式';
@@ -663,6 +664,8 @@ function controlMode(p,fresh){
     hint:'松开双侧握，停稳后切换到'+(independent?'扫雪耦合':'普通双臂'),key:true,pending:''};
   if(p.phase==='selecting_mode'){
     result.pending=target?'正在切换 → '+target:'正在检查模式切换';result.hint='保持双侧握松开，等待切换确认';result.key=false;
+  }else if(p.phase==='ground_recovery'){
+    result.description='人工控制双臂竖直退让，腰部固定';result.hint='右手 B 只停止本段，不切换模式；松开 X 或按 A/Y 也可停止';
   }else if(p.phase==='locked'){
     const blocked=p.reason?.startsWith('RECOVERY_BLOCKED:');
     result.hint=p.recovery_required?'排除设备／采样异常，松开握把和扳机后按 B 复核；通过后仅恢复待命':p.stop_failure||blocked?'松开握把和扳机后按 B 复核停止状态；未通过时保持锁定':p.stop_confirmed===true?'松开握把和扳机后按 B 恢复待命；恢复后再切换模式':'等待停稳确认后恢复待命';
@@ -716,8 +719,8 @@ function render(data,online){
   text('stop-protocol',stop?`请求 ${stop.sequence??'—'} / 观测 ${stop.observed?.command_sequence??'—'} · reason=${stop.observed?.session_reason??'—'} · ${stop.ack_reason||stop.reason}${stop.servo_rejection?.reason?' · servo: '+stop.servo_rejection.reason:''}`:'—');
   const grasp=graspState(p,pcFresh);
   text('axial-grasp',grasp.axial);$('axial-grasp').className=grasp.tone;
-  document.querySelector('#guide-axial span').textContent=p.ground_recovery_candidate||p.phase==='ground_recovery'?'触地相关故障后长按 X 低速抬升，松开停止；结束后 B 复核。':grasp.guide;
-  document.querySelector('#guide-prepare span').textContent=pcFresh&&p.capabilities?.prepare===false?'尚未配置现场准备位。':'可选回准备位；停稳且松握时长按，松开即停止。';
+  document.querySelector('#guide-axial span').textContent=p.ground_recovery_candidate||p.phase==='ground_recovery'?'相对误差锁定后，确认适合上抬，先松开再长按左手 X；松 X 或按 A/B/Y 停止，右手 B 仅复核。':grasp.guide;
+  document.querySelector('#guide-prepare span').textContent=p.phase==='ground_recovery'?'本次抬升中 A 仅停止，不执行回准备位。':p.phase==='locked'?'锁定时 A 不执行回位；先按 B 复核。':pcFresh&&p.capabilities?.prepare===false?'尚未配置现场准备位。':'可选回准备位；停稳且松握时长按，松开即停止。';
   badge('demo-mode',pcFresh?(p.teleop_mode==='independent_arms'?'普通双臂':p.dual_modes?'扫雪工具':p.simulation_demo?'快捷流程':'标准装夹流程'):'流程待确认');
   text('execution',fresh?(executions[data.execution]||'状态待确认'):'未知');
   const load=pcFresh?p.load_state:null;const loadText=load==='held'?'已装载':load==='empty'?'未装载':'未知';

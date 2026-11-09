@@ -274,7 +274,6 @@
         -0.018
       ]
     ],
-    "near_ground_m": 0.02,
     "lift_m": 0.05,
     "max_speed_m_s": 0.02,
     "max_joint_speed_rad_s": 0.05,

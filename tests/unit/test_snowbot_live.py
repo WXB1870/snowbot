@@ -30,6 +30,31 @@ entryspec.loader.exec_module(entry)
 
 
 class BrowserControlFailureTests(unittest.TestCase):
+    def test_manual_lift_prompts_do_not_claim_ground_contact_or_mode_switching(self):
+        html=(package_share('snowbot_bringup')/'web/snowbot.html').read_text()
+        js=html[html.index('function explainReason('):html.index('for(const [side,name,keys]')]
+        js+=html[html.index('function controlMode('):html.index('function renderControlMode(')]
+        code="const phases={},reasons={};\n"+js+"""
+const assert=require('node:assert/strict');
+const locked={phase:'locked',teleop_mode:'bimanual_tool',reason:'BIMANUAL_MEASURED_GRASP_ERROR',
+  stop_confirmed:true,ground_recovery_candidate:true,dual_modes:true};
+let s=operatorState(locked,true,true,true,true);
+assert.equal(s.key,'X');assert.match(s.status,/人工/);
+assert.match(s.reason,/大负载.*不能.*触地/);
+assert.match(s.next,/左手 X/);assert.match(s.next,/右手 B 仅复核/);assert.doesNotMatch(s.next,/接近地面|2厘米/);
+const active={...locked,phase:'ground_recovery',stop_confirmed:false,ground_recovery:{height_m:.3}};
+s=operatorState(active,true,true,true,true);
+assert.match(s.reason,/30.0.*仅作参考/);assert.match(s.next,/A\\/B\\/Y 停止/);
+let mode=controlMode(active,true);
+assert.match(mode.description,/腰部固定/);assert.match(mode.hint,/B 只停止.*不切换模式/);
+assert.equal(operatorState({...locked,recovery_required:'device_inspection'},true,true,true,true).key,'B');
+assert.equal(operatorState({...locked,stop_failure:{code:'STOP_UNCONFIRMED'}},true,true,true,true).key,'B');
+const following={...locked,phase:'following',ground_recovery_candidate:false,reason:'FOLLOWING'};
+assert.equal(operatorState(following,true,true,true,true).status,'跟随中');
+"""
+        result=subprocess.run([shutil.which('node'),'-e',code],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_model_waits_for_applied_feedback_and_marks_held_frames(self):
         node=shutil.which('node')
         self.assertIsNotNone(node, 'Node is required for this browser logic check')

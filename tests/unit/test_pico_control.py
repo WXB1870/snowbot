@@ -58,7 +58,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         node.accept_ground_observation(dict(initial,height_m=-.013))
         for value in (dict(initial,height_m=-.03),dict(initial,relative_position_error_m=.081),
                       dict(initial,relative_rotation_error_rad=.091)):
-            with self.assertRaisesRegex(RuntimeError,'CONTACT_WORSENED'):node.accept_ground_observation(value)
+            with self.assertRaisesRegex(RuntimeError,'GEOMETRY_WORSENED'):node.accept_ground_observation(value)
 
     async def test_ground_lift_stream_starts_at_authenticated_hold_and_cancellation_releases(self):
         from types import SimpleNamespace as S
@@ -95,16 +95,47 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             if changed:node.submit.call_async.assert_not_called()
             else:self.assertEqual(node.submit.call_async.call_args.args[0].command.positions,[.1])
 
-    async def test_ground_lift_far_from_ground_rejects_before_motion(self):
-        from types import SimpleNamespace as S
-        from unittest.mock import Mock,AsyncMock
-        node=self.production('ground_recovery');node.recover=AsyncMock()
-        node.prepare_hold_reference=AsyncMock(return_value={'positions':{'joint':.1}})
-        node.names=('joint',);node.reading=lambda:(None,{'joint':.1});node.current=Mock()
-        node.ground_request=AsyncMock(side_effect=RuntimeError('GROUND_RECOVERY_NOT_NEAR_GROUND'))
-        node.move=AsyncMock()
-        with self.assertRaisesRegex(RuntimeError,'NOT_NEAR_GROUND'):await node.ground_recovery(S(token=1))
-        node.move.assert_not_awaited()
+    def test_x_held_before_a_fault_cannot_start_recovery_without_release(self):
+        for entry in ('lock','operation_failure'):
+            r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+            r.core.ground_recovery_enabled=True;r.core.continuous_axial=True
+            r.core.phase='following';r.grips=[1.,1.];r.stopped=False;r.buttons[0]=1
+            self.assertEqual(r.step(),[])  # X has no grasp-switch effect in this real axial mode.
+            if entry=='lock':
+                r.core.lock('BIMANUAL_MEASURED_GRASP_ERROR',r.now);r.core.drain();r.complete()
+            else:
+                r.core.emit('follow');r.core.drain();r.complete(False,'BIMANUAL_MEASURED_GRASP_ERROR')
+            r.stopped=True;r.grips=[0.,0.]
+            self.assertTrue(all(not r.step() for _ in range(60)))
+            r.buttons[0]=0;r.step();r.buttons[0]=1
+            effects=[]
+            for _ in range(55):effects+=r.step()
+            self.assertEqual([e.operation for e in effects],['ground_recovery'])
+
+    def test_x_with_a_b_or_y_cannot_start_a_lift(self):
+        for side,mask in ((1,1),(1,2),(0,2)):
+            r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+            r.core.ground_recovery_enabled=True
+            r.core.lock('BIMANUAL_MEASURED_GRASP_ERROR',r.now);r.core.drain();r.complete();r.step()
+            r.buttons[0]=1;r.step()
+            for _ in range(49):self.assertEqual(r.step(),[])
+            r.buttons[side]|=mask
+            effects=r.step()
+            self.assertFalse(any(e.operation in ('ground_recovery','prepare') for e in effects))
+            self.assertNotEqual(r.core.phase,'ground_recovery')
+
+    def test_a_b_y_stop_a_lift_and_held_x_cannot_restart_it(self):
+        for side,mask in ((1,1),(1,2),(0,2)):
+            r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+            r.core.ground_recovery_enabled=True
+            r.core.lock('BIMANUAL_MEASURED_GRASP_ERROR',r.now);r.core.drain();r.complete();r.step()
+            r.buttons[0]=1
+            for _ in range(55):r.step()
+            self.assertEqual(r.core.phase,'ground_recovery')
+            r.buttons[side]|=mask
+            self.assertEqual([e.operation for e in r.step()],['stop'])
+            r.complete();r.buttons[side]&=~mask
+            self.assertTrue(all(not r.step() for _ in range(60)))
 
     def test_ground_lift_monitor_uses_live_reference_and_fails_on_late_or_wrong_token(self):
         from types import SimpleNamespace as S
