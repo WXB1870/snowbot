@@ -57,6 +57,11 @@ struct ArmCtlNode {
  bool position_dispatch_=false,ifInitTemp=false,checkTemp=false,ifReInit_get=true;
  unsigned ready_checks=0,native_dispatches=0;uint64_t position_instance_id_=32;
  int64_t position_nominal_bootstrap_expires_=0;
+ uint64_t position_command_received_=0,position_command_session_=0,position_command_sequence_=0;
+ int64_t position_command_expires_=0;
+ bool feedback_ready=true;unsigned immediate_forwards=0;
+ void position_log_interrupt(const char*){}
+ void msg_publish(){assert(position_gate_.last().operation==2);++immediate_forwards;}
  std::vector<double> lArm_stPos_get,rArm_stPos_get;
  std::array<double,2> position_waist_target_{};
  snowbot_ctl_msgs::msg::SessionMeta position_meta_;
@@ -70,7 +75,7 @@ struct ArmCtlNode {
  } position_feedback_;
  struct Clock {int64_t nanoseconds()const{return 2000000000;}};
  Clock now()const{return {};}
- bool position_ready(){++ready_checks;return true;}
+ bool position_ready(){++ready_checks;return feedback_ready;}
  void upperMonitor_msg_callback(const std::shared_ptr<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>&){assert(position_dispatch_);++native_dispatches;}
  void position_callback(const snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr packet);
 };
@@ -99,12 +104,21 @@ void check_middle_session(){
  packet->meta.expires_at_ns=packet->meta.source_stamp_ns+2000000000;
  node.position_feedback_.q.fill(.5);node.position_callback(packet);
  assert(node.position_rejection_.empty() && node.native_dispatches==3 && !node.ifReInit_get);
+ assert(node.immediate_forwards==1);
  assert(node.position_gate_.last().expires==packet->meta.expires_at_ns);
  assert(node.position_waist_target_==packet->waist_position);
  assert(node.lArm_stPos_get.front()==0. && node.rArm_stPos_get.front()==0.);
  ArmCtlNode expired;packet=std::make_shared<Packet>();packet->meta.expires_at_ns=1999999999;
  expired.position_callback(packet);
  assert(!expired.position_gate_.selected() && expired.native_dispatches==0);
+ for(bool stale:{false,true}){
+  ArmCtlNode blocked;blocked.position_callback(std::make_shared<Packet>());
+  auto pause=std::make_shared<Packet>();pause->meta.operation=2;++pause->meta.sequence;
+  if(stale)blocked.feedback_ready=false;
+  else pause->meta.expires_at_ns=1999999999;
+  blocked.position_callback(pause);
+  assert(blocked.immediate_forwards==0 && blocked.native_dispatches==1);
+ }
  std::cerr<<"PASS actual middle session callback rejects retired modes and forwards v3 takeover/target/PAUSE with original deadlines and waist targets\n";
 }
 #endif

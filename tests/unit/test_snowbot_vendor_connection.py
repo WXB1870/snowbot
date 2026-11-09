@@ -733,6 +733,25 @@ class DeploymentEntryTests(unittest.TestCase):
         self.assertIsNone(console('servo', notice))
         self.assertIn('ERROR', console('servo', notice.replace('[WARN]', '[ERROR]')))
 
+    def test_startup_discovery_is_grouped_but_stale_feedback_and_errors_remain_visible(self):
+        from tools.deployment.deploy import ServiceConsole
+        console = ServiceConsole(initializing=True)
+        def warning(message):
+            return f'[upper] [WARN] [1.0] [robot_upperMonitor]: Position session: {message}\n'
+        self.assertIn('INFO 正在建立反馈链', console('upper', warning('initializing')))
+        for reason in ('publisher_missing', 'publisher_discovering',
+                       'publisher_found_no_message', 'middle_instance_or_state_unavailable'):
+            self.assertIsNone(console('upper', warning(reason)))
+        repeat = '[LOG_REPEAT] '+json.dumps(dict(level=30, message='Position session: publisher_missing',
+                                                suppressed_repeats=3))+'\n'
+        self.assertIsNone(console('upper', repeat))
+        self.assertIn('WARN Position session: pdo_stale_or_not_advancing',
+                      console('upper', warning('pdo_stale_or_not_advancing')))
+        self.assertIn('ERROR', console('upper', warning('publisher_missing').replace('[WARN]', '[ERROR]')))
+        console.initializing = False
+        self.assertIn('WARN Position session: publisher_missing', console('upper', warning('publisher_missing')))
+        self.assertIsNotNone(console('upper', repeat))
+
     def test_service_output_saves_all_lines_and_only_echoes_key_events(self):
         from io import StringIO
         from types import SimpleNamespace

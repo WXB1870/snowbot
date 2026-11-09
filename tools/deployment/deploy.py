@@ -392,6 +392,10 @@ def base_wait_status(states):
 
 class ServiceConsole:
     """Select brief console messages after the complete output has been saved."""
+    STARTUP_WAIT_MESSAGES = frozenset('Position session: '+reason for reason in (
+        'initializing', 'publisher_missing', 'publisher_discovering',
+        'publisher_found_no_message', 'middle_instance_or_state_unavailable'))
+
     def __init__(self, *, initializing=False):
         self.wkc, self.repeats = {}, {}
         self.notices = set()
@@ -407,6 +411,8 @@ class ServiceConsole:
             return f'[{stream}] '+ ' '.join(fields)+'\n'
         if line.startswith('[LOG_REPEAT] '):
             value = json.loads(line[len('[LOG_REPEAT] '):])
+            if self.initializing and value.get('level') == 30 and value['message'] in self.STARTUP_WAIT_MESSAGES:
+                return None
             return f'[{stream}] {value["message"].split(";", 1)[0]} (repeat +{value["suppressed_repeats"]})\n'
         raw = line.removeprefix(f'[{stream}] ')
         value = console_log(raw, stream)
@@ -420,6 +426,12 @@ class ServiceConsole:
             return None
         message = value['message']
         key = (value['name'], value['level'], message.split(';', 1)[0])
+        if self.initializing and value['level'] == 30 and message in self.STARTUP_WAIT_MESSAGES:
+            notice = ('startup_wait', stream)
+            if notice in self.notices:
+                return None
+            self.notices.add(notice)
+            return f'[{stream}] INFO 正在建立反馈链；等待节点初始化、发布者发现及首帧反馈（详情见日志）\n'
         if key[1:] == (30, 'Position session: legacy_source_disabled_for_target_stream'):
             if stream in self.notices:
                 return None
@@ -568,7 +580,7 @@ def services(bindu, workspace, execution_mode='impedance'):
                     break
                 print(f'INITIALIZED {name}', flush=True)
             if not stopped.is_set():
-                print(f'SNOWBOT_BASE_STARTED execution_mode={execution_mode}; initialization complete, see feedback warnings', flush=True)
+                print(f'SNOWBOT_BASE_STARTED execution_mode={execution_mode}; 进程初始化完成，正在确认反馈链', flush=True)
         except (OSError, RuntimeError) as exc:
             result = 1
             print(failure_banner(f'START_FAILED {name}: {exc}; 启动未完成，Ctrl+C按顺序退出；日志：{logdir}'),
@@ -579,6 +591,7 @@ def services(bindu, workspace, execution_mode='impedance'):
             if console.initializing and all(layer in states and states[layer].startup_complete and
                     states[layer].feedback_ready for layer in ('servo', 'middle', 'upper')):
                 console.initializing = False
+                print('SNOWBOT_BASE_FEEDBACK_READY 三层反馈链已就绪', flush=True)
             for name, child in children:
                 if child.poll() is not None and name not in exited:
                     exited.add(name); result = 1
