@@ -98,6 +98,11 @@ class SnowbotAdapter(ExecutionNode):
             self.grippers.tick()
         self._tick_timing['points'].append(('gripper', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
         self._previous_tick_timing = self._tick_timing
+        delivery = getattr(self.snowbot_devices, 'pdo_delivery', None)
+        if delivery is not None:
+            window = delivery.finish(time.monotonic())
+            if window is not None:
+                self.get_logger().warn('SNOWBOT_PDO_DELIVERY_WINDOW '+json.dumps(window, separators=(',', ':')))
 
     def record_stop_check(self):
         # Emit from the explicit non-RT loop, never from a health predicate.
@@ -172,4 +177,8 @@ class SnowbotAdapter(ExecutionNode):
 
 def main():
     os.environ.setdefault('RMW_FASTRTPS_PUBLICATION_MODE', 'ASYNCHRONOUS')
-    run_execution(SnowbotAdapter)
+    if os.environ.get('ROS_DISTRO') == 'humble':
+        from .pdo_executor import HumbleObservationExecutor
+        run_execution(SnowbotAdapter, executor_factory=HumbleObservationExecutor)
+    else:
+        run_execution(SnowbotAdapter)

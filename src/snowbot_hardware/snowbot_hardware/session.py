@@ -1,4 +1,5 @@
 """Independent position-session contract. No ROS, devices or implicit renewal."""
+from collections import deque
 import math
 import time
 
@@ -72,6 +73,42 @@ def decode_observation(msg, now):
     return q, v, stamp-msg.pdo_age
 
 
+class PdoDeliveryWindow:
+    """Timing for samples taken from the same depth-one subscription, on one executor."""
+    def __init__(self):
+        self.history = deque(maxlen=8)
+        self.taken = None
+        self.window = None
+        self.deadline = 0.
+
+    def callback(self, msg, received_ros, entered, callback_system_ns):
+        # A take and its callback run serially on this executor.
+        taken, self.taken = self.taken, None
+        info, taken_ns = taken[1:] if taken is not None and taken[0] is msg else ({}, None)
+        stamp = msg.header.stamp
+        source_ns = stamp.sec*1_000_000_000 + stamp.nanosec
+        record = dict(boot_id=msg.boot_id, pdo_sample=msg.pdo_sample, header_ros_ns=source_ns,
+                      measurement_ros_ns=source_ns-round(msg.pdo_age*1e9) if math.isfinite(msg.pdo_age) else None,
+                      dds_source_ns=info.get('source_timestamp') or None,
+                      dds_received_ns=info.get('received_timestamp') or None,
+                      take_system_ns=taken_ns, callback_system_ns=callback_system_ns, callback_ros=received_ros)
+        self.history.append(record)
+        if self.window is not None and entered < self.deadline and len(self.window['after']) < 3:
+            self.window['after'].append(record)
+
+    def trigger(self, detail, now):
+        if self.window is None:
+            self.window = dict(trigger=detail, before=list(self.history), after=[])
+            self.deadline = now + .1
+
+    def finish(self, now):
+        if self.window is None or (len(self.window['after']) < 3 and now < self.deadline):
+            return None
+        window, self.window = self.window, None
+        window['end_reason'] = 'three_samples' if len(window['after']) == 3 else 'timeout'
+        return window
+
+
 class SessionHealth:
     def __init__(self, now, steady=time.monotonic, *, execution_mode="position", on_stale=None):
         self.execution_mode = execution_mode
@@ -88,7 +125,6 @@ class SessionHealth:
         self.progress = None
         self.invalid = ''
         self.messages = {'servo': {}}
-        from collections import deque
         self.observation_callback_count = 0
         self.observation_callbacks = deque(maxlen=8)
 

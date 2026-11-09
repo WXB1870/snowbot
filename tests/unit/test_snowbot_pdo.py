@@ -36,7 +36,9 @@ class ReferenceDeliveryBudgetTests(unittest.TestCase):
         function = next(n for n in ast.parse(source.read_text()).body
                         if isinstance(n, ast.FunctionDef) and n.name == 'main')
         for value in (None, 'SYNCHRONOUS'):
-            env = {} if value is None else {'RMW_FASTRTPS_PUBLICATION_MODE': value}
+            env = {'ROS_DISTRO': 'jazzy'}
+            if value is not None:
+                env['RMW_FASTRTPS_PUBLICATION_MODE'] = value
             seen = []
             ns = dict(os=os, SnowbotAdapter=object(), run_execution=lambda _: seen.append(
                 os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE')))
@@ -53,6 +55,37 @@ def frame(sample=1, stamp=10., **changes):
 
 
 class SessionSensorBudgetTests(unittest.TestCase):
+    def test_dds_delivery_fault_window_preserves_sample_identity_and_deadline(self):
+        from snowbot_hardware.session import PdoDeliveryWindow
+        window = PdoDeliveryWindow()
+        def deliver(sample, when, *, missing=False):
+            msg = S(boot_id=7, pdo_sample=sample, pdo_age=.001, header=S(stamp=S(sec=12,nanosec=345)))
+            info = dict(source_timestamp=1000+sample, received_timestamp=0 if missing else 2000+sample)
+            window.taken = (msg, info, 3000+sample)
+            window.callback(msg, 12.01, when, 4000+sample)
+        for sample in range(11):
+            deliver(sample, 2.)
+        trigger = dict(boot_id=7, pdo_sample=10, checked_ros=12.04)
+        window.trigger(trigger, 2.)
+        for sample in (12, 13, 15):
+            deliver(sample, 2.01, missing=sample==13)
+        result = window.finish(2.02)
+        self.assertEqual(result['trigger'], trigger)
+        self.assertEqual(result['end_reason'], 'three_samples')
+        self.assertEqual([r['pdo_sample'] for r in result['before']], list(range(3,11)))
+        self.assertEqual([r['pdo_sample'] for r in result['after']], [12,13,15])
+        self.assertEqual(result['after'][0], dict(boot_id=7, pdo_sample=12, header_ros_ns=12000000345,
+            measurement_ros_ns=11999000345, dds_source_ns=1012, dds_received_ns=2012,
+            take_system_ns=3012, callback_system_ns=4012, callback_ros=12.01))
+        self.assertIsNone(result['after'][1]['dds_received_ns'])
+        window.trigger(trigger, 3.)
+        window.trigger(dict(pdo_sample=99), 3.05)
+        self.assertIsNone(window.finish(3.09))
+        deliver(17, 3.101)
+        expired = window.finish(3.11)
+        self.assertEqual((expired['end_reason'], expired['trigger'], expired['after']), ('timeout', trigger, []))
+        self.assertIsNone(window.finish(3.12))
+
     def test_stale_evidence_identifies_checked_sample_and_callback_time(self):
         from snowbot_hardware.session import SessionHealth
 

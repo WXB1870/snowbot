@@ -194,7 +194,8 @@ class PositionSessionDevices:
         # samples after a callback stall; all existing freshness gates still apply.
         feedback_qos=copy(qos_profile_sensor_data)
         feedback_qos.depth=1
-        node.create_subscription(PositionObservation, self.feedback_topic, self.receive, feedback_qos)
+        self.pdo_delivery = None
+        self.feedback_subscription = node.create_subscription(PositionObservation, self.feedback_topic, self.receive, feedback_qos)
         for layer, receiver in (('upper', 'arms'), ('middle', 'middle'), ('servo', 'head')):
             topic = '/bindu/position/'+layer+'_state'
             node.create_subscription(PositionSessionState, topic,
@@ -325,6 +326,8 @@ class PositionSessionDevices:
         self.node.event('TRAJECTORY_REFERENCE_EMPTY',json.dumps(detail,separators=(',', ':')))
 
     def log_stale_observation(self, detail):
+        if self.pdo_delivery is not None:
+            self.pdo_delivery.trigger(detail, self.health.steady())
         message = 'SNOWBOT_PDO_STALE '+json.dumps(detail, separators=(',', ':'))
         if detail['stage'] == 'receive':
             self.node.get_logger().warn(message, throttle_duration_sec=1.)
@@ -335,6 +338,8 @@ class PositionSessionDevices:
         entered = self.health.steady()
         source = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
         received_ros = self.node.now()
+        if self.pdo_delivery is not None:
+            self.pdo_delivery.callback(msg, received_ros, entered, time.time_ns())
         source_age = received_ros-source
         self.health.observation_callback_count += 1
         identity_finished, outcome = None, 'publisher_discovering'
