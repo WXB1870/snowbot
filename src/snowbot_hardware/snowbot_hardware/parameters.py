@@ -133,13 +133,10 @@ def validate_pico_timing(parameters, *, brake_lead_s=0.):
     if brake_lead_s and brake_lead_s >= parameters['teleop']['command_ttl_s']:
         raise ValueError('SNOWBOT_TARGET_BRAKE_LEAD_EXCEEDS_TTL')
     # ExecutionNode grants and Executor renews arm leases for two seconds.
-    arm_lease_s = 2.
-    for key, ttl in (('renewal_period_s', min(arm_lease_s, g['lease_ttl_s'])),
-                     ('stop_renewal_period_s', arm_lease_s)):
-        if p[key] >= ttl:
-            raise ValueError(f'SNOWBOT_PICO_RENEWAL_TIMING:{key} must be < {ttl:g}s')
-        if p[key]+p['renewal_timeout_s'] >= arm_lease_s:
-            raise ValueError(f'SNOWBOT_PICO_RENEWAL_TIMING:{key} + renewal_timeout_s must be < {arm_lease_s:g}s')
+    for key in ('renewal_period_s', 'stop_renewal_period_s'):
+        if (p[key]+p['renewal_timeout_s'] >= 2. or
+                key=='renewal_period_s' and p[key]>=g['lease_ttl_s']):
+            raise ValueError(f'SNOWBOT_PICO_RENEWAL_TIMING:{key} exceeds lease budget')
     if p['prepare_command_period_s'] + brake_lead_s >= p['prepare_command_ttl_s']:
         raise ValueError('SNOWBOT_PREPARE_TIMING: prepare_command_period_s + '
                          'target_stream_brake_lead_s must be < prepare_command_ttl_s')

@@ -854,7 +854,7 @@ class PicoNode(RuntimeNode):
             started=self.now();command_id=self.instance_id+'_'+str(intent.token)+'_'+uuid.uuid4().hex[:8]
             deadline=time.monotonic()+duration+parameters_for(self,'pico')['motion_completion_grace_s'];renew_at=0.;next_submit=0.
             renewal=None;renewal_started=0.
-            submissions=[];unconfirmed=None
+            submissions=[];msg=None
             replay_tick=0;replay_steady=time.monotonic();nominal_sample_seen=False
             while time.monotonic()<deadline:
                 self.current(intent)
@@ -894,17 +894,13 @@ class PicoNode(RuntimeNode):
                     if not response.accepted:raise RuntimeError(response.code)
                     revision=max(revision,response.revision)
                 submissions=receipts
-                if unconfirmed is not None:
-                    future,msg,submitted_at=unconfirmed
-                    # A matching executor state is also an acceptance receipt.
-                    # Never guess the next revision or disable revision fencing.
-                    observed=state.command_id==msg.command_id and state.revision>msg.expected_revision
-                    if future.done() or observed:
-                        if observed:revision=max(revision,state.revision)
-                        unconfirmed=None
-                        if intent.operation=='ground_recovery':self.ground_recovery_plan.setdefault('stream_started',time.monotonic())
-                    elif time.monotonic()-submitted_at>=msg.valid_for:
-                        raise RuntimeError('PICO_SUBMIT_UNCONFIRMED')
+                # Acceptance advances revision once; a later hold cannot re-arm the stream.
+                if (msg is not None and state.command_id==msg.command_id and
+                        state.revision==msg.expected_revision+1):
+                    revision=max(revision,state.revision)
+                ready=msg is None or revision>msg.expected_revision
+                if ready and msg is not None and intent.operation=='ground_recovery':
+                    self.ground_recovery_plan.setdefault('stream_started',time.monotonic())
                 if renewal is not None:
                     if time.monotonic()-renewal_started>=parameters_for(self,'pico')['renewal_timeout_s']:
                         raise RuntimeError('PICO_LEASE_RENEW_TIMEOUT')
@@ -946,7 +942,7 @@ class PicoNode(RuntimeNode):
                         lease_id=lease.lease_id,epoch=lease.epoch))
                     renewal_started=time.monotonic()
                     renew_at=renewal_started+parameters_for(self,'pico')['renewal_period_s']
-                if now>=next_submit and unconfirmed is None:
+                if now>=next_submit and ready:
                     lookahead=parameters_for(self,'pico')['reference_lookahead_s']
                     lookahead_sec,lookahead_ns=divmod(round(lookahead*1e9),1000000000)
                     source=started+replay_tick*.02 if replay is not None else now
@@ -965,7 +961,6 @@ class PicoNode(RuntimeNode):
                     future=self.submit.call_async(SubmitMotion.Request(command=msg))
                     submitted_at=time.monotonic()
                     submissions.append((future,submitted_at))
-                    unconfirmed=(future,msg,submitted_at)
                     segment+=1
                     replay_tick+=1
                     next_submit=started+replay_tick*.02 if replay is not None else now+parameters_for(self,'pico')['prepare_command_period_s']

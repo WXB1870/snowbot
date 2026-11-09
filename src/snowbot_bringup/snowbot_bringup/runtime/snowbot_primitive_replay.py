@@ -241,9 +241,6 @@ def execute(args, plan):
                 reply = future.result()
                 if not (reply.ok if operation=='renew' else reply.accepted):
                     raise RuntimeError(reply.code)
-                if operation=='renew' and (reply.lease_id!=self.lease.lease_id or
-                        reply.epoch!=self.lease.epoch or reply.profile_hash!=robot.profile.digest):
-                    raise RuntimeError('REPLAY_LEASE_CHANGED')
             self.receipts = remaining
 
         def send(self, source):

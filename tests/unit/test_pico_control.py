@@ -98,7 +98,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     return node.ground_recovery_plan['hold']
                 node.prepare_hold_reference.side_effect=shifted
             node.leases=S(call_async=lambda request:lease);node.wait=AsyncMock(side_effect=lambda value:value)
-            node.release_lease=AsyncMock();node.submit=S(call_async=Mock(return_value=S(done=lambda:True,result=lambda:S(accepted=True,revision=2))))
+            node.release_lease=AsyncMock();node.submit=S(call_async=Mock(side_effect=lambda req:S(done=lambda:True,result=lambda:S(accepted=True,revision=req.command.expected_revision+1))))
             node.reset_grasp_reference=AsyncMock()
             scope=node.move.__func__.__globals__
             node.pause=AsyncMock(side_effect=scope['Superseded']('released X'))
@@ -1096,7 +1096,7 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         node.validator.submit.assert_called_once_with('prepare_path',2,measured,[.2])
 
     async def movement(self,*,outward=False,hold_error=False,renew_delay=None,renew_ok=True,revoked=False,renew_epoch=2,
-                       start_delta=0.,start_tolerance=None,submit_delay=None,observe_submit=True,submit_error=None,cancel_at=None):
+                       start_delta=0.,start_tolerance=None,submit_delay=None,observe_submit=True,submit_error=None,cancel_at=None,hold=False):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock
         from bindu_contracts.profile import Profile
@@ -1115,7 +1115,7 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         node.state=state;node.current=Mock();node.feedback=lambda:S(stopped=True)
         def current(intent):
             if cancel_at is not None and clock[0]>=cancel_at:raise RuntimeError('PICO_OPERATION_SUPERSEDED')
-        node.current.side_effect=current;node.test_clock=clock;node.submit_futures=[]
+        node.current.side_effect=current;node.test_clock=clock;node.submit_futures=[];node.hold_revision=None
         node.prepare_position_tolerance=.035;node.prepare_limit_max=.017453292519943295
         node.prepare_limit_reference={'positions':{'joint':held}};node.prepare_limit_start={'joint':actual}
         node.prepare_hold_reference=AsyncMock(return_value=node.prepare_limit_reference)
@@ -1141,6 +1141,8 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         def reading():
             q=actual+start_delta if not clock[0] else actual-.003 if outward else .2
             state.feedback_stamp=S(sec=int(clock[0]),nanosec=0)
+            if hold and clock[0]>=.12 and node.hold_revision is None:
+                state.revision+=1;node.hold_revision=state.revision
             if revoked and clock[0]>=.12:
                 state.command_id=node.submit.call_async.call_args.args[0].command.command_id
                 state.state='STOPPING';state.code='COMMAND_TIMEOUT';state.lease_active=False;state.lease_epoch=3
@@ -1150,12 +1152,13 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             clock[0]=(round(clock[0]+.04,6) if renew_delay is not None or submit_delay is not None else
                       .01 if outward or not clock[0] else 41.)
         def submit(request):
-            issued=clock[0];revision=state.revision+1
-            if observe_submit:
-                self.assertEqual(request.command.expected_revision,state.revision)
+            issued=clock[0];accepted=request.command.expected_revision==state.revision
+            revision=state.revision+int(accepted)
+            if observe_submit and accepted:
                 state.command_id=request.command.command_id;state.revision=revision
             future=S(done=lambda:clock[0]>=issued+(submit_delay or 0.),
-                result=lambda:S(accepted=not submit_error,code=submit_error,revision=revision))
+                result=lambda:S(accepted=accepted and not submit_error,
+                    code=submit_error or ('STALE_REVISION' if not accepted else None),revision=revision))
             node.submit_futures.append(future)
             return future
         node.pause=pause;node.submit=S(call_async=Mock(side_effect=submit))
@@ -1183,7 +1186,7 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         renewals=[c for c in node.leases.call_async.call_args_list if c.args[0].operation=='renew']
         self.assertGreaterEqual(len(renewals),4)
         self.assertLess(max(b-a for a,b in zip(node.renew_times,node.renew_times[1:])),.241)
-        for kwargs,code in (({'observe_submit':False,'submit_delay':10.},'PICO_SUBMIT_UNCONFIRMED'),
+        for kwargs,code in (({'observe_submit':False,'submit_delay':10.},'PICO_SUBMIT_REPLY_TIMEOUT'),
                             ({'submit_delay':.16,'submit_error':'STALE_REVISION'},'STALE_REVISION')):
             with self.subTest(code=code),self.assertRaisesRegex(RuntimeError,code):
                 await self.movement(**kwargs)
@@ -1199,6 +1202,15 @@ class LimitRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for future in node.submit_futures:
             self.assertTrue(future.done());future.result()
         self.assertEqual(node.submit.call_async.call_count,count)
+        node.release_lease.assert_awaited_once()
+
+    async def test_stop_revision_is_not_reused_as_a_submit_receipt(self):
+        with self.assertRaisesRegex(RuntimeError,'STALE_REVISION'):
+            await self.movement(submit_delay=.24,hold=True)
+        node=self.last_movement
+        self.assertEqual(node.state.revision,node.hold_revision)
+        self.assertTrue(all(c.args[0].command.expected_revision<node.hold_revision
+                            for c in node.submit.call_async.call_args_list))
         node.release_lease.assert_awaited_once()
 
     async def test_recovery_starts_at_confirmed_reference_and_returns_inside_hard_bounds(self):
@@ -1269,7 +1281,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
             leases=S(call_async=lambda r:lease if r.operation=='acquire' else renewal),wait=wait,instance_id='test',groups=('left_arm',),
             state=state,reading=reading,names=(joint,),position_contract=position_contract,profile=profile,
             event=Mock(),simulation=False,now=lambda:clock[0],runtime_mode='real',pause=pause,
-            runtime_parameters=parameters,submit=S(call_async=Mock(return_value=S(done=lambda:True,result=lambda:S(accepted=True,revision=0)))),
+            runtime_parameters=parameters,submit=S(call_async=Mock(side_effect=lambda req:S(done=lambda:True,result=lambda:S(accepted=True,revision=req.command.expected_revision+1)))),
             release_lease=AsyncMock(side_effect=stop_error))
         node.execution_mode=execution_mode
         node.tool_cfg=dict(reference_kinematics=True,max_reference_error=.15,feedback_max_age=.2,
