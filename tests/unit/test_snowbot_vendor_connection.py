@@ -660,6 +660,83 @@ class DeploymentEntryTests(unittest.TestCase):
         self.assertIn('prev_pid == 41',discovered['sched_switch'])
         self.assertIn('prev_comm == "snowbot_adapter"',discovered['sched_switch'])
 
+    def test_passive_capture_matches_fault_period_with_reused_ethercat_index(self):
+        import io
+        import socket
+        import struct
+        from tools.deployment import capture_ethercat as capture
+
+        # The monotonic timestamps are from the 22:19:54 trace, packet stamps are synthetic.
+        line = (b'[ECAT-FAULT-CYCLE] tid=15308 sequence=832850 first_bad=1 '
+                b'send_ns=15278475874851 receive_ns=15278476889552 '
+                b'recv_begin_ns=15278475888867 recv_end_ns=15278476889552')
+        log = io.BytesIO(b'[ECAT-FAULT] first_bad_sequence=832850\n' + line)
+        self.assertIsNone(capture.new_fault(log))
+        position = log.tell()
+        log.seek(0, 2)
+        log.write(b' WKC=-1/67\n')
+        log.seek(position)
+        fault = capture.new_fault(log)
+        self.assertEqual(fault['sequence'], 832850)
+        start, end = fault['send_ns'], fault['recv_end_ns']
+        def pair(mono):
+            return ((mono-5, mono+2_000_000, mono+5), (mono-8, mono+3_000_000, mono+8))
+        info = dict(fault=fault, clocks=[pair(start-100_000_000), pair(end+100_000_000)])
+        def record(direction, index, sw, hw=None):
+            frame = bytearray.fromhex('ffffffffffff 010101010101 88a4 0e10 0c00'
+                                      ' 34120000 0200 0000 aabb 4300')
+            frame[17] = index
+            stamps = struct.pack('=6q', *divmod(sw+2_000_000, 10**9), 0, 0,
+                                 *divmod(hw+3_000_000 if hw else 0, 10**9))
+            return capture.frame_record(frame, direction, [(socket.SOL_SOCKET, 37, stamps)], sw+100_000)
+        tx = record('TX', 4, start+1500)
+        rx = record('RX', 4, end+40_000, start+120_000)
+        frames = [tx, record('RX', 7, start+80_000), rx,
+                  record('TX', 4, end+15_000_000), record('RX', 4, end+15_120_000)]
+        result = capture.fault_frames(frames, info)
+        self.assertEqual(result['matching_rx'], [dict(record=2, first_wkc=67,
+            hw_mono_estimate_ns=[start+119_992,start+120_008],
+            sw_mono_estimate_ns=[end+39_995,end+40_005])])
+        self.assertEqual(capture.fault_frames([tx, tx], info)['status'], 'ambiguous_tx')
+        self.assertEqual(capture.fault_frames([tx], info)['matching_rx'], [])
+        sw_only = capture.fault_frames([tx, record('RX', 4, end)], info)
+        self.assertIsNone(sw_only['matching_rx'][0]['hw_mono_estimate_ns'])
+        self.assertIsNone(capture.frame_record(bytes(60), 'RX', [], end))
+
+    def test_passive_capture_freezes_bounded_ring_and_restores_timestamp_filter(self):
+        import ctypes
+        import io
+        import socket
+        import struct
+        from unittest.mock import Mock, patch
+        from tools.deployment import capture_ethercat as capture
+
+        sock = Mock()
+        configs = []
+        def ioctl(_, request, arg):
+            pointer = struct.unpack_from('@16sP', arg)[1]
+            config = (ctypes.c_int*3).from_address(pointer)
+            if request == 0x89b1:
+                config[:] = [0, 1, 0]
+            else:
+                configs.append(tuple(config))
+        with patch.object(capture.fcntl, 'ioctl', side_effect=ioctl):
+            with self.assertRaises(InterruptedError), capture.rx_hardware_filter(sock, 'enP5p5s0', True):
+                raise InterruptedError()
+        self.assertEqual(configs, [(0,1,1), (0,1,0)])
+        frame = bytes.fromhex('ffffffffffff 010101010101 88a4 0c10 0c01 00000000 0000 0000 4300')
+        sock.recvmsg.return_value = (frame, [], 0, ('test',0,0))
+        sock.getsockopt.return_value = struct.pack('=II', 20, 2)
+        log = io.BytesIO(b'[ECAT-FAULT-CYCLE] sequence=6 first_bad=1 send_ns=101 '
+                         b'recv_begin_ns=110 recv_end_ns=1000110\n')
+        from itertools import count
+        with patch.object(capture, 'FRAME_LIMIT', 2), patch.object(capture.select, 'select', return_value=([sock],[],[])), \
+             patch.object(capture.time, 'monotonic_ns', side_effect=count(0, 5_000_000)):
+            frames, info = capture.collect(sock, log, None, lambda: False)
+        self.assertEqual((len(frames), info['stop'], info['kernel_socket_drops']), (2,'fault',2))
+        self.assertGreater(info['ring_overwrites'], 0)
+        self.assertEqual(info['hardware_stamped_rx'], 0)
+
     def test_scheduler_trace_uses_monotonic_fault_window(self):
         from tools.deployment.deploy import sched_trace_window
         text='# tracer: nop\nworker-41 [000] 2.900000: sched_switch: prev_pid=41 prev_state=S\n'
