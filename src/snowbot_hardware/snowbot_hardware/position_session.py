@@ -20,6 +20,7 @@ class PositionSessionIO(SnowbotIO):
     target_stream = True
     servo_reference = None
     captured_pause_request = None
+    startup_pause_request = None
 
     def __init__(self, *args, reference_diagnostic=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -96,7 +97,15 @@ class PositionSessionIO(SnowbotIO):
             # that a following session stop producing motion.
             self.reference.clear()
             if not self.targets:
+                if self.startup_pause_request and self.pause_targets and not self.stop_targets:
+                    # Startup accepted this hold without proving rest. Reuse the
+                    # same ACK for a later stop, even after an empty capture.
+                    self.pause_request = self.startup_pause_request
+                    self.stop_targets = self.pause_targets.copy()
+                    self.stop_requested_at = self.now()
+                    self.startup_pause_request = None
                 return  # Pending PAUSE is not renewed on repeated faults.
+            self.startup_pause_request = None
             self.stop_requested_at = self.now()
             target = dict(self.targets)
             try:
@@ -577,6 +586,8 @@ class PositionSessionDevices:
             elif self.takeover_pending is None and self.applied_sequence:
                 home = getattr(self, 'startup_home', False)
                 engine.halt(now, 'CANCELED' if home else 'POWERED_HOLD', revoke=not home)
+                if not home and not self.io.stop_failures:
+                    self.io.startup_pause_request = self.io.pause_request
                 self.startup_hold_state = 'holding' if home else 'stopping'
         elif state == 'holding' and not engine.stopping:
             self.startup_home_deadline = now+self.io.profile.max_transition_duration
