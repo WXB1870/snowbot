@@ -282,6 +282,10 @@ def sched_event_filters(tids, *, startup_window=False):
     filters = {
         'sched_switch': ' || '.join(f'prev_pid == {tid} || next_pid == {tid}' for tid in tids) or 'prev_pid < 0',
         'sched_wakeup': ' || '.join(f'pid == {tid}' for tid in tids) or 'pid < 0'}
+    if startup_window == 'follow':
+        # Keep the switches between peers while the adapter is runnable off-CPU.
+        target = filters['sched_wakeup']+' || comm == "snowbot_adapter"'
+        return dict(sched_switch='0', sched_wakeup=target, sched_migrate_task=target)
     if startup_window:
         # Catch the adapter by its kernel comm before its first log arrives.
         filters['sched_switch'] += ' || prev_comm == "snowbot_adapter" || next_comm == "snowbot_adapter"'
@@ -293,13 +297,20 @@ def sched_trace_window(text, fault_ns, before_s=2.):
     start = fault_ns/1e9-before_s
     lines, times = [], []
     for line in text.splitlines():
-        event = re.search(r'\s(\d+\.\d+): (?:sched:)?sched_(?:switch|wakeup):', line)
+        event = re.search(r'\s(\d+\.\d+): (?:sched:)?sched_(?:switch|wakeup|migrate_task):', line)
         if line.startswith('#'):
             lines.append(line)
         elif event and float(event[1]) >= start:
             lines.append(line); times.append(float(event[1]))
     return '\n'.join(lines)+'\n', dict(first_event_s=min(times) if times else None,
         last_event_s=max(times) if times else None, events=len(times))
+
+
+def follow_pdo_fault(detail, armed_ns, now_ns):
+    return (detail['state'] == 'DEVICE_COMMAND_DETAIL'
+            and detail['code'] in ('SNOWBOT_PDO_STALE', 'SNOWBOT_PDO_NOT_ADVANCING')
+            and detail.get('task_id', '').startswith('pico_')
+            and armed_ns <= detail['steady_ns'] <= now_ns)
 
 
 def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
@@ -321,10 +332,16 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
     deadline, configured, simulation, before_s = None, set(), False, 15. if startup_window else 2.
     startup_deadline=None
     buffer_kb=8192 if startup_window else 2048
+    follow = startup_window == 'follow'
+    post_notice_s = .02 if follow else .2
+    if follow:
+        before_s, buffer_kb = .20, 1024
+    armed_ns = time.monotonic_ns()
+    events = sched_event_filters([], startup_window=startup_window)
     try:
         write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
         write('buffer_size_kb',buffer_kb); write('options/overwrite',1)
-        for event, expression in sched_event_filters([],startup_window=startup_window).items():
+        for event, expression in events.items():
             write('events/sched/'+event+'/filter',expression)
             write('events/sched/'+event+'/enable',1)
         write('trace',''); write('tracing_on',1)
@@ -361,7 +378,7 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                 for line in lines:
                     thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle|adapter) pid=(\d+) tid=(\d+)',line)
                     if thread and Path('/proc/'+thread[3]).exists():
-                        if (startup_window and startup_window!='hold' and startup_deadline is None and
+                        if (startup_window and startup_window not in ('hold','follow') and startup_deadline is None and
                                 (startup_window!='adapter' or thread[1]=='adapter')):
                             startup_deadline=time.monotonic_ns()+15000000000
                         if tids.get(thread[1])!=int(thread[3]):identified_ns[thread[1]]=time.monotonic_ns()
@@ -375,9 +392,14 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                             print('SCHED_TRACE_ARMED '+json.dumps(tids),flush=True)
                     if 'adapter' in tids and 'DEVICE_FAULT ' in line and noticed_ns is None:
                         detail=json.loads(line.split('DEVICE_FAULT ',1)[1])
+                        now_ns = time.monotonic_ns()
+                        if follow and not follow_pdo_fault(detail, armed_ns, now_ns):
+                            continue
                         if detail['state']=='DEVICE_COMMAND_DETAIL':
-                            noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
+                            noticed_ns=now_ns;deadline=noticed_ns+round(post_notice_s*1e9)
                             fault_ns=detail['steady_ns'];simulation=bool(detail.get('simulation',False))
+                    if follow:
+                        continue
                     if configured and any(marker in line for marker in (
                             '[ECAT-FAULT]', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT',
                             'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY', 'POSITION_WATCHDOG_FAULT')) and noticed_ns is None:
@@ -396,6 +418,9 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
         frozen_ns=time.monotonic_ns()
         if fault_ns is None:fault_ns=noticed_ns or frozen_ns
         text,coverage=sched_trace_window((instance/'trace').read_text(),fault_ns,before_s=before_s)
+        if follow:
+            coverage['per_cpu_stats'] = {p.parent.name:p.read_text()
+                                         for p in sorted((instance/'per_cpu').glob('cpu*/stats'))}
         thread_info={}
         recorded=set(map(int,re.findall(r'(?:prev_pid|next_pid|\bpid)=(\d+)',text))) | set(tids.values())
         for tid in sorted(recorded-{0}):
@@ -404,12 +429,15 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                 thread_info[tid]=dict(comm=(Path('/proc')/str(tid)/'comm').read_text().strip(),
                     policy=os.sched_getscheduler(tid),priority=os.sched_getparam(tid).sched_priority,
                     cpus_allowed=re.search(r'Cpus_allowed_list:\s*(\S+)',status)[1])
+                if follow:
+                    tgid = int(re.search(r'Tgid:\s*(\d+)',status)[1])
+                    thread_info[tid].update(tgid=tgid, process=(Path('/proc')/str(tgid)/'comm').read_text().strip())
             except (FileNotFoundError,ProcessLookupError):thread_info[tid]=dict(exited=True)
         output=workspace/'scheduler-traces'/(time.strftime('%Y%m%d-%H%M%S')+'-'+str(os.getpid()))
         output.mkdir(parents=True)
         (output/'sched.trace').write_text(text)
         info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
-            requested_before_s=before_s,post_notice_s=.2,buffer_kb_per_cpu=buffer_kb,
+            requested_before_s=before_s,post_notice_s=post_notice_s,buffer_kb_per_cpu=buffer_kb,
             startup_window=startup_window,startup_deadline_ns=startup_deadline,
             tids=tids,tids_identified_ns=identified_ns,
             adapter_comm_filter='snowbot_adapter' if startup_window else None,
@@ -421,7 +449,9 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
         return output
     finally:
         write('tracing_on',0)
-        for event in ('sched_switch','sched_wakeup'):write('events/sched/'+event+'/enable',0)
+        for event in events:
+            if (instance/'events/sched'/event/'enable').exists():
+                write('events/sched/'+event+'/enable',0)
         instance.rmdir()
         for sig,handler in handlers.items():signal.signal(sig,handler)
 
@@ -879,8 +909,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers', 'trace-scheduling'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
-    parser.add_argument('--startup-window',nargs='?',choices=('base','adapter','hold'),const='base',
-                        help='trace-scheduling: base/adapter capture 15 seconds; hold waits for a fault')
+    parser.add_argument('--startup-window',nargs='?',choices=('base','adapter','hold','follow'),const='base',
+                        help='trace-scheduling: base/adapter capture 15 seconds; hold waits for a fault; follow waits for a PICO PDO command fault')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
                         help='Select machine defaults; prepare/build remember the selection for later runs')
