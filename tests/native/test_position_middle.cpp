@@ -30,6 +30,8 @@ struct ArmCtlOptInterface {
 #include "position_session_ros.h"
 #include <memory>
 #include <string>
+#include <functional>
+#include <type_traits>
 namespace snowbot_ctl_msgs { namespace msg {
 struct MidNodeCtlMsgSend {bool if_streaming_joint_position=true;int ctl_trans_mod=3;};
 struct SessionMeta {
@@ -65,7 +67,17 @@ struct ArmCtlNode {
  std::vector<double> lArm_stPos_get,rArm_stPos_get;
  std::array<double,2> position_waist_target_{};
  snowbot_ctl_msgs::msg::SessionMeta position_meta_;
- ArmCtlNode(){position_meta_.session=0;}
+ std::function<void(snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr)> session_input;
+ std::function<void(std::shared_ptr<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>)> legacy_input;
+ int position_sub_=0,upperMonitorMsg_get=0;
+ template<class Message,class Callback>int create_subscription(const char*,int,Callback callback){
+  if constexpr(std::is_same_v<Message,snowbot_ctl_msgs::msg::PositionSessionUpper>)session_input=callback;
+  else legacy_input=callback;
+  return 0;
+ }
+ ArmCtlNode(){position_meta_.session=0;
+  // PRODUCTION_MIDDLE_INPUTS
+ }
  int position_trajectory_=0;
  snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr position_target_packet_;
  struct Feedback {
@@ -82,6 +94,10 @@ struct ArmCtlNode {
 // PRODUCTION_MIDDLE_CALLBACK
 void check_middle_session(){
  using Packet=snowbot_ctl_msgs::msg::PositionSessionUpper;
+ ArmCtlNode startup;
+ assert(startup.session_input && !startup.legacy_input && startup.native_dispatches==0);
+ startup.session_input(std::make_shared<Packet>());
+ assert(startup.native_dispatches==1 && startup.ifReInit_get);
  ArmCtlNode discovering;discovering.source_known=false;
  discovering.position_callback(std::make_shared<Packet>());
  assert(discovering.position_rejection_.empty()&&!discovering.position_gate_.selected()&&discovering.native_dispatches==0);

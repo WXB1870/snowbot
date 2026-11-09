@@ -297,7 +297,7 @@ def sched_trace_window(text, fault_ns, before_s=2.):
         last_event_s=max(times) if times else None, events=len(times))
 
 
-def trace_scheduling(workspace, *, tracefs=None):
+def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
     """One diagnostic capture; never launches, signals or controls a robot process."""
     if os.geteuid() != 0:
         raise ValueError('trace-scheduling需要root；请现场用sudo运行该采集命令')
@@ -312,10 +312,12 @@ def trace_scheduling(workspace, *, tracefs=None):
     handlers = {s:signal.signal(s,lambda *_:stopped.set()) for s in (signal.SIGINT,signal.SIGTERM)}
     def write(name, value): (instance/name).write_text(str(value))
     source, control_source, offsets, tids, fault_ns, noticed_ns = None, None, {}, {}, None, None
-    deadline, configured, simulation, before_s = None, set(), False, 2.
+    deadline, configured, simulation, before_s = None, set(), False, 15. if startup_window else 2.
+    startup_deadline=None
+    buffer_kb=8192 if startup_window else 2048
     try:
         write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
-        write('buffer_size_kb',2048); write('options/overwrite',1)
+        write('buffer_size_kb',buffer_kb); write('options/overwrite',1)
         for event, expression in sched_event_filters([]).items():
             write('events/sched/'+event+'/filter',expression)
             write('events/sched/'+event+'/enable',1)
@@ -353,6 +355,8 @@ def trace_scheduling(workspace, *, tracefs=None):
                 for line in lines:
                     thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle|adapter) pid=(\d+) tid=(\d+)',line)
                     if thread and Path('/proc/'+thread[3]).exists():
+                        if startup_window and startup_deadline is None:
+                            startup_deadline=time.monotonic_ns()+15000000000
                         tids[thread[1]] = int(thread[3])
                         if set(tids.values()) != configured:
                             for event, expression in sched_event_filters(tids.values()).items():
@@ -376,6 +380,7 @@ def trace_scheduling(workspace, *, tracefs=None):
                     stamp = re.search(r'(?:recv_end_ns|steady_ns)=(\d+)',line) if first else None
                     if stamp and noticed_ns is not None: fault_ns=int(stamp[1])
             if deadline is not None and time.monotonic_ns() >= deadline:break
+            if startup_deadline is not None and time.monotonic_ns() >= startup_deadline:break
             time.sleep(.02)
         write('tracing_on',0)
         frozen_ns=time.monotonic_ns()
@@ -394,7 +399,8 @@ def trace_scheduling(workspace, *, tracefs=None):
         output.mkdir(parents=True)
         (output/'sched.trace').write_text(text)
         info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
-            requested_before_s=before_s,post_notice_s=.2,buffer_kb_per_cpu=2048,
+            requested_before_s=before_s,post_notice_s=.2,buffer_kb_per_cpu=buffer_kb,
+            startup_window=startup_window,startup_deadline_ns=startup_deadline,
             tids=tids,source_log=str(source) if source else None,
             source_logs=[str(p) for p in paths] if source else [],coverage=coverage,threads=thread_info,
             manual_stop=stopped.is_set(),simulation=simulation,hardware_started=False)
@@ -847,6 +853,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers', 'trace-scheduling'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
+    parser.add_argument('--startup-window',action='store_true',
+                        help='trace-scheduling: stop 15 seconds after finding a live base thread')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
                         help='Select machine defaults; prepare/build remember the selection for later runs')
@@ -872,7 +880,7 @@ def main(argv=None):
         if options.validate and options.command not in ('prepare', 'build'):
             raise ValueError('--validate belongs to prepare/build only')
         if options.command == 'trace-scheduling':
-            trace_scheduling(workspace)
+            trace_scheduling(workspace,startup_window=options.startup_window)
             return 0
         if options.command == 'plan':
             bindu = locked_bindu(existing)

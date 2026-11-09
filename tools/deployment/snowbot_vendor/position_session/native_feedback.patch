@@ -75,6 +75,14 @@
 -        1,								// QoS历史深度
 -        std::bind(&ArmCtlNode::message_callback, this, std::placeholders::_1)
      );
+@@ -186,6 +194,2 @@
+-    upperMonitorMsg_get = this->create_subscription<snowbot_ctl_msgs::msg::MidNodeCtlMsgSend>(
+-        "upperMonitor_msg_send",
+-        10,
+-        std::bind(&ArmCtlNode::upperMonitor_msg_callback, this, std::placeholders::_1)
+-    );
++    // Session commands alone may schedule initialization/control; legacy ingress is retired.
+     upperMonitorMsg_send = this->create_publisher<snowbot_ctl_msgs::msg::MidNodeCtlMsgRet>(
 @@ -298,2 +306,4 @@
      if(!loadInitialPDFromYaml(yaml_path_initialPD)){load_error="configuration_failed";return;}
 +    // Build the immutable gravity model before advertising command readiness.

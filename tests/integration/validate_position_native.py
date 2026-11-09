@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -289,8 +290,10 @@ def write_middle_check(source, work, root):
     callback=(source/'dual_arm_control/src/dual_arm_control/msgPublish.cpp').read_text()
     begin=callback.index('void ArmCtlNode::position_callback(')
     finish=callback.index('\n}',begin)+2
+    subscriptions=re.findall(r'\b(?:position_sub_|upperMonitorMsg_get)\s*=\s*(?:this->)?create_subscription.*?;',callback,re.S)
     path=work/'test_position_middle.cpp';path.write_text(fixture.replace('// PRODUCTION_FUNCTION',text[start:end])
-        .replace('// PRODUCTION_MIDDLE_CALLBACK',callback[begin:finish]))
+        .replace('// PRODUCTION_MIDDLE_CALLBACK',callback[begin:finish])
+        .replace('// PRODUCTION_MIDDLE_INPUTS','\n'.join(subscriptions)))
     return path
 
 
