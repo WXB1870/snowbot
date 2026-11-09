@@ -109,9 +109,12 @@ class PicoControl:
         self.ground_recovery_since = None
 
     def ground_recovery_candidate(self):
+        reason=self.reason
+        if reason.startswith('RECOVERY_'):
+            reason=(self.first_fault or {}).get('code',reason)
         return (self.ground_recovery_enabled and self.teleop_mode=='bimanual_tool' and
                 not self.recovery_required and not self.stop_failure and
-                (self.reason in ('GROUND_RECOVERY_STEP_COMPLETE','GROUND_RECOVERY_OPERATOR_RELEASED') or any(code in self.reason for code in
+                (reason in ('GROUND_RECOVERY_STEP_COMPLETE','GROUND_RECOVERY_OPERATOR_RELEASED') or any(code in reason for code in
                     ('BIMANUAL_MEASURED_GRASP_ERROR','BIMANUAL_GRASP_POSE','relative pose safety threshold'))))
 
     def loading_check(self, now):

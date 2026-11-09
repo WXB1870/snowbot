@@ -49,6 +49,23 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         r.grips[0]=1.;r.buttons[0]=1
         self.assertTrue(all(not any(e.operation=='ground_recovery' for e in r.step()) for _ in range(60)))
 
+    def test_b_recovery_hint_preserves_relative_fault_manual_lift_entry(self):
+        r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+        r.core.ground_recovery_enabled=True
+        r.core.lock('BIMANUAL_MEASURED_GRASP_ERROR',r.now);r.core.drain();r.complete();r.step()
+        r.grips=[1.,0.];r.step();r.click(1,1)
+        self.assertEqual(r.core.reason,'RECOVERY_RELEASE_CONTROLS')
+        self.assertTrue(r.core.ground_recovery_candidate())
+        r.grips=[0.,0.];r.step();r.click(1,1)
+        r.complete(False,'BIMANUAL_WORKER_TIMEOUT')
+        self.assertTrue(r.core.ground_recovery_candidate())
+        r.step();r.buttons[0]=1
+        effects=[]
+        for _ in range(55):effects+=r.step()
+        self.assertEqual([e.operation for e in effects],['ground_recovery'])
+        r.core.recovery_required='device_inspection'
+        self.assertFalse(r.core.ground_recovery_candidate())
+
     def test_ground_lift_rejects_increasing_measured_error_or_downward_motion(self):
         node=self.production('accept_ground_observation')
         node.tool_cfg={'ground_recovery':dict(relative_position_margin_m=.01,relative_rotation_margin_rad=.05)}
