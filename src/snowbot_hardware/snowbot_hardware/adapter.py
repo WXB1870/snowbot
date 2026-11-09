@@ -34,6 +34,10 @@ class SnowbotAdapter(ExecutionNode):
                                self.robot_io.command_enabled)
         self.get_logger().info('Snowbot publication mode env: '+os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')+
                                '; qos_from_xml='+os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET'))
+        self.reader_trace = os.environ.get('SNOWBOT_PDO_TRACE') == '1'
+        if self.reader_trace:
+            from .pdo_reader_trace import notify
+            notify('armed', self.get_logger())
         self.get_logger().info('[SCHED-THREAD] role=adapter pid=%d tid=%d mono_ns=%d' %
                                (os.getpid(), threading.get_native_id(), time.monotonic_ns()))
 
@@ -102,7 +106,12 @@ class SnowbotAdapter(ExecutionNode):
         if delivery is not None:
             window = delivery.finish(time.monotonic())
             if window is not None:
-                self.get_logger().warn('SNOWBOT_PDO_DELIVERY_WINDOW '+json.dumps(window, separators=(',', ':')))
+                window['run_id'] = self.get_parameter('run_id').value
+                payload = json.dumps(window, separators=(',', ':'))
+                self.get_logger().warn('SNOWBOT_PDO_DELIVERY_WINDOW '+payload)
+                if self.reader_trace:
+                    from .pdo_reader_trace import notify
+                    notify(payload, self.get_logger())
 
     def record_stop_check(self):
         # Emit from the explicit non-RT loop, never from a health predicate.

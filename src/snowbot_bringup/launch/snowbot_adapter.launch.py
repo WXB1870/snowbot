@@ -44,8 +44,9 @@ def assemble(context):
         parameters.update(target_stream_limits(limits))
     else:
         parameters['device_backend'] = backend
+    from snowbot_hardware.pdo_reader_trace import adapter_trace_env
     return [Node(package='snowbot_hardware' if mode == 'real' else 'bindu_runtime', executable='snowbot_adapter' if mode == 'real' else 'execution',
-                 namespace=value('namespace', 'bindu_snowbot'), output='screen', parameters=[parameters]),
+                 namespace=value('namespace', 'bindu_snowbot'), additional_env=adapter_trace_env() if mode=='real' else {}, output='screen', parameters=[parameters]),
             Node(package='bindu_runtime', executable='recorder', namespace=value('namespace', 'bindu_snowbot'),
                  output='screen', parameters=[{**common, 'device_backend': backend,
                      'recording_mode': recording, 'output': value('output', '/tmp/bindu-runs')}])]

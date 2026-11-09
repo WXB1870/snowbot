@@ -620,6 +620,20 @@ def services(bindu, workspace, execution_mode='impedance'):
     try:
         try:
             print(f'LOGS {logdir}', flush=True)
+            from snowbot_hardware.pdo_reader_trace import PRIVATE_DDS
+            private_dds = workspace/'upper/install/snowbot_hardware'/PRIVATE_DDS
+            if private_dds.is_file():
+                # Use the base terminal's existing sudo ticket. This separate process
+                # only observes the adapter and exits when this base process exits.
+                collector = ROOT/'src/snowbot_hardware/snowbot_hardware/pdo_reader_trace.py'
+                try:
+                    logdir.mkdir(exist_ok=True, parents=True)
+                    with (logdir/'pdo-reader.log').open('w') as log:
+                        popen_group(['sudo', '-n', '/usr/bin/python3', '-I', str(collector),
+                                     str(os.getpid()), str(private_dds), str(logdir)],
+                                    stdout=log, stderr=subprocess.STDOUT)
+                except OSError as exc:
+                    print(f'PDO_READER_TRACE_UNAVAILABLE {exc}', file=sys.stderr, flush=True)
             for name, command, env in plan:
                 if stopped.is_set():
                     break

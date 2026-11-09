@@ -98,7 +98,7 @@ class PdoDeliveryWindow:
 
     def trigger(self, detail, now):
         if self.window is None:
-            self.window = dict(trigger=detail, before=list(self.history), after=[])
+            self.window = dict(trigger=detail, trigger_steady_ns=round(now*1e9), before=list(self.history), after=[])
             self.deadline = now + .1
         elif detail.get('code') == 'SNOWBOT_PDO_NOT_ADVANCING' and self.window['trigger'].get('code') != detail['code']:
             self.window.setdefault('progress_interruption', detail)

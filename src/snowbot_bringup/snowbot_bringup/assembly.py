@@ -92,8 +92,9 @@ def assemble(context):
         execution.update(target_stream_limits(limits))
     if pico and position_contract:
         validate_pico_timing(runtime_parameters,brake_lead_s=runtime_parameters['execution']['target_stream_brake_lead_s'] if mode=='real' else 0.)
+    from snowbot_hardware.pdo_reader_trace import adapter_trace_env
     nodes.append(Node(package='snowbot_hardware', executable='snowbot_adapter' if mode=='real' else 'snowbot_position_sim' if position_contract else 'execution', namespace=ns,
-                      output='screen', parameters=[execution]))
+                      additional_env=adapter_trace_env() if mode=='real' else {}, output='screen', parameters=[execution]))
     if recorder_enabled:
         nodes.append(Node(package='bindu_runtime', executable='recorder', namespace=ns,
                           output='screen', parameters=[{**common,
