@@ -93,6 +93,8 @@ class SnowbotAdapter(ExecutionNode):
             data['feedback_callbacks'] = health.observation_diagnostic()
             data['tick_timing'] = getattr(self, '_tick_timing', None)
             data['previous_tick_timing'] = getattr(self, '_previous_tick_timing', None)
+            data['runtime_tick_timing'] = getattr(self, 'runtime_tick_timing', None)
+            data['previous_runtime_tick_timing'] = getattr(self, 'previous_runtime_tick_timing', None)
             data['publication_mode_env'] = os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')
             data['publication_qos_from_xml'] = os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET')
             try:
