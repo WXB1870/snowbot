@@ -407,7 +407,7 @@ class PicoNode(RuntimeNode):
                 seq=m.seq,side=m.side,pose=m.pose,grip=m.grip if hand_allowed else 0.,trigger=m.trigger if getattr(self,'independent_grippers',False) or not self.position_contract else 0.,
                 init=False,stop=self.control.phase=='locked' or not self.handoff_complete,valid=m.valid,clutch_seq=m.clutch_seq,
                 mapping=PICO_MAPPING,buttons=0 if self.position_contract else m.buttons,
-                button_edges=([0]*6+list(m.button_edges[6:8]) if getattr(self,'independent_grippers',False) else
+                button_edges=([0]*6+[int(v) for v in m.button_edges[6:8]] if getattr(self,'independent_grippers',False) else
                               [0]*8 if self.position_contract else m.button_edges),
                 virtual_grip=self.control.virtual,stick=m.stick,
                 head_pose=getattr(m,'head_pose',()),head_stamp=getattr(m,'head_stamp',m.stamp),

@@ -312,7 +312,7 @@ def trace_scheduling(workspace, *, tracefs=None):
     handlers = {s:signal.signal(s,lambda *_:stopped.set()) for s in (signal.SIGINT,signal.SIGTERM)}
     def write(name, value): (instance/name).write_text(str(value))
     source, control_source, offsets, tids, fault_ns, noticed_ns = None, None, {}, {}, None, None
-    deadline, configured, simulation = None, set(), False
+    deadline, configured, simulation, before_s = None, set(), False, 2.
     try:
         write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
         write('buffer_size_kb',2048); write('options/overwrite',1)
@@ -365,10 +365,14 @@ def trace_scheduling(workspace, *, tracefs=None):
                             noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
                             fault_ns=detail['steady_ns'];simulation=bool(detail.get('simulation',False))
                     if configured and any(marker in line for marker in (
-                            '[ECAT-FAULT]', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT')) and noticed_ns is None:
+                            '[ECAT-FAULT]', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT',
+                            'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY')) and noticed_ns is None:
                         noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
                         simulation='simulation=1' in line
-                    first = any(marker in line for marker in ('first_bad=1', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT'))
+                        gap=re.search(r'(?:previous_progress_gap_ms|wall_ms)=([\d.]+)',line)
+                        if gap:before_s=max(before_s,float(gap[1])/1000.+.2)
+                    first = any(marker in line for marker in ('first_bad=1', 'POSITION_CYCLE_FIRST_FAULT',
+                        'POSITION_GATE_INTERRUPT', 'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY'))
                     stamp = re.search(r'(?:recv_end_ns|steady_ns)=(\d+)',line) if first else None
                     if stamp and noticed_ns is not None: fault_ns=int(stamp[1])
             if deadline is not None and time.monotonic_ns() >= deadline:break
@@ -376,7 +380,7 @@ def trace_scheduling(workspace, *, tracefs=None):
         write('tracing_on',0)
         frozen_ns=time.monotonic_ns()
         if fault_ns is None:fault_ns=noticed_ns or frozen_ns
-        text,coverage=sched_trace_window((instance/'trace').read_text(),fault_ns)
+        text,coverage=sched_trace_window((instance/'trace').read_text(),fault_ns,before_s=before_s)
         thread_info={}
         recorded=set(map(int,re.findall(r'(?:prev_pid|next_pid|\bpid)=(\d+)',text))) | set(tids.values())
         for tid in sorted(recorded-{0}):
@@ -390,7 +394,7 @@ def trace_scheduling(workspace, *, tracefs=None):
         output.mkdir(parents=True)
         (output/'sched.trace').write_text(text)
         info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
-            requested_before_s=2.,post_notice_s=.2,buffer_kb_per_cpu=2048,
+            requested_before_s=before_s,post_notice_s=.2,buffer_kb_per_cpu=2048,
             tids=tids,source_log=str(source) if source else None,
             source_logs=[str(p) for p in paths] if source else [],coverage=coverage,threads=thread_info,
             manual_stop=stopped.is_set(),simulation=simulation,hardware_started=False)

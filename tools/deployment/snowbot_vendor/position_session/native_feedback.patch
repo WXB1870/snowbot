@@ -94,13 +94,21 @@
 -    rclcpp::spin_some(this->get_node_base_interface());  // 非阻塞检查回调
 +    position_spin();  // 非阻塞检查回调
  }
-@@ -666,2 +677,3 @@
+@@ -666,2 +677,5 @@
  void ArmCtlNode::InterfaceInit(){
 +    position_init_begin_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    const auto init_cpu=position_thread_cpu_ns();
++    rusage init_usage{};getrusage(RUSAGE_THREAD,&init_usage);
      //初始化模块，采用返回值进行初始化
-@@ -682,2 +694,3 @@
+@@ -682,2 +696,9 @@
      std::cout << "初始化完成" <<std::endl;
 +    position_init_end_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    if(position_init_end_-position_init_begin_>position_session::ros_feedback_timeout_ns){
++        rusage usage{};getrusage(RUSAGE_THREAD,&usage);
++        RCLCPP_WARN(this->get_logger(),"POSITION_INTERFACE_INIT_DELAY steady_ns=%lld session_selected=%d wall_ms=%.3f cpu_ms=%.3f nvcsw=%ld nivcsw=%ld",
++            (long long)position_init_end_,int(position_gate_.selected()),(position_init_end_-position_init_begin_)*1e-6,
++            (position_thread_cpu_ns()-init_cpu)*1e-6,usage.ru_nvcsw-init_usage.ru_nvcsw,usage.ru_nivcsw-init_usage.ru_nivcsw);
++    }
  }
 @@ -858,2 +871,4 @@
  void ArmCtlNode::controlOutp(){
