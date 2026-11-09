@@ -309,7 +309,7 @@ class RosLogObserver:
                          durability=DurabilityPolicy.VOLATILE)
         self.subscription = node.create_subscription(Log, '/rosout', self.receive, qos)
         writer.record('rosout-log-events', dict(kind='capture_started', run_id=run_id,
-                      loggers=self.LOGGERS, minimum_level=Log.WARN, scope='observed_rosout_only',
+                      loggers=self.LOGGERS, minimum_level=30, scope='observed_rosout_only',
                       info_exceptions=['TARGET_PREDICTION ', 'TARGET_PREDICTION_MODEL '],
                       reliability='best_effort', durability='volatile', queue_depth=100))
 

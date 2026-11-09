@@ -325,6 +325,7 @@ def serve(args, read_state=None, stop=None):
     import pinocchio as pin
     import meshcat
     import meshcat.geometry as geom
+    import zmq
     from pinocchio.visualize import MeshcatVisualizer
     from snowbot_bringup.visualization.snowbot_live import validate_state, display_tool_config, LatestState
     stop = stop or threading.Event()
@@ -382,7 +383,6 @@ def serve(args, read_state=None, stop=None):
             raise address
         zmq_url, web_url = address
         viewer = meshcat.Visualizer(zmq_url=zmq_url)
-        import zmq
         viewer.window.zmq_socket.setsockopt(zmq.RCVTIMEO, 2000)
         viewer.window.zmq_socket.setsockopt(zmq.SNDTIMEO, 2000)
         vis = MeshcatVisualizer(model, collision, visual)
@@ -472,6 +472,10 @@ def serve(args, read_state=None, stop=None):
                 last_save=time.monotonic()
                 last_source=pose_source
             time.sleep(.033)
+    except zmq.Again:
+        # Shutdown closes the bridge while a scene command may await its reply.
+        if not stop.is_set():
+            raise
     finally:
         if viewer:
             viewer.window.zmq_socket.close(linger=0)

@@ -458,12 +458,13 @@ class RepeatedLogTests(unittest.TestCase):
                  record_log=lambda stream,value:records.append((stream,value)))
         subscriptions=[]
         node=S(create_subscription=lambda *args:subscriptions.append(args))
-        with patch.dict('sys.modules',{'rcl_interfaces':S(),'rcl_interfaces.msg':S(Log=S(WARN=30)),
+        with patch.dict('sys.modules',{'rcl_interfaces':S(),'rcl_interfaces.msg':S(Log=S(WARN=b'\x1e')),
                                       'rclpy.qos':S(QoSProfile=lambda **kw:kw,
                                           ReliabilityPolicy=S(BEST_EFFORT='best_effort'),
                                           DurabilityPolicy=S(VOLATILE='volatile'))}):
             observer=diagnostics.RosLogObserver(node,writer,'run')
         self.assertEqual(subscriptions[0][1],'/rosout')
+        self.assertEqual(json.loads(json.dumps(records[0][1]))['minimum_level'],30)
         self.assertEqual(subscriptions[0][3],dict(depth=100,reliability='best_effort',durability='volatile'))
         fields=dict(level=40,name='servo_node',msg='PDO stale',stamp=S(sec=10,nanosec=1),
                     file='driver.cpp',function='poll',line=7)
@@ -495,7 +496,7 @@ class RepeatedLogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);writer=diagnostics.DiagnosticWriter(root/'diagnostics.jsonl')
             observer=diagnostics.RosLogObserver(S(create_subscription=lambda *args:object()),writer,'test')
-            for _ in range(3):observer.receive(Log(level=Log.ERROR,name='servo_node',msg='Error 0x001D'))
+            for _ in range(3):observer.receive(Log(level=40,name='servo_node',msg='Error 0x001D'))
             writer.close()
             rows=[json.loads(line)['data'] for line in (root/'rosout-log-events.jsonl').read_text().splitlines()]
             self.assertEqual([row['kind'] for row in rows],['capture_started','first','repeat_summary'])

@@ -130,7 +130,7 @@ for(const mode of ['independent_arms','bimanual_tool']){
 
 
 class ModelVisibilityTests(unittest.TestCase):
-    def test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics(self, geometry_kind='rod'):
+    def test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics(self, geometry_kind='rod', load_failure=None):
         import hashlib
         import threading
         import numpy as np
@@ -139,6 +139,12 @@ class ModelVisibilityTests(unittest.TestCase):
         model=S(names=['universe','joint'],nq=1,joints=[None,S(idx_q=0)],getJointId=lambda n:1,
                 getFrameId=lambda n:0)
         vis=Mock();vis.data=S(oMf=[S(homogeneous=np.eye(4))])
+        class Again(Exception):pass
+        if load_failure:
+            def fail_load(**kwargs):
+                if load_failure=='cancel':stop.set()
+                raise Again('no bridge reply')
+            vis.loadViewerModel.side_effect=fail_load
         vis.display.side_effect=lambda q:frames.append(q.copy())
         pin=S(buildModelsFromUrdf=lambda *a,**kw:(model,None,None),neutral=lambda m:np.zeros(1),
               updateFramePlacements=Mock())
@@ -174,7 +180,7 @@ class ModelVisibilityTests(unittest.TestCase):
             args=S(run_id='run',runtime_mode='simulation',device_backend='kinematic',startup_timeout=1.,
                    output=directory,trace_file=None,port=0,duration=0.)
             modules={'pinocchio':pin,'pinocchio.visualize':S(MeshcatVisualizer=lambda *a:vis),
-                     'meshcat':meshcat,'meshcat.geometry':geom,'zmq':S(RCVTIMEO=1,SNDTIMEO=2)}
+                     'meshcat':meshcat,'meshcat.geometry':geom,'zmq':S(RCVTIMEO=1,SNDTIMEO=2,Again=Again)}
             with patch.dict(sys.modules,modules),patch.object(web,'meshcat_urdf',return_value=path), \
                     patch('snowbot_bringup.visualization.snowbot_live.display_tool_config',return_value=config), \
                     patch.object(web,'_server',side_effect=server), \
@@ -182,7 +188,13 @@ class ModelVisibilityTests(unittest.TestCase):
                     patch.object(web.time,'time',side_effect=lambda:clock['now']), \
                     patch.object(web.time,'monotonic',side_effect=lambda:clock['now']), \
                     patch.object(web.time,'sleep'):
-                web.serve(args,read_state=read,stop=stop)
+                if load_failure=='timeout':
+                    with self.assertRaises(Again):web.serve(args,read_state=read,stop=stop)
+                else:web.serve(args,read_state=read,stop=stop)
+        if load_failure:
+            viewer.window.zmq_socket.close.assert_called_once_with(linger=0)
+            self.assertTrue(stop.is_set())
+            return
         self.assertEqual([float(q[0]) for q in frames],[0.,.2,.3])
         self.assertEqual([s['pose_source'] for s in published],
                          ['waiting_for_feedback','measured','last_measured','measured'])
@@ -196,6 +208,12 @@ class ModelVisibilityTests(unittest.TestCase):
 
     def test_unconfigured_tool_has_no_mesh_and_cannot_be_toggled_visible(self):
         self.test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics('none')
+
+    def test_cancel_during_model_load_closes_without_timeout_traceback(self):
+        self.test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics(load_failure='cancel')
+
+    def test_model_load_timeout_without_cancel_is_reported(self):
+        self.test_waiting_first_feedback_loss_and_recovery_keep_measured_pose_semantics(load_failure='timeout')
 
 
 class LiveFeedbackTests(unittest.TestCase):
