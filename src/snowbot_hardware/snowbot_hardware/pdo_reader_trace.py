@@ -90,8 +90,16 @@ def collect(parent_pid, private, output):
     def write(name, value):
         (instance/name).write_text(str(value))
     def probe(command):
-        with (tracefs/'uprobe_events').open('a') as stream:
-            stream.write(command+'\n')
+        # Text append seeks to EOF on open. tracefs accepts append writes but
+        # its control file does not support SEEK_END.
+        fd = os.open(tracefs/'uprobe_events', os.O_WRONLY | os.O_APPEND)
+        try:
+            os.write(fd, (command+'\n').encode())
+        except OSError as exc:
+            detail = (tracefs/'error_log').read_text() if (tracefs/'error_log').is_file() else ''
+            raise RuntimeError(f'uprobe_events write failed: {exc}\n{detail[-1500:]}') from exc
+        finally:
+            os.close(fd)
 
     # 0x228f84 is immediately after the successful vector insertion in
     # ReaderHistory::add_change and before unlock. x19=this, stack[1]=CacheChange*.
