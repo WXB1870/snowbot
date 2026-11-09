@@ -275,7 +275,7 @@
      // 0. 提前获取六维力传感器数据并滤波
      //    无论阻抗是否使能都持续更新, 使能时无阶跃
 @@ -1169,11 +1183,13 @@
-         std::cout << "[systemd] 通信与反馈初始化完成；默认不请求使能，无自动回零。" << std::endl;
+         std::cout << "[systemd] 通信与反馈初始化完成。" << std::endl;
      }else notify_systemd("STATUS=PDO feedback unavailable; downstream services blocked");
 
 +    if(position_control_fifo_ && !position_start_control()){shutdown_exit_code_=1;return;}
@@ -311,7 +311,7 @@
          position_loop_timing_.mark(position_session::LoopTiming::LegacyIO,position_session::steady_ns());
          EtherCATrun();
 @@ -1442,6 +1458,53 @@
-     std::cout << "退出流程结束；驱动抱闸状态未确认。exit_code=" << shutdown_exit_code_ << std::endl;
+     std::cout << "退出完成 exit_code=" << shutdown_exit_code_ << std::endl;
  }
 
 +

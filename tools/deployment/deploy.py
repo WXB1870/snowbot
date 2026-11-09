@@ -438,7 +438,7 @@ class ServiceConsole:
             if notice in self.notices:
                 return None
             self.notices.add(notice)
-            return f'[{stream}] INFO 正在建立反馈链；等待节点初始化、发布者发现及首帧反馈（详情见日志）\n'
+            return f'[{stream}] INFO 正在建立反馈链\n'
         if key[1:] == (30, 'Position session: legacy_source_disabled_for_target_stream'):
             if stream in self.notices:
                 return None
@@ -687,7 +687,7 @@ def operator(bindu, workspace, frontend, *, home=False):
                 if detail != last_wait and (fault or now-last_wait_at >= 5.):
                     message = 'WAIT_BASE：等待底层就绪\n'+detail
                     if fault:
-                        message += '\n请查看终端1的首个故障；不会自动重启底层。'
+                        message += '\n请查看终端1的首个故障。'
                     print(failure_banner(message) if fault else message, flush=True)
                     last_wait, last_wait_at = detail, now
             return ready
