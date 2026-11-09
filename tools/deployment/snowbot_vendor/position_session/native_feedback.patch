@@ -162,7 +162,7 @@
 + const auto cpu=position_thread_cpu_ns();rusage usage{};getrusage(RUSAGE_THREAD,&usage);
 + const auto elapsed_ms=[steady](int64_t begin,int64_t end){return begin>0 ? ((end>0?end:steady)-begin)*1e-6 : -1.;};
 + RCLCPP_WARN(this->get_logger(),
-+  "POSITION_GATE_INTERRUPT layer=middle site=%s session=%llu seq=%llu rx_session=%llu rx_seq=%llu forwarded_seq=%llu generation=%llu wait_reason=%s rejection=%s source_age_ms=%.3f receive_age_ms=%.3f progress_age_ms=%.3f pdo_age_ms=%.3f pdo=%llu WKC=%d/%d valid=0x%x faults=0x%x advances=%u nominal_age_ms=%.3f bootstrap_remaining_ms=%.3f gate_remaining_ms=%.3f cycle_ms=%.3f pump_ms=%.3f init_ms=%.3f control_ms=%.3f post_control_ms=%.3f cycle_cpu_ms=%.3f control_cpu_ms=%.3f cycle_nvcsw=%ld cycle_nivcsw=%ld",
++  "POSITION_GATE_INTERRUPT layer=middle site=%s session=%llu seq=%llu rx_session=%llu rx_seq=%llu forwarded_seq=%llu generation=%llu wait_reason=%s rejection=%s source_age_ms=%.3f receive_age_ms=%.3f progress_age_ms=%.3f pdo_age_ms=%.3f pdo=%llu WKC=%d/%d valid=0x%x faults=0x%x advances=%u nominal_age_ms=%.3f bootstrap_remaining_ms=%.3f gate_remaining_ms=%.3f cycle_ms=%.3f pump_ms=%.3f init_ms=%.3f control_ms=%.3f post_control_ms=%.3f cycle_cpu_ms=%.3f control_cpu_ms=%.3f cycle_nvcsw=%ld cycle_nivcsw=%ld steady_ns=%lld",
 +  site,(unsigned long long)position_gate_.last().session,(unsigned long long)position_gate_.last().sequence,
 +  (unsigned long long)position_command_session_,(unsigned long long)position_command_sequence_,(unsigned long long)position_command_forward_sequence_,
 +  (unsigned long long)position_gate_.generation(),position_wait_reason_.c_str(),position_rejection_.c_str(),
@@ -173,7 +173,7 @@
 +  elapsed_ms(position_init_begin_,position_init_end_),elapsed_ms(position_control_begin_,position_control_end_),elapsed_ms(position_control_end_,steady),
 +  position_cycle_cpu_begin_?(cpu-position_cycle_cpu_begin_)*1e-6:-1.,
 +  position_control_cpu_begin_?((position_control_cpu_end_?position_control_cpu_end_:cpu)-position_control_cpu_begin_)*1e-6:-1.,
-+  usage.ru_nvcsw-position_cycle_nvcsw_,usage.ru_nivcsw-position_cycle_nivcsw_);
++  usage.ru_nvcsw-position_cycle_nvcsw_,usage.ru_nivcsw-position_cycle_nivcsw_,(long long)steady);
 +}
 +
 +bool ArmCtlNode::position_native_feedback(const snowbot_ctl_msgs::msg::PositionObservation& msg,int64_t ros,int64_t steady){
@@ -250,14 +250,32 @@
      data_ = pinocchio::Data(model_);
 --- a/dual_arm_control/src/dual_arm_control_node.cpp
 +++ b/dual_arm_control/src/dual_arm_control_node.cpp
-@@ -1,2 +1,3 @@
+@@ -1,2 +1,8 @@
  #include <cstdio>
 +#include <cstdlib>
++#include <pthread.h>
++#include <sched.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <chrono>
  #include <csignal>
-@@ -74,4 +75,6 @@
+@@ -74,5 +80,19 @@
 
 +    if(::setenv("RMW_FASTRTPS_PUBLICATION_MODE","ASYNCHRONOUS",0)!=0){std::perror("RMW_FASTRTPS_PUBLICATION_MODE");return 1;}
  	rclcpp::init(argc, argv);
  	auto node = std::make_shared<ArmCtlNode>();
 +    RCLCPP_INFO(node->get_logger(),"POSITION_MIDDLE_PUBLICATION mode_env=%s",std::getenv("RMW_FASTRTPS_PUBLICATION_MODE"));
 
++    // Configure only this relay/compute thread, after DDS initialization.
++    // PDO (50) and servo control (20) retain higher real-time priority.
++    sched_param relay_priority{};relay_priority.sched_priority=10;
++    const int priority_error=pthread_setschedparam(pthread_self(),SCHED_FIFO,&relay_priority);
++    if(priority_error){
++        RCLCPP_ERROR(node->get_logger(),"POSITION_MIDDLE_FIFO_FAILED priority=10: %s",std::strerror(priority_error));
++        rclcpp::shutdown();return 1;
++    }
++    RCLCPP_INFO(node->get_logger(),"POSITION_MIDDLE_FIFO priority=10");
++    RCLCPP_INFO(node->get_logger(),"[SCHED-THREAD] role=middle pid=%d tid=%d mono_ns=%lld",
++        int(::getpid()),int(::syscall(SYS_gettid)),
++        (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+     node->run();

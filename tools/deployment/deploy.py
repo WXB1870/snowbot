@@ -311,7 +311,7 @@ def trace_scheduling(workspace, *, tracefs=None):
     stopped = threading.Event()
     handlers = {s:signal.signal(s,lambda *_:stopped.set()) for s in (signal.SIGINT,signal.SIGTERM)}
     def write(name, value): (instance/name).write_text(str(value))
-    source, offset, tids, fault_ns, noticed_ns = None, 0, {}, None, None
+    source, offsets, tids, fault_ns, noticed_ns = None, {}, {}, None, None
     deadline, configured, simulation = None, set(), False
     try:
         write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
@@ -325,15 +325,20 @@ def trace_scheduling(workspace, *, tracefs=None):
             candidates = list((workspace/'startup-logs').glob('services-*/servo.log'))
             latest = max(candidates,key=lambda p:p.stat().st_mtime_ns) if candidates else None
             if latest is not None and latest != source and noticed_ns is None:
-                source, offset, tids = latest, 0, {}
+                source, offsets, tids = latest, {}, {}
                 write('tracing_on',0)
                 for event,expression in sched_event_filters([]).items():write('events/sched/'+event+'/filter',expression)
                 write('trace','');write('tracing_on',1);configured=set()
             if source is not None:
-                with source.open() as stream:
-                    stream.seek(offset); lines = stream.readlines(); offset = stream.tell()
+                lines = []
+                for log_name in ('servo.log', 'middle.log'):
+                    path = source.with_name(log_name)
+                    if not path.exists():continue
+                    with path.open() as stream:
+                        stream.seek(offsets.get(log_name, 0)); lines.extend(stream.readlines())
+                        offsets[log_name] = stream.tell()
                 for line in lines:
-                    thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control) pid=(\d+) tid=(\d+)',line)
+                    thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle) pid=(\d+) tid=(\d+)',line)
                     if thread and Path('/proc/'+thread[3]).exists():
                         tids[thread[1]] = int(thread[3])
                         if set(tids.values()) != configured:
@@ -341,10 +346,11 @@ def trace_scheduling(workspace, *, tracefs=None):
                                 write('events/sched/'+event+'/filter',expression)
                             configured=set(tids.values())
                             print('SCHED_TRACE_ARMED '+json.dumps(tids),flush=True)
-                    if configured and ('[ECAT-FAULT]' in line or 'POSITION_CYCLE_FIRST_FAULT' in line) and noticed_ns is None:
+                    if configured and any(marker in line for marker in (
+                            '[ECAT-FAULT]', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT')) and noticed_ns is None:
                         noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
                         simulation='simulation=1' in line
-                    first = 'first_bad=1' in line or 'POSITION_CYCLE_FIRST_FAULT' in line
+                    first = any(marker in line for marker in ('first_bad=1', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT'))
                     stamp = re.search(r'(?:recv_end_ns|steady_ns)=(\d+)',line) if first else None
                     if stamp and noticed_ns is not None: fault_ns=int(stamp[1])
             if deadline is not None and time.monotonic_ns() >= deadline:break
@@ -358,7 +364,8 @@ def trace_scheduling(workspace, *, tracefs=None):
         (output/'sched.trace').write_text(text)
         info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
             requested_before_s=2.,post_notice_s=.2,buffer_kb_per_cpu=2048,
-            tids=tids,source_log=str(source) if source else None,coverage=coverage,
+            tids=tids,source_log=str(source) if source else None,
+            source_logs=[str(source.with_name(name)) for name in ('servo.log','middle.log')] if source else [],coverage=coverage,
             manual_stop=stopped.is_set(),simulation=simulation,hardware_started=False)
         (output/'metadata.json').write_text(json.dumps(info,indent=2)+'\n')
         print('SCHED_TRACE_SAVED '+str(output),flush=True)
@@ -526,7 +533,7 @@ def base_commands(workspace, execution_mode='impedance'):
         ('servo', [*sudo, *shell, 'ros2', 'run', 'snowbot_servo_control', 'servo_node',
                    '--ros-args', '--params-file', str(workspace/'vendor-position.yaml'),
                    '-p', 'execution_mode:='+execution_mode], vendor_env),
-        ('middle', [*shell, 'ros2', 'run', 'snowbot_dual_arm_control', 'dual_arm_control_node'], vendor_env),
+        ('middle', [*sudo, *shell, 'ros2', 'run', 'snowbot_dual_arm_control', 'dual_arm_control_node'], vendor_env),
         ('upper', [*shell, 'ros2', 'launch', 'robot_control', 'robot_control.launch.py', 'control_source:=topic'], vendor_env))
 
 

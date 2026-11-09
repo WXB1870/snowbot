@@ -613,6 +613,8 @@ class DeploymentEntryTests(unittest.TestCase):
                 plan = base_commands(Path('/deployment/artifacts/robot'), mode)
                 self.assertEqual([name for name, _, _ in plan], ['servo','middle','upper'])
                 self.assertEqual(plan[0][1][-2:], ['-p', 'execution_mode:='+mode])
+                self.assertEqual(plan[1][1][:3], ['sudo', '-n', 'env'])
+                self.assertNotEqual(plan[2][1][0], 'sudo')
                 for _, _, env in plan:
                     self.assertNotIn('VIRTUAL_ENV', env)
                     self.assertNotIn('LD_LIBRARY_PATH', env)
