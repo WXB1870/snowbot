@@ -99,6 +99,8 @@ class PositionSessionIO(SnowbotIO):
 
 
 class PositionSessionDevices:
+    last_reference_diagnostic = 0.
+
     def __init__(self, node, profile):
         from rcl_interfaces.msg import ParameterDescriptor
         from snowbot_ctl_msgs.msg import PositionObservation, PositionSessionCommand, PositionSessionState
@@ -319,6 +321,7 @@ class PositionSessionDevices:
             self.io.observe(q, v, stamp, self.node.now(), sample=msg.pdo_sample)
             if msg.session_selected and msg.session == self.envelopes.session:
                 self.takeover_previous_hold = None
+            previous_reference = self.io.servo_reference
             self.io.servo_reference = None
             sample = getattr(msg, 'sample_time_ns', 0)*1e-9
             arrays = [getattr(msg, field, ()) for field in
@@ -338,6 +341,19 @@ class PositionSessionDevices:
                         session=msg.session, sequence=msg.command_sequence,
                         sample_time_ns=msg.sample_time_ns), separators=(',', ':')),
                         command_id=source[2])
+            if (previous_reference is not None and
+                    (self.io.servo_reference is None or self.node.now()-previous_reference[0] > ROS_FEEDBACK_TIMEOUT_S) and
+                    entered-self.last_reference_diagnostic >= 1.):
+                self.last_reference_diagnostic = entered
+                self.node.event('TRAJECTORY_REFERENCE_GAP', json.dumps(dict(
+                    session=int(msg.session), expected_session=int(self.envelopes.session),
+                    sequence=int(msg.command_sequence), segment_id=int(msg.segment_id), pdo_sample=int(msg.pdo_sample),
+                    sample_time_ns=int(msg.sample_time_ns), sample_age_ms=(self.node.now()-sample)*1000,
+                    previous_age_ms=(self.node.now()-previous_reference[0])*1000,
+                    selected=bool(msg.session_selected), reference_mode=int(msg.reference_mode),
+                    reference_valid=bool(msg.reference_valid), output_valid=bool(msg.output_valid),
+                    finite=all(all(math.isfinite(x) for x in values) for values in arrays),
+                    export_valid=self.io.servo_reference is not None), separators=(',', ':')))
             outcome = 'accepted'
         except (ValueError, RuntimeError) as exc:
             outcome = str(exc)

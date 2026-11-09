@@ -36,7 +36,7 @@ std::array<double,7> r_torque_grav_comp{};
 std::array<double,7> r_torque_interia_comp{};
 };}}
 struct ServoNode {
- int position_reference_mode_=2; bool shutdown_mode_=false; std::string position_rejection_;
+ int position_reference_mode_=2; bool shutdown_mode_=false,position_control_fifo_=false; std::string position_rejection_;
  struct Gate {bool chosen=false;bool selected()const{return chosen;}} position_gate_;
  double tempTime_upperMonitor=-99;
  int runin_mod=-99,if_topic_point_position=-99,if_runin_renew=-99,msg_get_ifUseDebugMod=-99,if_useret_to_start_runin=-99;
@@ -85,7 +85,7 @@ m->r_speed.fill(1.25);
 m->r_torque_feedforward.fill(1.25);
 m->r_torque_grav_comp.fill(1.25);
 m->r_torque_interia_comp.fill(1.25);
- ServoNode s;
+ ServoNode s;s.position_rejection_="existing_rejection";
  // Fresh and 5.29-second queued legacy packets, before/after session selection.
  for(bool selected:{false,true})for(double age:{0.,.001,5.288261}){
   s.position_gate_.chosen=selected;m->header.stamp={100.-age};
@@ -115,7 +115,7 @@ for(auto x:s.rArm_torComp_interia_receive)assert(x==0.);
 for(auto x:s.rArm_transMod)assert(x==0.);
 for(auto x:s.rArm_vel_receive)assert(x==0.);
 for(auto x:s.r_posReceive_atRuninSt)assert(x==0.);
- assert(s.position_rejection_=="legacy_source_disabled_for_target_stream");
+ assert(s.position_rejection_=="existing_rejection");
  // Unsupported old channels stay isolated even during shutdown; internal homing is separate.
  s.shutdown_mode_=true;s.message_callback(m);assert(enable_writes==0);
  std::cout<<"new callback: 2400 retired native packets blocked without enable/target/gain/interpolation writes\n";

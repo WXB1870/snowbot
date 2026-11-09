@@ -1065,13 +1065,12 @@
 +        if(!shutdown_mode_ && !sigInterrupt.load()){position_poll();position_step();}
 @@ -1646,0 +1746 @@
 +        if(shutdown_mode_)EtherCAT_positionBypass(); // Hand back only after original exit target cache is written.
-@@ -1714,0 +1815,10 @@
+@@ -1714,0 +1815,9 @@
 +    // Target-stream mode is session-only, including before the first takeover.
 +    // Startup can queue legacy messages while homing; neither old nor fresh
 +    // legacy traffic may change enable masks, targets, gains or interpolation.
 +    // Internal startup/shutdown homing does not enter this callback.
 +    if (position_reference_mode_ == 2) {
-+        position_rejection_ = "legacy_source_disabled_for_target_stream";
 +        return;
 +    }
 +
