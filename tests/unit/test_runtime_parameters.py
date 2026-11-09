@@ -30,7 +30,8 @@ class RuntimeParameterTests(unittest.TestCase):
         self.assertEqual(cfg['replay']['command_ttl_s'], .25)
         self.assertEqual(cfg['replay']['renewal_period_s'], .5)
         self.assertAlmostEqual(cfg['replay']['command_ttl_s']-cfg['execution']['target_stream_brake_lead_s'], .13)
-        for replay in ({'period_s': .14}, {'command_ttl_s': .1}, {'renewal_period_s': 2.}):
+        for replay in ({'period_s': .14}, {'command_ttl_s': .1}, {'renewal_period_s': 2.},
+                       {'renewal_period_s':.5,'rpc_timeout_s':1.5}):
             with self.assertRaisesRegex(ValueError, 'REPLAY_TIMING'):
                 self.load({'replay': replay})
 
@@ -264,6 +265,15 @@ class RuntimeParameterTests(unittest.TestCase):
         cfg['gripper']['lease_ttl_s']=4.;cfg['pico']['renewal_period_s']=2.
         with self.assertRaisesRegex(ValueError,'SNOWBOT_PICO_RENEWAL_TIMING'):
             validate_pico_timing(cfg)
+        for change in ({'renewal_period_s':.5,'renewal_timeout_s':1.5},
+                       {'stop_renewal_period_s':.3,'renewal_timeout_s':1.7}):
+            cfg=load_parameters();cfg['pico'].update(change)
+            with self.assertRaisesRegex(ValueError,'SNOWBOT_PICO_RENEWAL_TIMING'):
+                validate_pico_timing(cfg)
+        cfg=load_parameters();effective=apply_tool_timing({},cfg)
+        self.assertEqual(effective['lease_renewal_period_s'],cfg['pico']['renewal_period_s'])
+        self.assertEqual(effective['lease_renewal_timeout_s'],cfg['pico']['renewal_timeout_s'])
+        self.assertEqual(effective['stop_renewal_period_s'],cfg['pico']['stop_renewal_period_s'])
 
     def test_unknown_fields_types_and_nonfinite_values_are_rejected(self):
         for bad in ({'other':{}},{'schema_version':True},{'pico':{'other':1}},

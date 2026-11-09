@@ -10,7 +10,7 @@ from snowbot_teleop.replay import NAMES, Replay, run_replay
 from tools.deployment.deploy import executor_command
 
 
-TIMING = dict(period_s=.02, command_ttl_s=.25, renewal_period_s=.5)
+TIMING = dict(period_s=.02, command_ttl_s=.25, renewal_period_s=.5, rpc_timeout_s=.25)
 
 
 class Port:
@@ -25,6 +25,7 @@ class Port:
     def prepare(self, plan): self.now += .147  # Bulk logs and serialization precede control.
     def acquire(self): self.acquired_at = self.now
     def renew(self): pass
+    def poll(self): pass
     def send(self, source):
         if self.error: raise RuntimeError(self.error)
         self.sent.append(source)
@@ -41,6 +42,57 @@ class Port:
 
 
 class ReplayTakeoverTests(unittest.TestCase):
+    def runtime_port(self, delay=.16, error=None):
+        from unittest.mock import Mock
+        source=Path(__file__).resolve().parents[2]/'src/snowbot_bringup/snowbot_bringup/runtime/snowbot_primitive_replay.py'
+        cls=next(n for n in ast.walk(ast.parse(source.read_text())) if isinstance(n,ast.ClassDef) and n.name=='Port')
+        clock=[0.];sent=[];renewed=[]
+        def reply(operation, request):
+            issued=clock[0]
+            if operation=='submit':sent.append((issued,request.command.stamp))
+            else:renewed.append(issued)
+            value=(S(accepted=not error,code=error,revision=len(sent)) if operation=='submit' else
+                   S(ok=True,lease_id='lease',epoch=2,profile_hash='profile'))
+            return S(done=lambda:clock[0]>=issued+delay,result=lambda:value)
+        def call(client,request,timeout=.25):
+            future=client.call_async(request);deadline=clock[0]+timeout
+            while not future.done():
+                if clock[0]>=deadline:raise RuntimeError('REPLAY_WAIT_TIMEOUT')
+                clock[0]+=.005
+            return future.result()
+        scope=dict(timing=TIMING,task='test',robot=S(profile=S(digest='profile')),GROUPS=('arm',),NAMES=NAMES,
+            stamp=lambda t:t,MotionCommand=lambda **kw:S(**kw),uuid=S(uuid4=lambda:S(hex='command')),
+            Lease=S(Request=lambda **kw:S(**kw)),SubmitMotion=S(Request=lambda **kw:S(**kw)),record=Mock(),
+            leases=S(call_async=lambda req:reply('renew',req)),submit=S(call_async=lambda req:reply('submit',req)),call=call)
+        exec(compile(ast.Module(body=[cls],type_ignores=[]),str(source),'exec'),scope)
+        p=scope['Port']();p.steady=lambda:clock[0];p.ros=lambda:100.+clock[0]
+        p.wait_until=lambda due:clock.__setitem__(0,max(clock[0],due))
+        p.prepare=lambda plan:None;p.acquire=lambda:None;p.lease=S(lease_id='lease',epoch=2)
+        p.replay_identity='replay';p.sent=sent;p.renewed=renewed
+        def outcome():
+            return (dict(completed=True,final=True,stop_confirmed=True,error=None,details=[])
+                    if clock[0]>=1.2 else None)
+        p.outcome=outcome
+        p.finish=Mock(side_effect=lambda:outcome() or dict(completed=False,final=True,stop_confirmed=True,error='CANCELED',details=[]))
+        return p
+
+    def test_slow_real_rpc_receipts_do_not_starve_the_20ms_heartbeat_or_renewal(self):
+        for delay in (.16,.24):
+            with self.subTest(delay=delay):
+                p=self.runtime_port(delay);self.replay(p)
+                self.assertGreater(len(p.sent),50);self.assertGreaterEqual(len(p.renewed),2)
+                self.assertLess(max(b[0]-a[0] for a,b in zip(p.sent,p.sent[1:])),.021)
+                for issued,source in p.sent:self.assertAlmostEqual(source,100.+issued)
+                self.assertLessEqual(len(p.receipts),14)
+                p.finish.assert_called_once()
+
+    def test_delayed_rpc_rejection_and_missing_reply_still_finish_once(self):
+        for delay,error,expected in ((.16,'COMMAND_TIMEOUT','COMMAND_TIMEOUT'),(10.,None,'REPLAY_RPC_TIMEOUT')):
+            with self.subTest(expected=expected):
+                p=self.runtime_port(delay,error)
+                with self.assertRaisesRegex(RuntimeError,expected):self.replay(p)
+                p.finish.assert_called_once()
+
     def replay(self, port):
         return run_replay(Replay((0., .02), ((0.,)*16, (0.,)*16), NAMES, 'tool', 'hash', 1.),
                           port, timing=TIMING)

@@ -483,13 +483,13 @@ class PicoNode(RuntimeNode):
             if request['failed']:
                 raise RuntimeError('PICO_STOP_UNCONFIRMED:'+request.get('failure_reason','PREVIOUS_REQUEST_UNCONFIRMED'))
             if lease is not None and time.monotonic()>=next_renewal:
+                next_renewal=time.monotonic()+parameters_for(self,'pico')['stop_renewal_period_s']
                 reply=await self.wait(self.leases.call_async(Lease.Request(operation='renew',
                     lease_id=lease.lease_id,epoch=lease.epoch)),
-                    min(.7,max(0.,request['deadline']-time.monotonic())))
+                    min(parameters_for(self,'pico')['renewal_timeout_s'],max(0.,request['deadline']-time.monotonic())))
                 if not (reply.ok and reply.lease_id==lease.lease_id and
                         reply.epoch==lease.epoch and reply.profile_hash==self.profile.digest):
                     self.stop_unconfirmed(request,'LEASE_RENEW_REJECTED:'+reply.code)
-                next_renewal=time.monotonic()+parameters_for(self,'pico')['stop_renewal_period_s']
             s=self.state
             if s and (s.stop_failures or 'EMERGENCY_STOP' in s.code or s.code=='STOP_FEEDBACK_TIMEOUT'):
                 self.stop_unconfirmed(request,'EXECUTION_STOP_FAILED')
@@ -854,6 +854,7 @@ class PicoNode(RuntimeNode):
             started=self.now();command_id=self.instance_id+'_'+str(intent.token)+'_'+uuid.uuid4().hex[:8]
             deadline=time.monotonic()+duration+parameters_for(self,'pico')['motion_completion_grace_s'];renew_at=0.;next_submit=0.
             renewal=None;renewal_started=0.
+            submissions=[];unconfirmed=None
             replay_tick=0;replay_steady=time.monotonic();nominal_sample_seen=False
             while time.monotonic()<deadline:
                 self.current(intent)
@@ -875,6 +876,35 @@ class PicoNode(RuntimeNode):
                     if side*(measured[n]-best)>self.profile.feedback_tolerances['joint_position']:
                         raise RuntimeError('PREPARE_LIMIT_RECOVERY_MOVED_OUTWARD:'+n)
                     recovery_progress[n]=(side,min(best,measured[n]) if side>0 else max(best,measured[n]))
+                receipts=[]
+                for future,submitted_at in submissions:
+                    if not future.done():
+                        if time.monotonic()-submitted_at>=parameters_for(self,'pico')['rpc_timeout_s']:
+                            self.event('PICO_RPC_TIMING',json.dumps(dict(elapsed_s=time.monotonic()-submitted_at,
+                                timeout_s=parameters_for(self,'pico')['rpc_timeout_s'],outcome='timeout')))
+                            raise RuntimeError('PICO_SUBMIT_REPLY_TIMEOUT')
+                        receipts.append((future,submitted_at))
+                        continue
+                    outcome='exception'
+                    try:
+                        response=future.result();outcome='completed'
+                    finally:
+                        self.event('PICO_RPC_TIMING',json.dumps(dict(elapsed_s=time.monotonic()-submitted_at,
+                            timeout_s=parameters_for(self,'pico')['rpc_timeout_s'],outcome=outcome)))
+                    if not response.accepted:raise RuntimeError(response.code)
+                    revision=max(revision,response.revision)
+                submissions=receipts
+                if unconfirmed is not None:
+                    future,msg,submitted_at=unconfirmed
+                    # A matching executor state is also an acceptance receipt.
+                    # Never guess the next revision or disable revision fencing.
+                    observed=state.command_id==msg.command_id and state.revision>msg.expected_revision
+                    if future.done() or observed:
+                        if observed:revision=max(revision,state.revision)
+                        unconfirmed=None
+                        if intent.operation=='ground_recovery':self.ground_recovery_plan.setdefault('stream_started',time.monotonic())
+                    elif time.monotonic()-submitted_at>=msg.valid_for:
+                        raise RuntimeError('PICO_SUBMIT_UNCONFIRMED')
                 if renewal is not None:
                     if time.monotonic()-renewal_started>=parameters_for(self,'pico')['renewal_timeout_s']:
                         raise RuntimeError('PICO_LEASE_RENEW_TIMEOUT')
@@ -884,7 +914,7 @@ class PicoNode(RuntimeNode):
                         if (reply.lease_id!=lease.lease_id or reply.epoch!=lease.epoch or
                                 reply.profile_hash!=self.profile.digest):
                             raise RuntimeError('PICO_EXECUTION_AUTHORITY_CHANGED')
-                        renewal=None;renew_at=time.monotonic()+parameters_for(self,'pico')['renewal_period_s']
+                        renewal=None
                 arrival=measured
                 if nominal_arrival and now>=started+duration:
                     reference=sampled_nominal_reference(state,self.names,lease.epoch,now,self.tool_cfg['feedback_max_age'],
@@ -915,7 +945,8 @@ class PicoNode(RuntimeNode):
                     renewal=self.leases.call_async(Lease.Request(operation='renew',
                         lease_id=lease.lease_id,epoch=lease.epoch))
                     renewal_started=time.monotonic()
-                if now>=next_submit:
+                    renew_at=renewal_started+parameters_for(self,'pico')['renewal_period_s']
+                if now>=next_submit and unconfirmed is None:
                     lookahead=parameters_for(self,'pico')['reference_lookahead_s']
                     lookahead_sec,lookahead_ns=divmod(round(lookahead*1e9),1000000000)
                     source=started+replay_tick*.02 if replay is not None else now
@@ -931,10 +962,11 @@ class PicoNode(RuntimeNode):
                         stamp=stamp(source),valid_for=.25 if replay is not None else parameters_for(self,'pico')['prepare_command_ttl_s'],joint_names=list(self.names),
                         positions=list(sample.q) if self.position_contract else [],points=[] if self.position_contract else [point])
                     self.current(intent)
-                    response=await self.wait(self.submit.call_async(SubmitMotion.Request(command=msg)))
-                    if not response.accepted:raise RuntimeError(response.code)
-                    if intent.operation=='ground_recovery':self.ground_recovery_plan.setdefault('stream_started',time.monotonic())
-                    revision=response.revision;segment+=1
+                    future=self.submit.call_async(SubmitMotion.Request(command=msg))
+                    submitted_at=time.monotonic()
+                    submissions.append((future,submitted_at))
+                    unconfirmed=(future,msg,submitted_at)
+                    segment+=1
                     replay_tick+=1
                     next_submit=started+replay_tick*.02 if replay is not None else now+parameters_for(self,'pico')['prepare_command_period_s']
                 await self.pause()

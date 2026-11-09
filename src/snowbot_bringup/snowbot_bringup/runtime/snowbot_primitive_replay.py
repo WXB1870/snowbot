@@ -120,6 +120,9 @@ def execute(args, plan):
 
     class Port:
         lease = None
+        def __init__(self):
+            self.receipts = []
+
         @staticmethod
         def steady(): return time.monotonic()
         @staticmethod
@@ -224,15 +227,32 @@ def execute(args, plan):
                 self.wait_until(self.steady()+timing['period_s'])
 
         def renew(self):
-            call(leases, Lease.Request(operation='renew', lease_id=self.lease.lease_id, epoch=self.lease.epoch))
+            self.receipts.append((self.steady(), 'renew', leases.call_async(Lease.Request(
+                operation='renew', lease_id=self.lease.lease_id, epoch=self.lease.epoch))))
+
+        def poll(self):
+            remaining = []
+            for started, operation, future in self.receipts:
+                if not future.done():
+                    if self.steady()-started >= timing['rpc_timeout_s']:
+                        raise RuntimeError('REPLAY_RPC_TIMEOUT:'+operation)
+                    remaining.append((started, operation, future))
+                    continue
+                reply = future.result()
+                if not (reply.ok if operation=='renew' else reply.accepted):
+                    raise RuntimeError(reply.code)
+                if operation=='renew' and (reply.lease_id!=self.lease.lease_id or
+                        reply.epoch!=self.lease.epoch or reply.profile_hash!=robot.profile.digest):
+                    raise RuntimeError('REPLAY_LEASE_CHANGED')
+            self.receipts = remaining
 
         def send(self, source):
             msg = MotionCommand(schema_version=2, runtime_mode='real', command_id=uuid.uuid4().hex,
                 task_id=task, observation_id=self.replay_identity, profile_hash=robot.profile.digest,
                 lease_id=self.lease.lease_id, epoch=self.lease.epoch, mode='trajectory_heartbeat',
                 resource_groups=list(GROUPS), joint_names=list(NAMES), stamp=stamp(source), valid_for=timing['command_ttl_s'])
-            call(submit, SubmitMotion.Request(command=msg))
-            record('heartbeat', source_stamp=source)
+            self.receipts.append((self.steady(), 'submit', submit.call_async(SubmitMotion.Request(command=msg))))
+            record('heartbeat', source_stamp=source, phase='sent')
 
         def outcome(self):
             if latest.get('result') is None:

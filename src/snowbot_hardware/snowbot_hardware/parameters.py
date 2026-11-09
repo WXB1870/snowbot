@@ -27,7 +27,7 @@ _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
           'motion_completion_grace_s',
           'validation_worker_timeout_s'),
  'gripper': ('vr_input_max_age_s', 'max_tick_gap_s', 'lease_ttl_s', 'request_ttl_s'),
- 'replay': ('period_s', 'command_ttl_s', 'renewal_period_s', 'start_lead_s', 'state_max_age_s'),
+ 'replay': ('period_s', 'command_ttl_s', 'renewal_period_s', 'rpc_timeout_s', 'start_lead_s', 'state_max_age_s'),
  'execution': ('target_stream_brake_lead_s', 'stop_confirmation_window_s',
                'held_reference_velocity_tolerance_rad_s',
                'startup_hold_ttl_s',
@@ -112,7 +112,7 @@ def load_parameters(path=None):
     replay = result['replay']
     if (replay['period_s']+lead >= replay['command_ttl_s'] or
             replay['command_ttl_s'] > .4 or replay['start_lead_s'] >= replay['command_ttl_s'] or
-            replay['start_lead_s'] > .15 or replay['renewal_period_s'] >= 2.):
+            replay['start_lead_s'] > .15 or replay['renewal_period_s']+replay['rpc_timeout_s'] >= 2.):
         raise ValueError('SNOWBOT_REPLAY_TIMING')
     p, g, d = (result[name] for name in ('pico', 'gripper', 'diagnostics'))
     for name in ('grip', 'trigger'):
@@ -138,6 +138,8 @@ def validate_pico_timing(parameters, *, brake_lead_s=0.):
                      ('stop_renewal_period_s', arm_lease_s)):
         if p[key] >= ttl:
             raise ValueError(f'SNOWBOT_PICO_RENEWAL_TIMING:{key} must be < {ttl:g}s')
+        if p[key]+p['renewal_timeout_s'] >= arm_lease_s:
+            raise ValueError(f'SNOWBOT_PICO_RENEWAL_TIMING:{key} + renewal_timeout_s must be < {arm_lease_s:g}s')
     if p['prepare_command_period_s'] + brake_lead_s >= p['prepare_command_ttl_s']:
         raise ValueError('SNOWBOT_PREPARE_TIMING: prepare_command_period_s + '
                          'target_stream_brake_lead_s must be < prepare_command_ttl_s')
@@ -153,6 +155,9 @@ def apply_tool_timing(config, parameters):
     """Apply the selected site timing before constructing sessions and workers."""
     from bindu_contracts.teleoperation import tool_with_timing
     result = tool_with_timing(config, parameters['teleop'], parameters['solver'])
+    result['lease_renewal_period_s'] = parameters['pico']['renewal_period_s']
+    result['lease_renewal_timeout_s'] = parameters['pico']['renewal_timeout_s']
+    result['stop_renewal_period_s'] = parameters['pico']['stop_renewal_period_s']
     result['input_max_age'] = parameters['pico']['remote_input_timeout_s']
     gap = result.get('integration_max_sample_gap', result.get('max_integration_interval', .1))
     if gap > result['input_max_age']:

@@ -27,7 +27,7 @@
     "stop_wait_margin_s": 1.0,
     "renewal_period_s": 0.2,
     "stop_renewal_period_s": 0.3,
-    "renewal_timeout_s": 2.0,
+    "renewal_timeout_s": 0.7,
     "motion_completion_grace_s": 6.0,
     "validation_worker_timeout_s": 30.0,
     "remote_input_timeout_s": 1.0,
@@ -41,9 +41,11 @@
     "request_ttl_s": 0.25
   },
   "replay": {
+    "_comment": "心跳每period_s发送，rpc_timeout_s仅监测异步提交／续租回复，不暂停心跳。续租周期从请求发出时计时，周期加回复预算须小于2秒租约寿命。",
     "period_s": 0.02,
     "command_ttl_s": 0.25,
     "renewal_period_s": 0.5,
+    "rpc_timeout_s": 0.25,
     "start_lead_s": 0.12,
     "state_max_age_s": 0.2
   },

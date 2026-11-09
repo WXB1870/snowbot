@@ -389,6 +389,7 @@ def run_replay(plan, port, *, timing):
         ros_start = port.ros()
         while True:
             port.wait_until(due)
+            port.poll()
             if port.outcome() is not None:
                 break
             now = port.steady()
@@ -398,7 +399,7 @@ def run_replay(plan, port, *, timing):
                 raise RuntimeError('REPLAY_CLOCK_CHANGED')
             if now-renewed >= timing['renewal_period_s']:
                 port.renew()
-                renewed = port.steady()
+                renewed = now
             if port.steady()-due >= timing['command_ttl_s']:
                 raise RuntimeError('REPLAY_STREAM_LATE')
             port.send(ros_start+due-start)
