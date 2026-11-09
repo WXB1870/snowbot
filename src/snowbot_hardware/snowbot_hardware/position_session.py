@@ -138,7 +138,8 @@ class PositionSessionDevices:
             ('arms', 'arm_receiver_node', '/robot_upperMonitor'),
             ('middle', 'mid_receiver_node', '/dual_arm_control_node'),
             ('head', 'servo_receiver_node', '/servo_node'))}
-        self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode)
+        self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode,
+                                    on_stale=self.log_stale_observation)
         self.trajectory_limits = target_stream_limits({
             key: node.declare_parameter(key, default,
                                         descriptor=ParameterDescriptor(read_only=True)).value
@@ -323,10 +324,18 @@ class PositionSessionDevices:
             segment_id=None if obs is None else int(obs.segment_id),pdo_sample=None if obs is None else int(obs.pdo_sample))
         self.node.event('TRAJECTORY_REFERENCE_EMPTY',json.dumps(detail,separators=(',', ':')))
 
+    def log_stale_observation(self, detail):
+        message = 'SNOWBOT_PDO_STALE '+json.dumps(detail, separators=(',', ':'))
+        if detail['stage'] == 'receive':
+            self.node.get_logger().warn(message, throttle_duration_sec=1.)
+        else:
+            self.node.get_logger().warn(message)
+
     def receive(self, msg):
         entered = self.health.steady()
         source = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
-        source_age = self.node.now()-source
+        received_ros = self.node.now()
+        source_age = received_ros-source
         self.health.observation_callback_count += 1
         identity_finished, outcome = None, 'publisher_discovering'
         try:
@@ -334,7 +343,7 @@ class PositionSessionDevices:
                                  'snowbot_ctl_msgs/msg/PositionObservation', discovering=True):
                 return
             identity_finished = self.health.steady()
-            q, v, stamp = self.health.observe(msg)
+            q, v, stamp = self.health.observe(msg, received_ros=received_ros)
             if self.grippers and self.grippers.core and stamp > self.grippers.core.feedback_stamp:
                 try:
                     self.grippers.core.observe(q, v, {'left': float(msg.current[7]),
@@ -373,13 +382,8 @@ class PositionSessionDevices:
         except (ValueError, RuntimeError) as exc:
             outcome = str(exc)
             self.io.invalid = str(exc)
-            detail=str(exc)
-            if detail=='SNOWBOT_PDO_STALE':
-                detail+=' '+json.dumps(dict(publish_age_ms=1000*(self.node.now()-
-                    (msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9)),
-                    pdo_age_ms=1000*msg.pdo_age,pdo_sample=msg.pdo_sample,
-                    previous_sample=self.health.sample,wkc=msg.wkc,expected_wkc=msg.expected_wkc))
-            self.node.get_logger().warn(detail, throttle_duration_sec=1.)
+            if outcome != 'SNOWBOT_PDO_STALE':
+                self.node.get_logger().warn(outcome, throttle_duration_sec=1.)
         finally:
             finished = self.health.steady()
             self.health.observation_callbacks.append((entered, finished, msg.pdo_sample,

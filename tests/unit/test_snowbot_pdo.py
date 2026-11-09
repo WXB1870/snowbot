@@ -53,6 +53,43 @@ def frame(sample=1, stamp=10., **changes):
 
 
 class SessionSensorBudgetTests(unittest.TestCase):
+    def test_stale_evidence_identifies_checked_sample_and_callback_time(self):
+        from snowbot_hardware.session import SessionHealth
+
+        records = []
+        now = 10.005
+        health = SessionHealth(lambda: now, lambda: 20., on_stale=records.append)
+        first = S(header=S(stamp=S(sec=10, nanosec=0)), boot_id=123, pdo_sample=48116,
+                  pdo_age=.001, wkc=67, expected_wkc=67, valid_mask=0, status=[])
+        health.observe(first, received_ros=10.003)
+        self.assertIs(health.require_observation(), first)
+        self.assertEqual(records, [])
+
+        now = 10.041
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, '^SNOWBOT_PDO_STALE$'):
+                health.require_observation()
+        newer = copy.deepcopy(first)
+        newer.pdo_sample = 48146
+        newer.header.stamp.nanosec = 30_000_000
+        now = 10.075
+        with self.assertRaisesRegex(ValueError, '^SNOWBOT_PDO_STALE$'):
+            health.observe(newer, received_ros=10.070)
+        now = 10.080
+        with self.assertRaisesRegex(RuntimeError, '^SNOWBOT_PDO_STALE$'):
+            health.require_observation()
+        self.assertIs(health.observation, first)
+        self.assertEqual([(r['stage'], r['pdo_sample'], r['callback_received_ros'], r['checked_ros'])
+                          for r in records], [('read_cached', 48116, 10.003, 10.041),
+                                              ('receive', 48146, 10.070, 10.075),
+                                              ('read_rejected', 48146, 10.070, 10.080)])
+        for record, measured in zip(records, (9.999, 10.029, 10.029)):
+            self.assertAlmostEqual(record['measurement_stamp_ros'], measured)
+        newer.header.stamp.nanosec = 80_000_000
+        health.observe(newer, received_ros=now)
+        self.assertIs(health.require_observation(), newer)
+        self.assertEqual(len(records), 3)
+
     def test_sensor_budget_and_rt_buffer_do_not_delay_joint_or_pdo_failures(self):
         from snowbot_hardware.session import SessionHealth, CONTROL_GROUPS
         health=SessionHealth(lambda:10.,lambda:20.,execution_mode='impedance')

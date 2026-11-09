@@ -73,12 +73,16 @@ def decode_observation(msg, now):
 
 
 class SessionHealth:
-    def __init__(self, now, steady=time.monotonic, *, execution_mode="position"):
+    def __init__(self, now, steady=time.monotonic, *, execution_mode="position", on_stale=None):
         self.execution_mode = execution_mode
         self.reference_mode = 2
         self.now, self.steady = now, steady
         self.states, self.received = {}, {}
         self.observation = None
+        self.on_stale = on_stale
+        self.callback_received_ros = None
+        self.rejected_stale_observation = None
+        self.stale_read_reported = False
         self.measurement_stamp = 0.
         self.boot = self.sample = 0
         self.progress = None
@@ -109,9 +113,23 @@ class SessionHealth:
                 gap_ms=None if i==0 else (t[0]-self.observation_callbacks[i-1][0])*1000)
                 for i,t in enumerate(self.observation_callbacks)])
 
-    def observe(self, msg):
+    def _report_stale(self, stage, msg, checked_ros):
+        if self.on_stale is None:
+            return
+        source = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.on_stale(dict(stage=stage, boot_id=msg.boot_id, pdo_sample=msg.pdo_sample,
+            source_stamp_ros=source, measurement_stamp_ros=source-msg.pdo_age,
+            callback_received_ros=self.callback_received_ros, checked_ros=checked_ros,
+            publish_age_ms=(checked_ros-source)*1000, pdo_age_ms=msg.pdo_age*1000,
+            previous_sample=self.sample, wkc=msg.wkc, expected_wkc=msg.expected_wkc))
+
+    def observe(self, msg, *, received_ros=None):
+        checked_ros = self.now()
+        self.callback_received_ros = checked_ros if received_ros is None else received_ros
+        self.rejected_stale_observation = None
+        self.stale_read_reported = False
         try:
-            result = decode_observation(msg, self.now())
+            result = decode_observation(msg, checked_ros)
             if self.boot and msg.boot_id != self.boot:
                 raise ValueError('SNOWBOT_SERVO_RESTART_RECONNECT_REQUIRED')
             if msg.pdo_sample < self.sample:
@@ -127,6 +145,9 @@ class SessionHealth:
             return result
         except ValueError as exc:
             self.invalid = str(exc)
+            if self.invalid == 'SNOWBOT_PDO_STALE':
+                self.rejected_stale_observation = msg
+                self._report_stale('receive', msg, checked_ros)
             raise
 
     def state(self, layer, msg):
@@ -194,12 +215,19 @@ class SessionHealth:
     def require_observation(self):
         """Use the decoded PDO snapshot; only its freshness changes between reads."""
         if self.invalid:
+            if self.rejected_stale_observation is not None and not self.stale_read_reported:
+                self.stale_read_reported = True
+                self._report_stale('read_rejected', self.rejected_stale_observation, self.now())
             raise RuntimeError(self.invalid)
         if self.progress is None or not 0 <= self.steady()-self.progress <= ROS_FEEDBACK_TIMEOUT_S:
             raise RuntimeError('SNOWBOT_PDO_NOT_ADVANCING')
         obs = self.observation
-        if not (obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9 <= self.now() <=
+        checked_ros = self.now()
+        if not (obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9 <= checked_ros <=
                 self.measurement_stamp+ROS_FEEDBACK_TIMEOUT_S):
+            if not self.stale_read_reported:
+                self.stale_read_reported = True
+                self._report_stale('read_cached', obs, checked_ros)
             raise RuntimeError('SNOWBOT_PDO_STALE')
         return obs
 
