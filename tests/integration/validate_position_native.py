@@ -268,6 +268,17 @@ def write_legacy_ingress_check(source, work, root):
     return path
 
 
+def write_head_check(source, work, root):
+    text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
+    callback=text[text.index('void ServoNode::head_cmd_callback('):text.index('void ServoNode::torso_runin()')]
+    start=text.index('void ServoNode::head_runin()')
+    end=text.index('\n}',start)+2
+    fixture=(root/'test_head_target.cpp').read_text()
+    path=work/'test_head_target.cpp'
+    path.write_text(fixture.replace('// PRODUCTION_HEAD_METHODS',callback+text[start:end]))
+    return path
+
+
 def write_middle_check(source, work, root):
     text=(source/'dual_arm_control/src/controller/ArmInterface.cpp').read_text()
     start=text.index('std::vector<outpWrap> ArmCtlOptInterface::Traj_temp_outp(')
@@ -335,6 +346,9 @@ def main():
         names.append('test_position_receipt')
         sources.extend((args.source/'servo_control/src/ros_controller/rosLoop.cpp',root/'test_session_impedance.cpp'))
     native_include=args.source/'servo_control/include/bindu_execution_native'
+    if (args.source/'servo_control/include/position_head.h').is_file():
+        names.append('test_head_target')
+        sources.extend((args.source/'servo_control/include/position_head.h',root/'test_head_target.cpp'))
     native_sources=[args.source/'servo_control/src/bindu_execution_native'/name
                     for name in ('interpolation.cpp','adaptive_stream.cpp')]
     trajectory=args.source/'servo_control/include/position_trajectory.h'
@@ -393,6 +407,8 @@ def main():
                 copied=write_drive_cycle_check(args.source,work,root)
             elif name=='test_production_legacy_ingress':
                 copied=write_legacy_ingress_check(args.source,work,root)
+            elif name=='test_head_target':
+                copied=write_head_check(args.source,work,root)
             elif name=='test_position_middle':
                 copied=write_middle_check(args.source,work,root)
             elif name=='test_production_position_cycle':

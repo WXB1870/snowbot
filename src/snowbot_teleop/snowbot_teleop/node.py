@@ -203,6 +203,10 @@ class PicoNode(RuntimeNode):
         self.last_tick_at=None
         self.motion_limit=None;self.motion_limit_stamp=0.
         self.position_ops = None
+        self.head = None
+        if self.position_contract and self.cfg.get('head_control', False):
+            from .head import TeleopHead
+            self.head = TeleopHead(self)
         if self.position_contract:
             from .position import PositionOperations
             self.position_ops = PositionOperations(self, self.get_parameter('gripper_config').value)
@@ -281,6 +285,8 @@ class PicoNode(RuntimeNode):
                 if not self.base.core.healthy(self.now(), clock):
                     raise RuntimeError('BASE_FEEDBACK_UNAVAILABLE')
                 stopped = stopped and self.base.core.stopped(self.now(), clock)
+            if self.head and self.head.writable:
+                stopped = stopped and self.head.stopped()
             # A new executor's idle display cannot erase an outstanding stop.
             if self.stop_request is not None:
                 if self.stop_request['failed'] or time.monotonic()>=self.stop_request['deadline']:
@@ -368,6 +374,8 @@ class PicoNode(RuntimeNode):
             return
         if self.base:
             self.base.ingest(pair, now)
+        if self.head:
+            self.head.core.ingest(*pair, now, time.monotonic())
         self.control.update_feedback(self.feedback(),self.now())
         previous=(self.control.source,self.control.seq)
         previous_frames=self.control.frames
@@ -1472,6 +1480,8 @@ class PicoNode(RuntimeNode):
             self.base.tick(self.control, feedback.healthy)
             self.tick_work['base_s']=time.monotonic()-base_started
             self.tick_work['base_detail']=getattr(self.base,'tick_work',{})
+        if self.head:
+            self.head.tick(self.control, feedback.healthy)
         if self.now()-self.last_status>=.1:
             self.last_status=self.now()
             if self.simulation_demo:
@@ -1525,6 +1535,8 @@ class PicoNode(RuntimeNode):
             view['ground_recovery']=self.ground_recovery_observation
             if self.base:
                 view['base'] = self.base.snapshot()
+            if self.head:
+                view['head'] = self.head.snapshot()
             publish_started=time.monotonic()
             self.display.publish(String(data=json.dumps(view)))
             self.operator_state.publish(String(data=json.dumps(view)))
@@ -1551,6 +1563,8 @@ class PicoNode(RuntimeNode):
                     input_pair_pending=bool(valid and any(f.seq != pair[0].seq for f in raw)))
 
     def destroy_node(self):
+        if self.head:
+            self.head.stop()
         if self.base:
             self.base.close()
         self.validator.close()

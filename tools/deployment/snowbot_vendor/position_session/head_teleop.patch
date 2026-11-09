@@ -1,0 +1,93 @@
+--- a/servo_control/include/ros_controller/rosLoop.h
++++ b/servo_control/include/ros_controller/rosLoop.h
+@@ -1,6 +1,7 @@
+ #include "std_srvs/srv/trigger.hpp"
+ #include "position_connection_diagnostics.h"
+ #include "position_session_contract.h"
++#include "position_head.h"
+ #include "position_trajectory.h"
+ #include "position_receipt.h"
+ #include "rcl_interfaces/msg/parameter_descriptor.hpp"
+@@ -389,6 +390,8 @@
+         double t_kp[TORSO_MOTORS]  = {0}, t_kd[TORSO_MOTORS]  = {0};
+
+         bool h_ifRunin = false; int h_step = 0, h_winlen = 0; double h_time_last = 0.0;
++        rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr head_target_sub_;
++        position_session::HeadTarget head_target_;
+         bool h_inited = false;
+         double h_pos_curr[HEAD_MOTORS] = {0};
+         double h_pos_start[HEAD_MOTORS] = {0}, h_pos_target[HEAD_MOTORS] = {0};
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -302,6 +302,10 @@
+         std::bind(&ServoNode::torso_cmd_callback, this, std::placeholders::_1));
+     head_cmd_sub = create_subscription<std_msgs::msg::Float64MultiArray>(
+         "/head/motor_cmd", 10,
++        std::bind(&ServoNode::head_cmd_callback, this, std::placeholders::_1));
++
++    head_target_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
++        "/bindu/head/target", 1,
+         std::bind(&ServoNode::head_cmd_callback, this, std::placeholders::_1));
+
+     //----------初始化零位全局变量----------
+@@ -1966,7 +1970,25 @@
+     if(EtherCAT_driveResetBusy())return; // Manual reset excludes competing enables.
+
+     if (shutdown_mode_) return;   // 关机回零期间忽略外部指令
+-    if (msg->data.size() == 2) {
++    const bool stamped=msg->data.size()==6;
++    if(stamped) {
++        const auto writers=get_publishers_info_by_topic("/bindu/head/target");
++        if(writers.size()!=1 || writers[0].node_name()!="pico_control" ||
++           writers[0].topic_type()!="std_msgs/msg/Float64MultiArray")return;
++        if(!head_target_.accept(msg->data,this->now().seconds(),position_session::HeadTarget::steady()))return;
++        if(msg->data[5]==1.) {
++            h_ifRunin=false;
++            for(int i=0;i<HEAD_MOTORS;++i)h_pos_target[i]=h_pos_curr[i];
++            return;
++        }
++        if(!position_startup_complete_ || count_publishers("/head/motor_cmd"))return;
++        const auto obs=EtherCAT_positionObservation();
++        const auto clock=position_session::HeadTarget::steady();
++        if((obs.valid_mask&0x30000u)!=0x30000u || obs.expected_wkc<=0 || obs.wkc!=obs.expected_wkc ||
++           clock<obs.sampled_ns || clock-obs.sampled_ns>20000000 ||
++           (obs.status[16]&8u) || (obs.status[17]&8u))return;
++    } else if(head_target_.selected())return;
++    if (msg->data.size() == 2 || stamped) {
+         h_pos_target[0] = msg->data[0];
+         h_pos_target[1] = msg->data[1];
+     } else if (msg->data.size() >= 10) {
+@@ -1986,7 +2008,7 @@
+     EtherCAT_setSingleMotorEnable(16, true);
+     EtherCAT_setSingleMotorEnable(17, true);
+
+-    double now = this->now().seconds() + this->now().nanoseconds() * 1e-9;
++    double now = this->now().seconds();
+
+     // 起点处理：若首次收到指令，以当前实际反馈为起点；否则以上一次指令值/规划连续位置为起点，杜绝反馈滞后跳变！
+     if (!h_inited) {
+@@ -2011,6 +2033,13 @@
+     if (h_winlen < 2) h_winlen = 2;
+     if (h_winlen > 500) h_winlen = 500;
+
++    if(stamped) {
++        // Smoothstep peak speed is 1.5*distance/duration. Queue bunching must
++        // not turn a bounded target increment into an arbitrarily fast move.
++        double distance=0.;
++        for(int i=0;i<HEAD_MOTORS;++i)distance=std::max(distance,std::abs(h_pos_target[i]-h_pos_start[i]));
++        h_winlen=std::max(h_winlen,int(std::ceil(1.5*distance/(position_session::HeadTarget::max_speed*.001))));
++    }
+     h_time_last = now;
+     h_step = 0;
+     h_ifRunin = true;
+@@ -2040,6 +2069,10 @@
+ }
+
+ void ServoNode::head_runin(){
++    if(head_target_.expired(this->now().seconds(),position_session::HeadTarget::steady())) {
++        h_ifRunin=false;
++        for(int i=0;i<HEAD_MOTORS;++i)h_pos_target[i]=h_pos_curr[i];
++    }
+     if (!h_ifRunin) {
+         // 保持当前指令位置
+         for (int i = 0; i < HEAD_MOTORS; i++) {

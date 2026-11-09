@@ -348,7 +348,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for code in ('SNOWBOT_HELD_REFERENCE_NOT_STATIONARY',lease_refusal,'SNOWBOT_PDO_STALE',
                      'BIMANUAL_LEASE_NOT_ACQUIRED:bad-json'):
             node=self.production('tick');node.last_tick_at=None;node.waiters=set();node.validator=S(poll=lambda:None)
-            node.state=node.position_ops=node.base=None;node.last_context_at=node.last_status=1.
+            node.state=node.position_ops=node.base=node.head=None;node.last_context_at=node.last_status=1.
             node.now=lambda:1.;node.feedback=lambda:PicoFeedback(1.,True)
             node.control=S(phase='engaging',teleop_mode='bimanual_tool',context_at=1.,pending=S(operation='follow'),
                 lock=Mock(),update_feedback=Mock(),tick=Mock(),drain=lambda:[])
@@ -864,7 +864,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace as S
         from unittest.mock import Mock
         for unheld in (False,True):
-            node=self.production('tick');node.unheld_test=unheld;node.operator_grasp=True;node.base=None
+            node=self.production('tick');node.unheld_test=unheld;node.operator_grasp=True;node.base=node.head=None
             node.position_contract=True
             node.last_tick_at=None;node.waiters=set();node.validator=S(poll=lambda:None)
             node.state=None;node.tool_result=None;node.pending_intent=None;node.record_future=None;node.running=None
