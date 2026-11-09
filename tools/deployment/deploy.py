@@ -366,6 +366,8 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                             startup_deadline=time.monotonic_ns()+15000000000
                         if tids.get(thread[1])!=int(thread[3]):identified_ns[thread[1]]=time.monotonic_ns()
                         tids[thread[1]] = int(thread[3])
+                        if thread[1] in ('pdo','control') and tids.get('servo_ros')!=int(thread[2]):
+                            tids['servo_ros']=int(thread[2]);identified_ns['servo_ros']=time.monotonic_ns()
                         if set(tids.values()) != configured:
                             for event, expression in sched_event_filters(tids.values(),startup_window=startup_window).items():
                                 write('events/sched/'+event+'/filter',expression)

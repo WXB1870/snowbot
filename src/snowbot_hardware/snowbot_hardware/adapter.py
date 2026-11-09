@@ -133,7 +133,21 @@ class SnowbotAdapter(ExecutionNode):
                 self.get_logger().warn('STOP_CHECK_LOG_ERROR:'+str(exc), throttle_duration_sec=1.)
                 return  # Diagnostic encoding must not terminate the control loop.
             self._stop_check_signature, self._stop_check_at = signature, steady
-            self.get_logger().warn('STOP_CHECK '+payload)
+            reason = data['reason']
+            if reason == 'PAUSE_SEQUENCE_MISMATCH':
+                summary = '等待暂停回执：期望序号%s，当前序号%s' % (
+                    data['sequence'], data['observed']['command_sequence'])
+            elif reason == 'STOP_SPEED_NOT_ZERO':
+                summary = '等待停稳：速度%.3f rad/s，阈值%.3f rad/s' % (
+                    data['max_speed_rad_s'], data['velocity_tolerance_rad_s'])
+            else:
+                summary = reason
+            summary = 'STOP_CHECK '+summary+' session=%s sequence=%s' % (data['session'], data['sequence'])
+            if not terminal and reason in ('PAUSE_SEQUENCE_MISMATCH', 'STOP_SPEED_NOT_ZERO',
+                                           'WAIT_REST_WINDOW', 'WAIT_EXECUTOR'):
+                self.get_logger().info(summary)
+            else:
+                self.get_logger().warn(summary+' failures=%s；详情见 runtime-events.jsonl' % data['stop_failures'])
             motion = engine.stopping[0] if engine.stopping else getattr(self, 'last_event', None)
             self.event('STOP_CHECK', payload,
                        task_id=motion.task_id if motion else '',
