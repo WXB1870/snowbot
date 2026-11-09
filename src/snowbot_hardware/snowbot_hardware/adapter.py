@@ -1,5 +1,7 @@
 """Snowbot session_v3 execution endpoint; controller nodes are never launched here."""
 import json
+import os
+import time
 from rcl_interfaces.msg import ParameterDescriptor
 from bindu_execution.delegated_position import DelegatedPositionExecutor
 from bindu_runtime.execution_node import ExecutionNode, run_execution
@@ -29,6 +31,8 @@ class SnowbotAdapter(ExecutionNode):
         self.grippers = self.snowbot_devices.grippers = SnowbotGrippers(self.snowbot_devices)
         self.get_logger().info('Snowbot adapter: command_enabled=%s; interpolation handled by the low-level controller' %
                                self.robot_io.command_enabled)
+        self.get_logger().info('Snowbot publication mode env: '+os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')+
+                               '; qos_from_xml='+os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET'))
 
     def fault(self, request, reply):
         reply.ok, reply.code = False, 'SNOWBOT_SIM_FAULT_UNAVAILABLE'
@@ -51,14 +55,23 @@ class SnowbotAdapter(ExecutionNode):
         return super().lease(request, reply)
 
     def tick(self):
+        wall, cpu = time.monotonic(), time.thread_time()
+        self._tick_timing = dict(started_monotonic=wall, points=[])
         self.snowbot_devices.advance_session()
+        self._tick_timing['points'].append(('session', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
         if not self.closing:
             self.snowbot_devices.advance_startup_hold(self.engine)
+            self._tick_timing['points'].append(('startup_hold', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
             self.snowbot_devices.brake_before_source_expiry(self.engine)
+            self._tick_timing['points'].append(('source_expiry', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
         super().tick()
+        self._tick_timing['points'].append(('engine', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
         self.record_stop_check()
+        self._tick_timing['points'].append(('stop_log', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
         if getattr(self, 'grippers', None) and self.grippers.core:
             self.grippers.tick()
+        self._tick_timing['points'].append(('gripper', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
+        self._previous_tick_timing = self._tick_timing
 
     def record_stop_check(self):
         # Emit from the explicit non-RT loop, never from a health predicate.
@@ -77,6 +90,11 @@ class SnowbotAdapter(ExecutionNode):
         steady = engine.steady()
         if (signature != getattr(self, '_stop_check_signature', None) or
                 engine.stopping and steady-getattr(self, '_stop_check_at', 0.) >= .5):
+            data['feedback_callbacks'] = health.observation_diagnostic()
+            data['tick_timing'] = getattr(self, '_tick_timing', None)
+            data['previous_tick_timing'] = getattr(self, '_previous_tick_timing', None)
+            data['publication_mode_env'] = os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')
+            data['publication_qos_from_xml'] = os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET')
             try:
                 payload = json.dumps(data, separators=(',', ':'), allow_nan=False)
             except (TypeError, ValueError) as exc:
@@ -106,4 +124,5 @@ class SnowbotAdapter(ExecutionNode):
 
 
 def main():
+    os.environ.setdefault('RMW_FASTRTPS_PUBLICATION_MODE', 'ASYNCHRONOUS')
     run_execution(SnowbotAdapter)

@@ -47,9 +47,10 @@ class PositionSessionIO(SnowbotIO):
         self.after_capture()
 
     def sampled_reference(self):
+        # ROS snapshot lifetime; the servo's local RT deadline remains 20 ms.
         sample = self.servo_reference
         if (sample is None or not (self.targets or self.stop_targets) or
-                not 0 <= self.now()-sample[0] <= .02):
+                not 0 <= self.now()-sample[0] <= ROS_FEEDBACK_TIMEOUT_S):
             return (self.now(), {}, {}, {})
         return sample
 
@@ -323,7 +324,7 @@ class PositionSessionDevices:
             if (msg.session_selected and msg.session == self.envelopes.session and
                     getattr(msg, 'reference_mode', 0) == 2 and getattr(msg, 'reference_valid', False) and
                     getattr(msg, 'output_valid', False) and getattr(msg, 'segment_id', 0) == msg.command_sequence and
-                    0 <= self.node.now()-sample <= .02 and
+                    0 <= self.node.now()-sample <= ROS_FEEDBACK_TIMEOUT_S and
                     all(all(math.isfinite(x) for x in values) for values in arrays)):
                 self.io.servo_reference = (sample, *[dict(zip(CONTROL_NAMES, values)) for values in arrays])
                 source = self.sent.get(msg.command_sequence)

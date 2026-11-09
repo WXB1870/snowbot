@@ -70,7 +70,10 @@
  void ArmCtlNode::controlOutp(){
 +    position_control_begin_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
      KDL::JntArray lArm_posRet, rArm_posRet;
-@@ -873,3 +880,3 @@
+@@ -871,5 +878,5 @@
+         reference_only.resize(2);const auto now=this->now().nanoseconds();
+-        const bool nominal=(position_nominal_session_==position_meta_.session||now<position_nominal_bootstrap_expires_)&&position_nominal_stamp_>0&&now>=position_nominal_stamp_&&now-position_nominal_stamp_<=20000000;
++        const bool nominal=(position_nominal_session_==position_meta_.session||now<position_nominal_bootstrap_expires_)&&position_nominal_stamp_>0&&now>=position_nominal_stamp_&&now-position_nominal_stamp_<=position_session::ros_feedback_timeout_ns;
          if(!nominal&&!(position_nominal_session_!=position_meta_.session&&now<position_nominal_bootstrap_expires_&&position_feedback_.fresh(now,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))){
 -            position_gate_.interrupt();position_rejection_="nominal_reference_unavailable";return;
 +            position_log_interrupt("nominal_reference_unavailable");position_gate_.interrupt();position_rejection_="nominal_reference_unavailable";return;

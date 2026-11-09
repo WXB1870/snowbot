@@ -1,5 +1,7 @@
 """PDO evidence, source freshness and bounded fault capture; no ROS/devices."""
 import copy
+import ast
+import os
 from array import array
 import json
 import math
@@ -12,6 +14,36 @@ from unittest.mock import patch
 from snowbot_bringup.visualization.snowbot_diagnostics import DiagnosticWriter
 from snowbot_bringup.visualization.snowbot_pdo import (MASK, FaultWindow, PdoMonitor, PdoObserver,
                                        axis_status, observation_payload, statusword)
+
+
+class ReferenceDeliveryBudgetTests(unittest.TestCase):
+    def test_reference_snapshot_uses_ros_budget_and_still_expires(self):
+        from snowbot_hardware.position_session import PositionSessionIO
+        io = PositionSessionIO.__new__(PositionSessionIO)
+        io.now = lambda: 10.
+        io.targets, io.stop_targets = {'arm_l_joint_1': .1}, {}
+        for age in (.021408, .039):
+            io.servo_reference = (10.-age, {'arm_l_joint_1': .1}, {}, {})
+            self.assertEqual(io.sampled_reference()[1], io.targets)
+        for age in (.040001, -.001):
+            io.servo_reference = (10.-age, {'arm_l_joint_1': .1}, {}, {})
+            self.assertEqual(io.sampled_reference()[1], {})
+        io.servo_reference = None
+        self.assertEqual(io.sampled_reference()[1], {})
+
+    def test_adapter_entry_sets_async_before_runner_and_preserves_override(self):
+        source = Path(__file__).resolve().parents[2]/'src/snowbot_hardware/snowbot_hardware/adapter.py'
+        function = next(n for n in ast.parse(source.read_text()).body
+                        if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        for value in (None, 'SYNCHRONOUS'):
+            env = {} if value is None else {'RMW_FASTRTPS_PUBLICATION_MODE': value}
+            seen = []
+            ns = dict(os=os, SnowbotAdapter=object(), run_execution=lambda _: seen.append(
+                os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE')))
+            with patch.dict(os.environ, env, clear=True):
+                exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), ns)
+                ns['main']()
+            self.assertEqual(seen, [value or 'ASYNCHRONOUS'])
 
 
 def frame(sample=1, stamp=10., **changes):
