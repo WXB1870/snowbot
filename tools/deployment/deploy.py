@@ -311,7 +311,7 @@ def trace_scheduling(workspace, *, tracefs=None):
     stopped = threading.Event()
     handlers = {s:signal.signal(s,lambda *_:stopped.set()) for s in (signal.SIGINT,signal.SIGTERM)}
     def write(name, value): (instance/name).write_text(str(value))
-    source, offsets, tids, fault_ns, noticed_ns = None, {}, {}, None, None
+    source, control_source, offsets, tids, fault_ns, noticed_ns = None, None, {}, {}, None, None
     deadline, configured, simulation = None, set(), False
     try:
         write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
@@ -325,20 +325,33 @@ def trace_scheduling(workspace, *, tracefs=None):
             candidates = list((workspace/'startup-logs').glob('services-*/servo.log'))
             latest = max(candidates,key=lambda p:p.stat().st_mtime_ns) if candidates else None
             if latest is not None and latest != source and noticed_ns is None:
-                source, offsets, tids = latest, {}, {}
+                source, control_source, offsets, tids = latest, None, {}, {}
                 write('tracing_on',0)
                 for event,expression in sched_event_filters([]).items():write('events/sched/'+event+'/filter',expression)
                 write('trace','');write('tracing_on',1);configured=set()
             if source is not None:
+                controls = list((workspace.parent/'dependencies/bindu/log/vr').glob('*/control.log'))
+                latest_control = max(controls,key=lambda p:p.stat().st_mtime_ns) if controls else None
+                if latest_control != control_source and noticed_ns is None:
+                    if control_source is not None:offsets.pop(str(control_source),None)
+                    control_source=latest_control;tids.pop('adapter',None)
+                    if set(tids.values()) != configured:
+                        for event,expression in sched_event_filters(tids.values()).items():
+                            write('events/sched/'+event+'/filter',expression)
+                        configured=set(tids.values())
                 lines = []
-                for log_name in ('servo.log', 'middle.log'):
-                    path = source.with_name(log_name)
+                paths = [source,source.with_name('middle.log')]
+                if control_source is not None:paths.append(control_source)
+                for path in paths:
                     if not path.exists():continue
                     with path.open() as stream:
-                        stream.seek(offsets.get(log_name, 0)); lines.extend(stream.readlines())
-                        offsets[log_name] = stream.tell()
+                        stream.seek(offsets.get(str(path), 0))
+                        while True:
+                            line=stream.readline()
+                            if not line or not line.endswith('\n'):break
+                            lines.append(line);offsets[str(path)]=stream.tell()
                 for line in lines:
-                    thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle) pid=(\d+) tid=(\d+)',line)
+                    thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle|adapter) pid=(\d+) tid=(\d+)',line)
                     if thread and Path('/proc/'+thread[3]).exists():
                         tids[thread[1]] = int(thread[3])
                         if set(tids.values()) != configured:
@@ -346,6 +359,11 @@ def trace_scheduling(workspace, *, tracefs=None):
                                 write('events/sched/'+event+'/filter',expression)
                             configured=set(tids.values())
                             print('SCHED_TRACE_ARMED '+json.dumps(tids),flush=True)
+                    if 'adapter' in tids and 'DEVICE_FAULT ' in line and noticed_ns is None:
+                        detail=json.loads(line.split('DEVICE_FAULT ',1)[1])
+                        if detail['state']=='DEVICE_COMMAND_DETAIL':
+                            noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
+                            fault_ns=detail['steady_ns'];simulation=bool(detail.get('simulation',False))
                     if configured and any(marker in line for marker in (
                             '[ECAT-FAULT]', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT')) and noticed_ns is None:
                         noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
@@ -359,13 +377,22 @@ def trace_scheduling(workspace, *, tracefs=None):
         frozen_ns=time.monotonic_ns()
         if fault_ns is None:fault_ns=noticed_ns or frozen_ns
         text,coverage=sched_trace_window((instance/'trace').read_text(),fault_ns)
+        thread_info={}
+        recorded=set(map(int,re.findall(r'(?:prev_pid|next_pid|\bpid)=(\d+)',text))) | set(tids.values())
+        for tid in sorted(recorded-{0}):
+            try:
+                status=(Path('/proc')/str(tid)/'status').read_text()
+                thread_info[tid]=dict(comm=(Path('/proc')/str(tid)/'comm').read_text().strip(),
+                    policy=os.sched_getscheduler(tid),priority=os.sched_getparam(tid).sched_priority,
+                    cpus_allowed=re.search(r'Cpus_allowed_list:\s*(\S+)',status)[1])
+            except (FileNotFoundError,ProcessLookupError):thread_info[tid]=dict(exited=True)
         output=workspace/'scheduler-traces'/(time.strftime('%Y%m%d-%H%M%S')+'-'+str(os.getpid()))
         output.mkdir(parents=True)
         (output/'sched.trace').write_text(text)
         info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
             requested_before_s=2.,post_notice_s=.2,buffer_kb_per_cpu=2048,
             tids=tids,source_log=str(source) if source else None,
-            source_logs=[str(source.with_name(name)) for name in ('servo.log','middle.log')] if source else [],coverage=coverage,
+            source_logs=[str(p) for p in paths] if source else [],coverage=coverage,threads=thread_info,
             manual_stop=stopped.is_set(),simulation=simulation,hardware_started=False)
         (output/'metadata.json').write_text(json.dumps(info,indent=2)+'\n')
         print('SCHED_TRACE_SAVED '+str(output),flush=True)

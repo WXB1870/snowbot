@@ -3,6 +3,7 @@ import json
 import math
 import os
 import time
+import resource
 
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
@@ -611,9 +612,21 @@ class PositionSessionDevices:
             raise
 
     def _send_packet(self, groups, target):
+        capture = not self.sent or self.io.sending_hold
+        if capture:
+            if not self.sent:self.send_timing = {}
+            trace = dict(points=[])
+            self.send_timing['pause' if self.io.sending_hold else 'takeover'] = trace
+        def mark(phase):
+            if capture:
+                usage = resource.getrusage(resource.RUSAGE_THREAD)
+                trace['points'].append(dict(phase=phase, steady_ns=time.monotonic_ns(),
+                    cpu_ns=time.thread_time_ns(), nvcsw=usage.ru_nvcsw, nivcsw=usage.ru_nivcsw))
+        mark('begin')
         # Validate before minting an envelope, so rejected requests cannot renew.
         self._settle_takeover()
         self.check_ready(groups)
+        mark('ready_checked')
         if set(target) != set(CONTROL_NAMES) or any(not math.isfinite(target[n]) or
                 not self.io.profile.limits[n][0] <= target[n] <= self.io.profile.limits[n][1]
                 for n in CONTROL_NAMES):
@@ -685,7 +698,9 @@ class PositionSessionDevices:
         while len(self.sent) > 32:
             del self.sent[next(iter(self.sent))]
         self.publish_attempted = True
+        mark('packet_ready')
         self.publishers['arms'].publish(msg)
+        mark('published')
         mapping = {k: metadata[k] for k in ('session', 'sequence', 'operation', 'source_stamp_ns', 'expires_at_ns')}
         mapping.update(lease_id=msg.meta.lease_id, epoch=msg.meta.epoch,
                        execution_mode=self.health.execution_mode, reference_mode=2,
@@ -693,6 +708,7 @@ class PositionSessionDevices:
                        rigid_reference=msg.trajectory.version==3)
         self.node.event('TARGET_SENT', 'SNOWBOT_TARGET:'+json.dumps(mapping, separators=(',', ':')),
                         command_id=msg.meta.source_command_id)
+        mark('event_published')
         if self.io.sending_hold:
             self.io.pause_request = (metadata['session'], metadata['sequence'],
                                      self.health.boot, self.health.sample)

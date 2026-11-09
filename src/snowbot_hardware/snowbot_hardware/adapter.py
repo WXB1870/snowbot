@@ -2,6 +2,7 @@
 import json
 import os
 import time
+import threading
 from rcl_interfaces.msg import ParameterDescriptor
 from bindu_execution.delegated_position import DelegatedPositionExecutor
 from bindu_runtime.execution_node import ExecutionNode, run_execution
@@ -33,6 +34,8 @@ class SnowbotAdapter(ExecutionNode):
                                self.robot_io.command_enabled)
         self.get_logger().info('Snowbot publication mode env: '+os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')+
                                '; qos_from_xml='+os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET'))
+        self.get_logger().info('[SCHED-THREAD] role=adapter pid=%d tid=%d mono_ns=%d' %
+                               (os.getpid(), threading.get_native_id(), time.monotonic_ns()))
 
     def fault(self, request, reply):
         reply.ok, reply.code = False, 'SNOWBOT_SIM_FAULT_UNAVAILABLE'
@@ -43,9 +46,11 @@ class SnowbotAdapter(ExecutionNode):
             logged = getattr(self, '_device_fault_commands', {})
             if state not in logged or logged[state] != command_id:
                 data = dict(state=state, code=code, command_id=command_id, task_id=task_id,
+                    steady_ns=time.monotonic_ns(),
                     snapshot_at='event_emission',
                     feedback_callbacks=self.snowbot_devices.health.observation_diagnostic(),
                     startup_timing=getattr(self.snowbot_devices, 'startup_timing', None),
+                    send_timing=getattr(self.snowbot_devices, 'send_timing', None),
                     tick_timing=getattr(self, '_tick_timing', None),
                     runtime_tick_timing=getattr(self, 'runtime_tick_timing', None),
                     previous_runtime_tick_timing=getattr(self, 'previous_runtime_tick_timing', None))
@@ -106,18 +111,22 @@ class SnowbotAdapter(ExecutionNode):
         if data is None:
             self._stop_check_signature = None
             return
-        signature = (data['boot_id'], data['session'], data['sequence'], data['reason'],
-                     data['ack_reason'], tuple(data['stop_failures']))
+        terminal = (data['reason'], tuple(data['stop_failures'])) if engine.stop_fault or data['stop_failures'] else None
+        signature = (data['boot_id'], data['session'], data['sequence'], terminal)
         steady = engine.steady()
-        if (signature != getattr(self, '_stop_check_signature', None) or
+        first = signature != getattr(self, '_stop_check_signature', None)
+        if (first or
                 engine.stopping and steady-getattr(self, '_stop_check_at', 0.) >= .5):
-            data['feedback_callbacks'] = health.observation_diagnostic()
-            data['tick_timing'] = getattr(self, '_tick_timing', None)
-            data['previous_tick_timing'] = getattr(self, '_previous_tick_timing', None)
-            data['runtime_tick_timing'] = getattr(self, 'runtime_tick_timing', None)
-            data['previous_runtime_tick_timing'] = getattr(self, 'previous_runtime_tick_timing', None)
-            data['publication_mode_env'] = os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')
-            data['publication_qos_from_xml'] = os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET')
+            if first:
+                data['feedback_callbacks'] = health.observation_diagnostic()
+                data['startup_timing'] = getattr(devices, 'startup_timing', None)
+                data['send_timing'] = getattr(devices, 'send_timing', None)
+                data['tick_timing'] = getattr(self, '_tick_timing', None)
+                data['previous_tick_timing'] = getattr(self, '_previous_tick_timing', None)
+                data['runtime_tick_timing'] = getattr(self, 'runtime_tick_timing', None)
+                data['previous_runtime_tick_timing'] = getattr(self, 'previous_runtime_tick_timing', None)
+                data['publication_mode_env'] = os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')
+                data['publication_qos_from_xml'] = os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET')
             try:
                 payload = json.dumps(data, separators=(',', ':'), allow_nan=False)
             except (TypeError, ValueError) as exc:
