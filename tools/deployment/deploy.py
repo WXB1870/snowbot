@@ -361,7 +361,7 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                 for line in lines:
                     thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle|adapter) pid=(\d+) tid=(\d+)',line)
                     if thread and Path('/proc/'+thread[3]).exists():
-                        if (startup_window and startup_deadline is None and
+                        if (startup_window and startup_window!='hold' and startup_deadline is None and
                                 (startup_window!='adapter' or thread[1]=='adapter')):
                             startup_deadline=time.monotonic_ns()+15000000000
                         if tids.get(thread[1])!=int(thread[3]):identified_ns[thread[1]]=time.monotonic_ns()
@@ -380,13 +380,13 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                             fault_ns=detail['steady_ns'];simulation=bool(detail.get('simulation',False))
                     if configured and any(marker in line for marker in (
                             '[ECAT-FAULT]', 'POSITION_CYCLE_FIRST_FAULT', 'POSITION_GATE_INTERRUPT',
-                            'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY')) and noticed_ns is None:
+                            'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY', 'POSITION_WATCHDOG_FAULT')) and noticed_ns is None:
                         noticed_ns=time.monotonic_ns();deadline=noticed_ns+200000000
                         simulation='simulation=1' in line
                         gap=re.search(r'(?:previous_progress_gap_ms|wall_ms)=([\d.]+)',line)
                         if gap:before_s=max(before_s,float(gap[1])/1000.+.2)
                     first = any(marker in line for marker in ('first_bad=1', 'POSITION_CYCLE_FIRST_FAULT',
-                        'POSITION_GATE_INTERRUPT', 'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY'))
+                        'POSITION_GATE_INTERRUPT', 'POSITION_FEEDBACK_RESET', 'POSITION_INTERFACE_INIT_DELAY', 'POSITION_WATCHDOG_FAULT'))
                     stamp = re.search(r'(?:recv_end_ns|steady_ns)=(\d+)',line) if first else None
                     if stamp and noticed_ns is not None: fault_ns=int(stamp[1])
             if deadline is not None and time.monotonic_ns() >= deadline:break
@@ -865,8 +865,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers', 'trace-scheduling'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
-    parser.add_argument('--startup-window',nargs='?',choices=('base','adapter'),const='base',
-                        help='trace-scheduling: capture 15 seconds from base or adapter startup')
+    parser.add_argument('--startup-window',nargs='?',choices=('base','adapter','hold'),const='base',
+                        help='trace-scheduling: base/adapter capture 15 seconds; hold waits for a fault')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
                         help='Select machine defaults; prepare/build remember the selection for later runs')

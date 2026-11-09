@@ -305,3 +305,72 @@
 +        int(::getpid()),int(::syscall(SYS_gettid)),
 +        (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
      node->run();
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -136,7 +136,23 @@
+     });
+     position_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionSessionServo>("/bindu/position/servo",1,std::bind(&ServoNode::position_callback,this,std::placeholders::_1));
+     position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/servo_state",1);
+-    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){auto control_lock=position_lock();position_interrupt();return;}auto control_lock=position_lock();position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if((position_gate_.selected()||position_target_takeover_valid_)&&!position_feedback_.fresh(this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())){position_interrupt();position_pending_=false;}});
++    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){
++        if(!position_endpoint()){auto control_lock=position_lock();position_interrupt();return;}
++        auto control_lock=position_lock();
++        const auto receive_ros=this->now().nanoseconds(),receive_steady=position_session::steady_ns();
++        const auto previous_progress=position_feedback_.progress;
++        position_feedback_.observe(*msg,receive_ros,receive_steady);
++        if((position_gate_.selected()||position_target_takeover_valid_)&&!position_feedback_.fresh(this->now().nanoseconds(),position_session::steady_ns())){
++            const auto feedback=position_feedback_;const auto source=position_gate_.last();const auto generation=position_gate_.generation();
++            position_interrupt();position_pending_=false;
++            if(control_lock.owns_lock())control_lock.unlock();
++            RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),1000,
++                "POSITION_GATE_INTERRUPT layer=servo site=observation_not_fresh steady_ns=%lld session=%llu seq=%llu generation=%llu previous_progress_gap_ms=%.3f advances=%u source_age_ms=%.3f pdo_age_ms=%.3f valid=0x%x faults=0x%x pdo=%llu WKC=%d/%d",
++                (long long)receive_steady,(unsigned long long)source.session,(unsigned long long)source.sequence,(unsigned long long)generation,
++                previous_progress?(receive_steady-previous_progress)*1e-6:-1.,feedback.advances,(receive_ros-feedback.source)*1e-6,feedback.age*1e3,feedback.valid,feedback.faults,
++                (unsigned long long)feedback.sample,feedback.wkc,feedback.expected);
++        }
++    });
+     rcl_interfaces::msg::ParameterDescriptor session_descriptor;session_descriptor.read_only=true;
+     session_execution_mode_=declare_parameter<std::string>("execution_mode","position",session_descriptor);
+     if(session_execution_mode_!="position" && session_execution_mode_!="impedance")throw std::invalid_argument("execution_mode");
+@@ -178,7 +194,7 @@
+     position_stop_policy_=declare_parameter<std::string>("position_stop_policy","unconfirmed");
+     if(position_stop_policy_!="unconfirmed" && position_stop_policy_!="disable_no_load" && position_stop_policy_!="measured_hold")throw std::invalid_argument("position_stop_policy");
+     position_policy_=position_stop_policy_=="unconfirmed"?0:position_stop_policy_=="disable_no_load"?1:2;
+-    position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this]{
++    position_state_timer_=create_wall_timer(std::chrono::milliseconds(50),[this,last_watchdog_reason=std::make_shared<uint8_t>(0)]{
+         if(position_control_fifo_)position_endpoint();
+         auto control_lock=position_lock();
+         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+@@ -188,14 +204,30 @@
+         const bool ready=position_ready();m.feedback_ready=ready;m.instance_id=position_instance_id_;m.feedback_boot_id=position_feedback_.boot;m.feedback_sample=position_feedback_.sample;m.received_messages=position_feedback_.received_messages;
+         if(!position_initialized_)m.state="initialization_failed";
+         else if(!ready)m.state="waiting_feedback_or_fault";
+-        if(!shutdown_mode_ && !ready && (position_gate_.selected()||position_target_takeover_valid_)){position_interrupt();position_pending_=false;}
+-        const auto impedance_failure=EtherCAT_positionObservation().session_reason==position_session::IMPEDANCE_INVALID;
++        const bool feedback_interrupt=!shutdown_mode_ && !ready && (position_gate_.selected()||position_target_takeover_valid_);
++        if(feedback_interrupt){position_interrupt();position_pending_=false;}
++        const auto observed=EtherCAT_positionObservation();
++        const auto impedance_failure=observed.session_reason==position_session::IMPEDANCE_INVALID;
+         const std::string report=impedance_failure?(position_output_.failure_reason==position_session::IMPEDANCE_INVALID && position_cycle_reason_?position_cycle_reason_:"impedance_watchdog_sensor_invalid"):ready?(position_cycle_reason_?position_cycle_reason_:position_rejection_):position_wait_reason_;
+         const auto check=position_output_.cycle_fault;
+         const auto output=position_output_;
++        const auto generation=position_gate_.generation();
+         const auto feedback=position_feedback_;
+         const auto spans=(position_control_fifo_?position_control_timing_:position_loop_timing_).snapshot(position_session::steady_ns());
+         if(control_lock.owns_lock())control_lock.unlock();
++        if(feedback_interrupt){
++            RCLCPP_WARN(this->get_logger(),"POSITION_GATE_INTERRUPT layer=servo site=state_not_ready steady_ns=%lld session=%llu seq=%llu generation=%llu reason=%s advances=%u progress_age_ms=%.3f source_age_ms=%.3f pdo=%llu WKC=%d/%d",
++                (long long)now,(unsigned long long)m.session,(unsigned long long)m.sequence,(unsigned long long)generation,report.c_str(),
++                feedback.advances,feedback.progress?(now-feedback.progress)*1e-6:-1.,(this->now().nanoseconds()-feedback.source)*1e-6,
++                (unsigned long long)feedback.sample,feedback.wkc,feedback.expected);
++        }
++        if(observed.session_reason>=3 && observed.session_reason!=*last_watchdog_reason){
++            RCLCPP_WARN(this->get_logger(),"POSITION_WATCHDOG_FAULT steady_ns=%lld reason=%u session=%llu seq=%llu pdo=%llu output_failure=%u nominal_hold=%d admission=%llu generation=%llu WKC=%d/%d",
++                (long long)now,unsigned(observed.session_reason),(unsigned long long)observed.session,(unsigned long long)observed.sequence,
++                (unsigned long long)observed.sample,unsigned(output.failure_reason),int(output.nominal_hold),
++                (unsigned long long)output.admission_generation,(unsigned long long)generation,observed.wkc,observed.expected_wkc);
++        }
++        *last_watchdog_reason=observed.session_reason;
+         if(report!=position_last_report_ || now-position_last_report_ns_>=5000000000LL){
+             if(!report.empty()){
+                 if(session_execution_mode_=="impedance" && report.find("impedance_")==0){
