@@ -95,8 +95,7 @@ class HeadTests(unittest.TestCase):
         n.head.stopped.return_value=True
         self.assertTrue(n.feedback().stopped)
 
-    def test_invalid_replay_reconnect_and_retired_source_cannot_rearm(self):
-        old = self.pair()
+    def test_invalid_axes_replay_and_source_change_require_neutral(self):
         for axes in ((), (math.nan, 0.), (True, 0.), (1.1, 0.)):
             left, right = self.pair()
             self.core.ingest(left, replace(right, stick=axes), self.now, self.now)
@@ -105,8 +104,6 @@ class HeadTests(unittest.TestCase):
         self.source = 'new'
         self.assertIsNone(self.step((-1., 0.)))
         self.step()
-        self.core.ingest(*old, self.now, self.now)
-        self.assertEqual(self.core.reason, 'HEAD_RETIRED_SOURCE')
         pair = self.pair()
         self.now += .02
         self.core.ingest(*pair, self.now, self.now)
@@ -130,12 +127,43 @@ class HeadTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_coordinator_filters_pairs_before_head_input(self):
+        from tests.support.pico import Rig
+        from tests.unit.test_pico_control import ScenarioRuntimeTests
+        from snowbot_teleop.control import PicoFeedback
+        rig=Rig();n=ScenarioRuntimeTests.production('on_frame')
+        n.on_frame.__func__.__globals__.update(VRFrame=VRFrame,VRInput=lambda **kw:S(**kw),PICO_MAPPING='pico_snowbot_v1')
+        self.now=rig.now+.02
+        n.now=lambda:self.now;n.control=rig.core;n.frames={}
+        n.matches_mode=lambda msg:True;n.feedback=lambda:PicoFeedback(self.now,True)
+        n.last_pair_at=n.last_pair_monotonic=n.last_prepare_check=None
+        n.runtime_parameters={'diagnostics':{'input_gap_warning_s':1.}}
+        n.base=None;n.head=S(core=Mock());n.event=Mock();n.projected=Mock()
+        n.release_until=0.;n.instance_id='coordinator';n.independent_grippers=False
+        n.position_contract=True;n.handoff_complete=True
+        pair=tuple(replace(f,seq=f.seq+1,stamp=self.now) for f in rig.core.frames)
+        def deliver(frames):
+            for f in frames:
+                sec,ns=divmod(round(f.stamp*1e9),10**9)
+                n.on_frame(S(**dict(vars(f),stamp=S(sec=sec,nanosec=ns),runtime_mode='real')))
+        deliver(pair)
+        self.assertEqual(n.head.core.ingest.call_count,1)
+        deliver(pair)  # The coordinator owns duplicate/retired-source rejection.
+        self.assertEqual(n.head.core.ingest.call_count,1)
+        deliver(tuple(replace(f,seq=f.seq+1,mapping='invalid') for f in pair))
+        self.assertEqual(n.head.core.ingest.call_count,1)
+        self.assertEqual(n.control.phase,'locked')
+        deliver(tuple(replace(f,source_id='new',seq=1) for f in pair))
+        self.assertEqual(n.head.core.ingest.call_count,2)
+        deliver(tuple(replace(f,seq=f.seq+2) for f in pair))
+        self.assertEqual(n.head.core.ingest.call_count,2)
+
     def node(self, *, simulation=False, enabled=True):
         profile = Profile.load(CONFIG/'snowbot_real_position.json')
         joints = S(name=list(NAMES), position=[.2, -.1], velocity=[0., 0.])
         return S(profile=profile, simulation=simulation, now=lambda: self.now,
             get_parameter=lambda name: S(value=enabled),
-            runtime_parameters={'pico': {'pair_max_skew_s':0.}}, tool_cfg={'max_reference_error':.15,'feedback_max_age':.2},
+            tool_cfg={'max_reference_error':.15,'feedback_max_age':.2},
             state=S(joints=joints, feedback_stamp=S(sec=10, nanosec=0), instance_id='execution'),
             create_publisher=Mock(return_value=Mock()),
             get_name=lambda:'pico_control', get_namespace=lambda:'/bindu_snowbot',

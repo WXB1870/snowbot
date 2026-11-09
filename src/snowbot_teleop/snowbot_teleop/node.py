@@ -374,8 +374,6 @@ class PicoNode(RuntimeNode):
             return
         if self.base:
             self.base.ingest(pair, now)
-        if self.head:
-            self.head.core.ingest(*pair, now, time.monotonic())
         self.control.update_feedback(self.feedback(),self.now())
         previous=(self.control.source,self.control.seq)
         previous_frames=self.control.frames
@@ -399,6 +397,8 @@ class PicoNode(RuntimeNode):
                              interval_s=new.stamp-old.stamp)
                         for old,new in zip(previous_frames,pair)])))
         if self.control.source!=a.source_id or self.control.seq!=a.seq or previous==(a.source_id,a.seq):return
+        if self.head:
+            self.head.core.ingest(*pair, now, time.monotonic())
         allowed=self.control.phase in ('engaging','following') and self.now()>=self.release_until
         publish_started=time.monotonic()
         for i,m in enumerate((a,b)):

@@ -7,57 +7,47 @@ NAMES = ('head_joint_1', 'head_joint_2')  # pitch (-Y), yaw (+Z)
 
 class HeadTeleop:
     def __init__(self, profile, *, deadzone=.05, input_max_age=.25,
-                 feedback_max_age=.2, pair_max_skew=0., max_reference_error=.15):
+                 feedback_max_age=.2, max_reference_error=.15):
         self.profile = profile
         self.deadzone, self.max_age = deadzone, input_max_age
-        self.feedback_max_age, self.pair_max_skew = feedback_max_age, pair_max_skew
+        self.feedback_max_age = feedback_max_age
         self.max_reference_error = max_reference_error
         self.source = None
-        self.retired = set()
         self.seq = -1
         self.stamp = self.received = float('-inf')
         self.last_tick = None
-        self.axes = (0., 0.)
-        self.neutral = self.armed = False
-        self.target = None
+        self.axes = self.target = None
         self.stop_at = float('-inf')
         self.reason = 'HEAD_WAITING_FOR_INPUT'
+
+    @property
+    def armed(self):
+        return self.target is not None
 
     def inhibit(self, reason, now):
         if self.armed or self.stop_at == float('-inf'):
             self.stop_at = now
-        self.armed = self.neutral = False
-        self.target = None
+        self.axes = self.target = None
         self.reason = reason
 
     def ingest(self, left, right, now, clock):
-        pair = (left, right)
-        if (left.side != 'left' or right.side != 'right' or not left.source_id or
-                left.source_id != right.source_id or left.seq != right.seq or
-                abs(left.stamp-right.stamp) > self.pair_max_skew or
-                any(not f.valid or f.stop or f.mapping != 'pico_snowbot_v1' for f in pair) or
-                len(right.stick) != 2 or any(type(x) not in (int, float) or
-                    not -1 <= x <= 1 for x in right.stick)):
+        """Consume a new pair already accepted by PicoControl."""
+        if len(right.stick) != 2 or any(type(x) not in (int, float) or
+                not -1 <= x <= 1 for x in right.stick):
             self.inhibit('HEAD_INPUT_INVALID', now)
             return
         if left.source_id != self.source:
-            if left.source_id in self.retired:
-                self.inhibit('HEAD_RETIRED_SOURCE', now)
-                return
-            if self.source is not None:
-                self.retired.add(self.source)
             self.source, self.seq, self.stamp = left.source_id, -1, float('-inf')
             self.inhibit('HEAD_SOURCE_CHANGED', now)
-        stamp = min(f.stamp for f in pair)
+        stamp = min(left.stamp, right.stamp)
         if (left.seq <= self.seq or stamp <= self.stamp or
-                any(not 0 <= now-f.stamp <= self.max_age for f in pair)):
+                not 0 <= now-stamp <= self.max_age):
             self.inhibit('HEAD_INPUT_STALE', now)
             return
         self.seq, self.stamp, self.received = left.seq, stamp, clock
         # OpenXR up is negative Y; head pitch is about robot -Y.
         self.axes = tuple(0. if abs(x) < self.deadzone else -x
                           for x in (right.stick[1], right.stick[0]))
-        self.neutral = self.axes == (0., 0.)
 
     def stopped(self, q, v, stamp, now):
         return (0 <= now-stamp <= self.feedback_max_age and stamp > self.stop_at and
@@ -82,11 +72,10 @@ class HeadTeleop:
             self.inhibit(reason, now)
             return None
         if not self.armed:
-            if not self.neutral or not self.stopped(q, v, feedback_stamp, now):
+            if self.axes != (0., 0.) or not self.stopped(q, v, feedback_stamp, now):
                 self.reason = 'HEAD_CENTRE_STICK_AND_WAIT_FOR_STOP'
                 return None
             self.target = tuple(min(self.profile.limits[n][1], max(self.profile.limits[n][0], q[n])) for n in NAMES)
-            self.armed = True
         if any(abs(q[n]-self.target[i]) > self.max_reference_error for i, n in enumerate(NAMES)):
             self.inhibit('HEAD_FOLLOWING_ERROR', now)
             return None
@@ -95,7 +84,7 @@ class HeadTeleop:
         self.target = tuple(min(self.profile.limits[n][1], max(self.profile.limits[n][0],
             value + axis*self.profile.speed(n)/1.5*min(dt, self.profile.control_period)))
             for n, value, axis in zip(NAMES, self.target, self.axes))
-        self.reason = 'HEAD_READY' if self.neutral else 'HEAD_ACTIVE'
+        self.reason = 'HEAD_READY' if self.axes == (0., 0.) else 'HEAD_ACTIVE'
         return self.target
 
 
@@ -104,7 +93,7 @@ class TeleopHead:
         from std_msgs.msg import Float64MultiArray
         from snowbot_hardware.protocol import GraphSnapshot
         self.node, self.message_type = node, Float64MultiArray
-        self.core = HeadTeleop(node.profile, pair_max_skew=node.runtime_parameters['pico']['pair_max_skew_s'],
+        self.core = HeadTeleop(node.profile,
                                feedback_max_age=node.tool_cfg['feedback_max_age'],
                                max_reference_error=node.tool_cfg['max_reference_error'])
         self.writable = bool(node.get_parameter('command_enabled').value and not node.simulation)
@@ -132,13 +121,12 @@ class TeleopHead:
 
     def tick(self, control, healthy):
         n, clock = self.node, time.monotonic()
-        if clock-self.last_sent < n.profile.control_period:
-            # Permission loss bypasses normal target pacing.
-            if (self.core.armed and healthy and not control.pending and
-                    self.core.source == control.source and self.core.seq == control.seq and
-                    0 <= n.now()-self.core.stamp <= self.core.max_age and
-                    control.phase in ('standby', 'tool_standby', 'following')):
-                return
+        permitted = (healthy and not control.pending and self.core.source == control.source and
+                     self.core.seq == control.seq and control.phase in ('standby', 'tool_standby', 'following'))
+        # Permission loss bypasses normal target pacing.
+        if (self.core.armed and permitted and 0 <= n.now()-self.core.stamp <= self.core.max_age and
+                clock-self.last_sent < n.profile.control_period):
+            return
         s = n.state
         q, v, stamp = {}, {}, float('-inf')
         if s:
@@ -148,9 +136,7 @@ class TeleopHead:
                 self.instance = s.instance_id
             elif self.instance != s.instance_id:
                 self.fault = 'HEAD_EXECUTOR_CHANGED_RESTART_REQUIRED'
-        allowed = (self.writable and not self.fault and self.endpoints() and healthy and not control.pending and
-                   self.core.source == control.source and self.core.seq == control.seq and
-                   control.phase in ('standby', 'tool_standby', 'following'))
+        allowed = self.writable and not self.fault and self.endpoints() and permitted
         target = self.core.tick(n.now(), time.monotonic(), q, v, stamp, allowed=allowed)
         if target is not None:
             # Keep the original VR deadline through the native position port.
