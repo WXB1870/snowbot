@@ -44,61 +44,66 @@
 -        1,								// QoS历史深度
 -        std::bind(&ArmCtlNode::message_callback, this, std::placeholders::_1)
      );
-@@ -370,3 +371,3 @@
+@@ -298,2 +299,4 @@
+     if(!loadInitialPDFromYaml(yaml_path_initialPD)){load_error="configuration_failed";return;}
++    // Build the immutable gravity model before advertising command readiness.
++    solverInterface->prepare_model(URDFCHOOSE);
+
+@@ -370,3 +373,3 @@
          const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 -        if(!position_feedback_.fresh(this->now().nanoseconds(),now))position_gate_.interrupt();
 +        if(!position_feedback_.fresh(this->now().nanoseconds(),now)){position_log_interrupt("forward_feedback_not_fresh");position_gate_.interrupt();}
          if(position_gate_.live(now) && position_feedback_.fresh(this->now().nanoseconds(),now)){
-@@ -375,2 +376,3 @@
+@@ -375,2 +378,3 @@
              position_pub_->publish(packet);
 +            ++position_command_forwarded_;position_command_forward_sequence_=packet.meta.sequence;
          }
-@@ -666,2 +668,3 @@
+@@ -666,2 +670,3 @@
  void ArmCtlNode::InterfaceInit(){
 +    position_init_begin_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
      //初始化模块，采用返回值进行初始化
-@@ -682,2 +685,3 @@
+@@ -682,2 +687,3 @@
      std::cout << "初始化完成" <<std::endl;
 +    position_init_end_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
  }
-@@ -858,2 +862,3 @@
+@@ -858,2 +864,3 @@
  void ArmCtlNode::controlOutp(){
 +    position_control_begin_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
      KDL::JntArray lArm_posRet, rArm_posRet;
-@@ -873,3 +878,3 @@
+@@ -873,3 +880,3 @@
          if(!nominal&&!(position_nominal_session_!=position_meta_.session&&now<position_nominal_bootstrap_expires_&&position_feedback_.fresh(now,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()))){
 -            position_gate_.interrupt();position_rejection_="nominal_reference_unavailable";return;
 +            position_log_interrupt("nominal_reference_unavailable");position_gate_.interrupt();position_rejection_="nominal_reference_unavailable";return;
          }
-@@ -921,3 +926,3 @@
+@@ -921,3 +928,3 @@
      }
 -
 +    position_control_end_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
  }
-@@ -1041,2 +1046,4 @@
+@@ -1041,2 +1048,4 @@
      while(rclcpp::ok() && !shutdown_flag){
 +        position_cycle_begin_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +        position_pump_end_=position_init_begin_=position_init_end_=position_control_begin_=position_control_end_=0;
          //更新时间戳
-@@ -1045,2 +1052,3 @@
+@@ -1045,2 +1054,3 @@
          fdback_get();
 +        position_pump_end_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 
-@@ -1176,3 +1184,3 @@
+@@ -1176,3 +1186,3 @@
                  if(left_fk.JntToCart(lArm_JntPosFdback_kdl,left)<0 || right_fk.JntToCart(rArm_JntPosFdback_kdl,right)<0){
 -                    position_gate_.interrupt();position_rejection_="kinematics_feedback_failed";
 +                    position_log_interrupt("kinematics_feedback_failed");position_gate_.interrupt();position_rejection_="kinematics_feedback_failed";
                      position_wait();continue;
-@@ -1514,2 +1522,3 @@
+@@ -1514,2 +1524,3 @@
  void ArmCtlNode::position_callback(const snowbot_ctl_msgs::msg::PositionSessionUpper::SharedPtr packet){
 + ++position_command_received_;position_command_session_=packet->meta.session;position_command_sequence_=packet->meta.sequence;position_command_expires_=packet->meta.expires_at_ns;
   if(const char* reason=position_command_graph_.check(*this,"/bindu/position/upper","robot_upperMonitor","snowbot_ctl_msgs/msg/PositionSessionUpper")){if(std::string(reason)!="command_source_discovering")position_rejection_=reason;return;}
-@@ -1517,3 +1526,3 @@
+@@ -1517,3 +1528,3 @@
   const auto now=this->now().nanoseconds();const auto steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();const auto m=position_session::meta(packet->meta);
 - if(!position_ready()){position_gate_.interrupt();position_rejection_=position_wait_reason_;return;}
 + if(!position_ready()){position_log_interrupt("command_not_ready");position_gate_.interrupt();position_rejection_=position_wait_reason_;return;}
   if(packet->meta.feedback_boot_id!=position_feedback_.boot || packet->meta.feedback_sample<position_feedback_.ready_sample || packet->meta.feedback_sample>position_feedback_.sample || m.stamp<position_feedback_.ready_ros){position_rejection_="feedback_baseline_mismatch";return;}
-@@ -1537,2 +1546,32 @@
+@@ -1537,2 +1548,32 @@
 
 +// The validated PDO observation also owns the measured inputs used by IK/PD.
 +// Keep arm motor-slot order and original units; no targets or timestamps are made.
@@ -131,8 +136,53 @@
 +}
 +
  bool ArmCtlNode::position_ready(){
-@@ -1558,3 +1597,3 @@
+@@ -1558,3 +1599,3 @@
   if(!endpoint.ready()){position_wait_reason_=endpoint.reason;position_feedback_.advances=0;position_feedback_.ready_sample=0;position_feedback_.ready_ros=0;return false;}
 - if(position_feedback_gid_!=endpoint.publisher_gid){position_feedback_=position_session::Tracker{};position_gate_.interrupt();position_feedback_gid_=endpoint.publisher_gid;}
 + if(position_feedback_gid_!=endpoint.publisher_gid){position_log_interrupt("feedback_endpoint_changed");position_feedback_=position_session::Tracker{};position_gate_.interrupt();position_feedback_gid_=endpoint.publisher_gid;}
   return true;
+--- a/dual_arm_control/include/controller/ArmController.h
++++ b/dual_arm_control/include/controller/ArmController.h
+@@ -316,2 +316,3 @@
+         //Pinocchio模型与数据
++        int model_urdf_choose_=-1;
+         pinocchio::Model model_;
+@@ -358,2 +359,4 @@
+         };
++
++        void prepare_model(int urdf_choose);
+
+--- a/dual_arm_control/include/controller/ArmInterface.h
++++ b/dual_arm_control/include/controller/ArmInterface.h
+@@ -102,2 +102,4 @@
+         */
++        void prepare_model(int urdf_choose){mForceComp.prepare_model(urdf_choose);}
++
+         void init_GravComp(
+@@ -263,2 +265,4 @@
+         //初始化函数
++        void prepare_model(int urdf_choose){GravComp.prepare_model(urdf_choose);}
++
+         void init(
+--- a/dual_arm_control/src/controller/ArmController.cpp
++++ b/dual_arm_control/src/controller/ArmController.cpp
+@@ -515,6 +515,4 @@
+ //初始化函数
+-bool ForceComp::init(KDL::JntArray stPos_lArm, int stJntID_lArm, 
+-                       KDL::JntArray stPos_rArm, int stJntID_rArm, 
+-                       int urdf_choose, int ArmNum)
+-{
++void ForceComp::prepare_model(int urdf_choose){
++    if(model_urdf_choose_==urdf_choose)return;
+     //销毁旧有的模型
+@@ -551,2 +549,10 @@
+
++    model_urdf_choose_=urdf_choose;
++}
++
++bool ForceComp::init(KDL::JntArray stPos_lArm, int stJntID_lArm, 
++                       KDL::JntArray stPos_rArm, int stJntID_rArm, 
++                       int urdf_choose, int ArmNum)
++{
++    prepare_model(urdf_choose);
+     data_ = pinocchio::Data(model_);
