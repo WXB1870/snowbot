@@ -227,5 +227,58 @@
   "limit_avoidance_weight": 0.05,
   "tracking_feedback": "measured_shared",
   "coupled_locked_joints": [],
-  "measured_joint_limit_tolerance_rad": 0.03490658503988659
+  "measured_joint_limit_tolerance_rad": 0.03490658503988659,
+  "ground_recovery": {
+    "tool_id": "g099-curved",
+    "geometry_source": "replay g099-curved shaft endpoints/radius and flange mounting; old pan box excluded",
+    "ground_z_m": -0.1999982893466955,
+    "points_in_left_flange_m": [
+      [
+        0.1583492394,
+        1.2079897404,
+        0.018
+      ],
+      [
+        0.1583492394,
+        1.2079897404,
+        -0.018
+      ],
+      [
+        0.1223549388,
+        1.2086303031,
+        0.018
+      ],
+      [
+        0.1223549388,
+        1.2086303031,
+        -0.018
+      ],
+      [
+        0.1405558318,
+        0.2081480556,
+        0.018
+      ],
+      [
+        0.1405558318,
+        0.2081480556,
+        -0.018
+      ],
+      [
+        0.1045615312,
+        0.2087886183,
+        0.018
+      ],
+      [
+        0.1045615312,
+        0.2087886183,
+        -0.018
+      ]
+    ],
+    "near_ground_m": 0.02,
+    "lift_m": 0.05,
+    "max_speed_m_s": 0.02,
+    "max_joint_speed_rad_s": 0.05,
+    "relative_position_margin_m": 0.01,
+    "relative_rotation_margin_rad": 0.05
+  }
 }

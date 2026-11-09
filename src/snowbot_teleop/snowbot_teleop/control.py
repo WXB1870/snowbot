@@ -105,6 +105,14 @@ class PicoControl:
         self.loading_goal = None
         self.loading_opened = [False, False]
         self.idle_input_lost = False
+        self.ground_recovery_enabled = False
+        self.ground_recovery_since = None
+
+    def ground_recovery_candidate(self):
+        return (self.ground_recovery_enabled and self.teleop_mode=='bimanual_tool' and
+                not self.recovery_required and not self.stop_failure and
+                (self.reason in ('GROUND_RECOVERY_STEP_COMPLETE','GROUND_RECOVERY_OPERATOR_RELEASED') or any(code in self.reason for code in
+                    ('BIMANUAL_MEASURED_GRASP_ERROR','BIMANUAL_GRASP_POSE','relative pose safety threshold'))))
 
     def loading_check(self, now):
         self.loading_goal = ('empty' if self.load=='held' else 'held' if self.load=='empty'
@@ -349,6 +357,14 @@ class PicoControl:
                                             else 'OPEN_REQUIRES_LOADING_AND_SUPPORT')
             self.prepare_blocked=True;self.emit('stop');return
         if self.phase=='locked':
+            if (self.ground_recovery_candidate() and not self.pending and self.rest(now) and
+                    states[0] and self.armed[0] and
+                    all(f.grip<self.settings['grip_release_threshold'] and
+                        f.trigger<self.settings['trigger_release_threshold'] for f in pair)):
+                if self.ground_recovery_since is None:self.ground_recovery_since=now
+                if now-self.ground_recovery_since>=self.prepare_hold:
+                    self.phase='ground_recovery';self.emit('ground_recovery')
+            else:self.ground_recovery_since=None
             if presses[5] and not self.pending and all(f.grip<self.settings['grip_release_threshold'] and f.trigger<self.settings['trigger_release_threshold'] for f in pair):
                 if self.rest(now) and not self.recovery_required and not self.stop_failure:
                     self.phase,self.reason='standby','RECOVERED_TO_STANDBY'
@@ -360,6 +376,11 @@ class PicoControl:
                 else:
                     self.reason='RECOVERY_CHECK'
                     self.emit('recover')
+            return
+        if self.phase=='ground_recovery':
+            if not states[0] or any(f.grip>=self.settings['grip_release_threshold'] or
+                                   f.trigger>=self.settings['trigger_release_threshold'] for f in pair):
+                self.lock('GROUND_RECOVERY_OPERATOR_RELEASED',now)
             return
         if self.phase=='gripper_control' and (any(f.grip>=self.settings['grip_release_threshold'] for f in pair) or any(clutch_changed)):
             self.phase,self.reason='standby','GRIPPER_REQUIRES_STOP_AND_RELEASED_SQUEEZE'
@@ -525,6 +546,11 @@ class PicoControl:
         if not self.pending or self.pending.token!=token:return False
         operation,value=self.pending.operation,self.pending.value
         self.pending=None
+        if operation=='ground_recovery' and success:
+            self.phase,self.reason='locked','GROUND_RECOVERY_STEP_COMPLETE'
+            self.ground_recovery_since=None
+            self.armed=[False]*8
+            return True
         if operation=='recover':
             if success and self.rest(now):
                 self.phase,self.reason='standby','RECOVERED_TO_STANDBY'
@@ -630,6 +656,7 @@ class PicoControl:
                     first_fault=self.first_fault,stop_failure=self.stop_failure,
                     request_failure=self.request_failure,fault_active=self.fault_active,
                     recovery_required=self.recovery_required,
+                    ground_recovery_candidate=self.ground_recovery_candidate(),
                     teleop_mode=self.teleop_mode,dual_modes=self.dual_modes,
                     mode_target=self.pending.value if self.pending and self.pending.operation=='select_mode' else None,
                     source_id=self.source,load_state=self.load,load_source=self.load_source,external_support=self.supported,
@@ -662,6 +689,10 @@ class PicoControl:
 
 def loading_guide(view, modes):
     """One operator instruction shared by the headset and computer view."""
+    if view.get('phase')=='ground_recovery':
+        return dict(title='正在低速抬升退让',detail='继续按住 X；松开 X 或按 Y 停止。结束后按 B 复核',key='X',step='ground_recovery')
+    if view.get('phase')=='locked' and view.get('ground_recovery_candidate'):
+        return dict(title='可请求触地抬升复核',detail='确认杆触地后松开双侧握及扳机，长按 X；仅接近地面才执行5厘米抬升',key='X',step='ground_recovery_request')
     phase, goal = view['phase'], view.get('loading_goal')
     operation = '装夹' if goal=='held' else '卸载'
     if view.get('measured_limit_joints') and phase in ('standby','tool_standby','preparing'):

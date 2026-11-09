@@ -173,6 +173,9 @@ class PicoNode(RuntimeNode):
                                  pose_jump_translation_m=self.cfg.get('pose_jump_translation_m',.35),
                                  pose_jump_rotation_rad=self.cfg.get('pose_jump_rotation_rad',1.2),
                                  settings=self.runtime_parameters['pico'])
+        self.control.ground_recovery_enabled=bool(self.position_contract and self.tool_cfg.get('ground_recovery'))
+        self.ground_recovery_plan=None
+        self.ground_recovery_observation=None
         validation_cfg=dict(self.tool_cfg,worker_timeout=self.runtime_parameters['pico']['validation_worker_timeout_s'])
         recovery=self.cfg.get('prepare_collision_recovery')
         if recovery is not None:
@@ -672,6 +675,88 @@ class PicoNode(RuntimeNode):
             if time.monotonic()>=deadline:raise RuntimeError('PICO_RPC_TIMEOUT')
             await self.pause()
 
+    async def ground_request(self,intent,operation,measured,reference):
+        self.validation_result=None
+        if not self.validator.submit(operation,intent.token,measured,reference=reference):
+            raise RuntimeError('GROUND_RECOVERY_WORKER_BUSY')
+        deadline=time.monotonic()+parameters_for(self,'pico')['validation_worker_timeout_s']
+        while self.validation_result is None:
+            self.current(intent)
+            if time.monotonic()>deadline:raise RuntimeError('GROUND_RECOVERY_WORKER_TIMEOUT')
+            await self.pause()
+        kind,token,value=self.validation_result
+        if token!=intent.token or kind!='result':
+            self.event('GROUND_RECOVERY_DIAGNOSTIC',json.dumps(dict(token=token,detail=self.validator.diagnostic)))
+            raise RuntimeError(str(value))
+        return value
+
+    async def ground_recovery(self,intent):
+        # B's stop/ownership recheck is reused; no driver recovery or enable is requested.
+        self.ground_recovery_observation=None
+        await self.recover(intent)
+        held=await self.prepare_hold_reference(intent)
+        _,measured=self.reading()
+        plan=await self.ground_request(intent,'ground_recovery_path',measured,
+                                      [held['positions'][n] for n in self.names])
+        self.current(intent)
+        _,current=self.reading()
+        if max(abs(current[n]-q) for n,q in zip(self.names,plan['measured_start']))>prepare_start_tolerance(self.profile,self.cfg):
+            raise RuntimeError('GROUND_RECOVERY_START_CHANGED')
+        plan.update(hold=held,token=intent.token,monitor_pending=False,next_monitor=0.)
+        self.ground_recovery_plan=plan
+        self.ground_recovery_observation=plan['initial']
+        self.event('GROUND_RECOVERY_PLANNED',json.dumps(plan))
+        try:
+            await self.move(intent,dict(zip(self.names,plan['positions'])),plan['duration_s'])
+            deadline=time.monotonic()+self.tool_cfg['feedback_max_age']
+            while self.validator.busy:
+                self.current(intent)
+                if time.monotonic()>deadline:raise RuntimeError('GROUND_RECOVERY_MONITOR_TIMEOUT')
+                await self.pause()
+            if plan['monitor_pending']:
+                kind,token,value=self.validation_result
+                if token!=intent.token or kind!='result':raise RuntimeError(str(value))
+                self.accept_ground_observation(value)
+            _,measured=self.reading()
+            # The final read is measured and made only after the normal stop/lease release.
+            status=await self.ground_request(intent,'ground_recovery_status',measured,plan['positions'])
+            self.accept_ground_observation(status)
+            if status['height_m']<plan['initial']['height_m']+.5*self.tool_cfg['ground_recovery']['lift_m']:
+                raise RuntimeError('GROUND_RECOVERY_MEASURED_LIFT_UNCONFIRMED')
+            self.event('GROUND_RECOVERY_STEP_COMPLETE',json.dumps(status))
+        finally:self.ground_recovery_plan=None
+
+    def accept_ground_observation(self,value):
+        initial=self.ground_recovery_plan['initial'];cfg=self.tool_cfg['ground_recovery']
+        if (value['relative_position_error_m']>initial['relative_position_error_m']+cfg['relative_position_margin_m'] or
+                value['relative_rotation_error_rad']>initial['relative_rotation_error_rad']+cfg['relative_rotation_margin_rad'] or
+                value['height_m']<initial['height_m']-.002):
+            raise RuntimeError('GROUND_RECOVERY_CONTACT_WORSENED')
+        self.ground_recovery_observation=value
+
+    def monitor_ground_recovery(self,intent,state,measured,lease):
+        plan=self.ground_recovery_plan;now=time.monotonic()
+        if plan['monitor_pending']:
+            if self.validation_result is not None:
+                kind,token,value=self.validation_result
+                if token!=intent.token or kind!='result':raise RuntimeError(str(value))
+                self.accept_ground_observation(value)
+                plan['monitor_pending']=False
+            elif now-plan['monitor_started']>self.tool_cfg['feedback_max_age']:
+                raise RuntimeError('GROUND_RECOVERY_MONITOR_TIMEOUT')
+        if not plan['monitor_pending'] and now>=plan['next_monitor']:
+            # Before the first target, the authenticated PAUSE is the reference.
+            reference=plan['start']
+            if 'stream_started' in plan:
+                sample=sampled_nominal_reference(state,self.names,lease.epoch,self.now(),self.tool_cfg['feedback_max_age'],
+                    wait_until=plan['stream_started']+self.tool_cfg['feedback_max_age'],steady_now=now)
+                if sample is None:return
+                reference=sample[0]
+            self.validation_result=None
+            if not self.validator.submit('ground_recovery_status',intent.token,measured,reference=reference):
+                raise RuntimeError('GROUND_RECOVERY_WORKER_BUSY')
+            plan.update(monitor_pending=True,monitor_started=now,next_monitor=now+.1)
+
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
         if not self.feedback().stopped:raise RuntimeError('PICO_MOTION_REQUIRES_STOP')
@@ -732,6 +817,13 @@ class PicoNode(RuntimeNode):
                     duration=max(duration,2.5*max(abs(start[n]-v) for n,v in zip(self.names,end))/speed)
             else:
                 start=prepare_reference(self.profile,self.names,q) if self.position_contract and intent.operation=='prepare' else q
+            if intent.operation=='ground_recovery':
+                plan=self.ground_recovery_plan
+                held=await self.prepare_hold_reference(intent,lease=lease,previous=plan['hold'])
+                s,q=self.reading()
+                start=held['positions']
+                if max(abs(q[n]-v) for n,v in zip(self.names,plan['measured_start']))>prepare_start_tolerance(self.profile,self.cfg):
+                    raise RuntimeError('GROUND_RECOVERY_START_CHANGED')
             if limit_exit and not recovery_progress:
                 raise RuntimeError('PREPARE_LIMIT_RECOVERY_HOLD_REQUIRED')
             arrival_names=set(recovery_progress) if limit_exit else set(self.names)
@@ -784,6 +876,7 @@ class PicoNode(RuntimeNode):
                     raise RuntimeError(state.code)
                 if state.instance_id!=execution_instance_id or not state.lease_active or state.lease_epoch!=lease.epoch:
                     raise RuntimeError('PICO_EXECUTION_AUTHORITY_CHANGED')
+                if intent.operation=='ground_recovery':self.monitor_ground_recovery(intent,state,measured,lease)
                 for n,(side,best) in tuple(recovery_progress.items()):
                     if side*(measured[n]-best)>self.profile.feedback_tolerances['joint_position']:
                         raise RuntimeError('PREPARE_LIMIT_RECOVERY_MOVED_OUTWARD:'+n)
@@ -846,6 +939,7 @@ class PicoNode(RuntimeNode):
                     self.current(intent)
                     response=await self.wait(self.submit.call_async(SubmitMotion.Request(command=msg)))
                     if not response.accepted:raise RuntimeError(response.code)
+                    if intent.operation=='ground_recovery':self.ground_recovery_plan.setdefault('stream_started',time.monotonic())
                     revision=response.revision;segment+=1
                     replay_tick+=1
                     next_submit=started+replay_tick*.02 if replay is not None else now+parameters_for(self,'pico')['prepare_command_period_s']
@@ -1157,6 +1251,8 @@ class PicoNode(RuntimeNode):
                         read_only=False
                         await self.position_ops.close_grippers(intent)
                         self.current(intent)
+            elif intent.operation=='ground_recovery':
+                await self.ground_recovery(intent)
             elif intent.operation=='manual_grippers':
                 if (not self.position_ops or self.control.phase!='gripper_control' or
                         not self.control.frames or any(f.grip>=parameters_for(self,'pico')['grip_release_threshold'] for f in self.control.frames)):
@@ -1258,7 +1354,7 @@ class PicoNode(RuntimeNode):
             item=self.validator.poll()
             if item is not None:self.validation_result=item
         except RuntimeError as exc:
-            if self.control.pending and self.control.pending.operation=='prepare':self.control.lock(str(exc),self.now())
+            if self.control.pending and self.control.pending.operation in ('prepare','ground_recovery'):self.control.lock(str(exc),self.now())
         feedback=self.feedback()
         if self.state and not self.state.lease_active and feedback.healthy and feedback.stopped:
             self.handoff_complete=True
@@ -1347,6 +1443,7 @@ class PicoNode(RuntimeNode):
                     view['operator_guide']=loading_guide(view,feedback.modes)
             view.update(self.input_status(self.now()))
             view['stop_diagnostic']=getattr(self,'stop_diagnostic',None)
+            view['ground_recovery']=self.ground_recovery_observation
             if self.base:
                 view['base'] = self.base.snapshot()
             publish_started=time.monotonic()

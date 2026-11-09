@@ -16,6 +16,132 @@ from tests.support.pico import Rig
 
 
 class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_ground_lift_requires_relative_fault_long_x_and_released_controls(self):
+        r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+        r.core.ground_recovery_enabled=True
+        r.core.lock('PICO_TOOL_SESSION_ENDED:BIMANUAL_MEASURED_GRASP_ERROR',r.now)
+        r.core.drain();r.complete();r.step()
+        r.buttons[0]=1
+        self.assertEqual(r.step(),[])
+        effects=[]
+        for _ in range(52):effects+=r.step()
+        self.assertEqual([e.operation for e in effects],['ground_recovery'])
+        self.assertEqual(r.core.phase,'ground_recovery')
+        r.complete();self.assertEqual(r.core.phase,'locked')
+        for _ in range(60):self.assertEqual(r.step(),[])
+        r.buttons[0]=0;r.step();r.buttons[0]=1
+        effects=[]
+        for _ in range(55):effects+=r.step()
+        self.assertEqual([e.operation for e in effects],['ground_recovery'])
+        r.buttons[0]=0
+        self.assertEqual([e.operation for e in r.step()],['stop'])
+        self.assertEqual(r.core.phase,'locked')
+
+    def test_ground_lift_never_overrides_device_fault_y_stop_or_tracking_loss(self):
+        for reason in ('PICO_Y_STOP','DEVICE_FAULT','SNOWBOT_PDO_STALE','PICO_TRACKING_LOST'):
+            r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+            r.core.ground_recovery_enabled=True
+            r.core.lock(reason,r.now);r.core.drain();r.complete();r.step();r.buttons[0]=1
+            self.assertTrue(all(not any(e.operation=='ground_recovery' for e in r.step()) for _ in range(60)))
+        r=Rig(load='held',guided=True,dual=True);r.core.teleop_mode='bimanual_tool'
+        r.core.ground_recovery_enabled=True
+        r.core.lock('BIMANUAL_MEASURED_GRASP_ERROR',r.now);r.core.drain();r.complete();r.step()
+        r.grips[0]=1.;r.buttons[0]=1
+        self.assertTrue(all(not any(e.operation=='ground_recovery' for e in r.step()) for _ in range(60)))
+
+    def test_ground_lift_rejects_increasing_measured_error_or_downward_motion(self):
+        node=self.production('accept_ground_observation')
+        node.tool_cfg={'ground_recovery':dict(relative_position_margin_m=.01,relative_rotation_margin_rad=.05)}
+        initial=dict(height_m=-.01,relative_position_error_m=.07,relative_rotation_error_rad=.04)
+        node.ground_recovery_plan={'initial':initial}
+        node.accept_ground_observation(dict(initial,height_m=.01,relative_position_error_m=.02))
+        for value in (dict(initial,height_m=-.02),dict(initial,relative_position_error_m=.081),
+                      dict(initial,relative_rotation_error_rad=.091)):
+            with self.assertRaisesRegex(RuntimeError,'CONTACT_WORSENED'):node.accept_ground_observation(value)
+
+    async def test_ground_lift_stream_starts_at_authenticated_hold_and_cancellation_releases(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        for changed in (None,'hold','start'):
+            node=self.production('move');node.current=Mock();node.names=('joint',);node.groups=('arms',)
+            lease=S(ok=True,lease_id='lease',epoch=2,profile_hash='profile')
+            state=S(instance_id='executor',lease_active=True,lease_epoch=2,revision=1,
+                    command_id='',state='CANCELED',joints=S(name=['joint'],velocity=[0.]))
+            node.state=state;node.reading=lambda:(state,{'joint':.08});node.feedback=lambda:S(stopped=True)
+            node.profile=S(digest='profile',limits={'joint':(-1.,1.)},feedback_tolerances={'joint_position':.002})
+            node.cfg={};node.instance_id='pico';node.runtime_mode='real';node.position_contract=True
+            node.simulation=False;node.event=Mock();node.now=lambda:0.;node.monitor_ground_recovery=Mock()
+            node.ground_recovery_plan=dict(hold={'positions':{'joint':.1}},measured_start=[.08],token=1)
+            node.prepare_hold_reference=AsyncMock(return_value=node.ground_recovery_plan['hold'])
+            if changed=='hold':node.prepare_hold_reference.side_effect=RuntimeError('HOLD_CHANGED')
+            elif changed=='start':
+                async def shifted(*args,**kwargs):
+                    node.reading=lambda:(state,{'joint':.09})
+                    return node.ground_recovery_plan['hold']
+                node.prepare_hold_reference.side_effect=shifted
+            node.leases=S(call_async=lambda request:lease);node.wait=AsyncMock(side_effect=lambda value:value)
+            node.release_lease=AsyncMock();node.submit=S(call_async=Mock(return_value=S(accepted=True,revision=2)))
+            node.reset_grasp_reference=AsyncMock()
+            scope=node.move.__func__.__globals__
+            node.pause=AsyncMock(side_effect=scope['Superseded']('released X'))
+            curve=Mock(valid=lambda *a:True,sample=lambda t:S(q=[.1],v=[0.],a=[0.]))
+            scope.update(Curve=S(between=Mock(return_value=curve)),State=S(rest=lambda q:S(q=q)),
+                Lease=S(Request=S),SubmitMotion=S(Request=S),MotionCommand=S,JointTrajectoryPoint=S,Duration=S,
+                stamp=lambda t:S(sec=0,nanosec=0),uuid=S(uuid4=lambda:S(hex='command')))
+            with self.assertRaisesRegex(RuntimeError,{'hold':'HOLD_CHANGED','start':'START_CHANGED'}.get(changed,'released X')):
+                await node.move(S(token=1,operation='ground_recovery'),{'joint':.15},5.)
+            node.release_lease.assert_awaited_once();node.reset_grasp_reference.assert_not_awaited()
+            if changed:node.submit.call_async.assert_not_called()
+            else:self.assertEqual(node.submit.call_async.call_args.args[0].command.positions,[.1])
+
+    async def test_ground_lift_far_from_ground_rejects_before_motion(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        node=self.production('ground_recovery');node.recover=AsyncMock()
+        node.prepare_hold_reference=AsyncMock(return_value={'positions':{'joint':.1}})
+        node.names=('joint',);node.reading=lambda:(None,{'joint':.1});node.current=Mock()
+        node.ground_request=AsyncMock(side_effect=RuntimeError('GROUND_RECOVERY_NOT_NEAR_GROUND'))
+        node.move=AsyncMock()
+        with self.assertRaisesRegex(RuntimeError,'NOT_NEAR_GROUND'):await node.ground_recovery(S(token=1))
+        node.move.assert_not_awaited()
+
+    def test_ground_lift_monitor_uses_live_reference_and_fails_on_late_or_wrong_token(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        node=self.production('monitor_ground_recovery','accept_ground_observation')
+        clock=[0.];scope=node.monitor_ground_recovery.__func__.__globals__
+        scope['time'].monotonic=lambda:clock[0]
+        reference=Mock(return_value=((.2,),1.))
+        scope['sampled_nominal_reference']=reference
+        node.tool_cfg=dict(feedback_max_age=.5,ground_recovery=dict(relative_position_margin_m=.01,relative_rotation_margin_rad=.05))
+        initial=dict(height_m=-.01,relative_position_error_m=.07,relative_rotation_error_rad=.04)
+        plan=dict(start=[.1],initial=initial,monitor_pending=False,next_monitor=0.)
+        node.ground_recovery_plan=plan;node.validator=S(submit=Mock(return_value=True));node.validation_result=None
+        node.names=('joint',);node.now=lambda:1.;intent=S(token=7);lease=S(epoch=2);state=object()
+        node.monitor_ground_recovery(intent,state,{'joint':.1},lease)
+        self.assertEqual(node.validator.submit.call_args.kwargs['reference'],[.1])
+        reference.assert_not_called()
+        node.validation_result=('result',7,initial)
+        node.monitor_ground_recovery(intent,state,{'joint':.1},lease)
+        plan['stream_started']=0.;clock[0]=.2
+        node.monitor_ground_recovery(intent,state,{'joint':.2},lease)
+        self.assertEqual(node.validator.submit.call_args.kwargs['reference'],(.2,))
+        node.validation_result=('result',6,initial)
+        with self.assertRaises(RuntimeError):node.monitor_ground_recovery(intent,state,{'joint':.2},lease)
+        node.validation_result=None;clock[0]=.71
+        with self.assertRaisesRegex(RuntimeError,'MONITOR_TIMEOUT'):
+            node.monitor_ground_recovery(intent,state,{'joint':.2},lease)
+
+    def test_ground_lift_active_y_or_input_loss_always_requests_stop(self):
+        for stop in ('Y','input_loss'):
+            r=Rig(load='held',guided=True,dual=True);r.core.ground_recovery_enabled=True
+            r.core.phase='ground_recovery';r.core.emit('ground_recovery');r.core.drain()
+            if stop=='Y':r.buttons[0]=2;effects=r.step()
+            else:
+                r.core.tick(r.now+r.core.max_age+.01);effects=r.core.drain()
+            self.assertEqual([e.operation for e in effects],['stop'])
+            self.assertEqual(r.core.phase,'locked')
+
     async def test_rpc_timing_preserves_result_exception_and_timeout(self):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock

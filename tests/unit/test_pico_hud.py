@@ -13,6 +13,19 @@ from bindu_teleoperation.bimanual_session import BimanualSession
 from tests.support.pico import Rig
 
 
+class GroundRecoveryHudTests(unittest.TestCase):
+    def test_x_is_only_offered_after_confirmed_stop_without_device_or_stop_failure(self):
+        from bindu_teleoperation.vr.hud import hud_spec
+        base=dict(mode='locked',reason='BIMANUAL_MEASURED_GRASP_ERROR',fault_active=True,
+                  ground_recovery_candidate=True,stop_confirmed=True)
+        self.assertIn('X',hud_spec(base)['action'])
+        for extra in (dict(stop_confirmed=False),dict(recovery_required='device_inspection'),
+                      dict(stop_failure={'code':'STOP_UNCONFIRMED'})):
+            self.assertNotIn('X',hud_spec(dict(base,**extra))['action'])
+        active=hud_spec(dict(base,mode='ground_recovery'))
+        self.assertIn('松开停止',active['action']);self.assertEqual(active['status'],'触地抬升中')
+
+
 class PicoHUDTests(unittest.TestCase):
     def test_continuous_axial_operator_confirmation_does_not_claim_rigid_grasp(self):
         from bindu_teleoperation.vr.hud import hud_spec
