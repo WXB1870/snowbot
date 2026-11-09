@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import time
 
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
 from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
@@ -487,11 +488,19 @@ class PositionSessionDevices:
             self.node.event('STARTUP_HOLD_FAILED', engine.stop_fault or 'STOP_UNCONFIRMED')
             return
         if state == 'waiting':
+            self.startup_timing = dict(points=[])
+            def mark(phase):
+                self.startup_timing['points'].append(dict(phase=phase,
+                    steady=self.health.steady(), cpu=time.thread_time(),
+                    ros=self.node.now(), pdo_sample=self.health.sample,
+                    measurement_stamp=self.health.measurement_stamp))
+            mark('acquire_begin')
             try:
                 lease, epoch = engine.acquire('snowbot_startup_hold',
                     ('waist', 'left_arm', 'right_arm'), parameters_for(self,'execution')['startup_lease_ttl_s'], now)
             except (Rejected, RuntimeError):
                 return  # Discovery/fresh measured feedback may not yet be ready.
+            mark('acquired')
             self.startup_hold_state = 'takeover'
             names = tuple(n for group in ('waist', 'left_arm', 'right_arm') for n in GROUPS[group])
             try:
@@ -507,8 +516,11 @@ class PositionSessionDevices:
                     'startup_hold', '', 'joint_target', '', now, parameters_for(self,'execution')['startup_hold_ttl_s'], names=names,
                     positions=tuple(positions),
                     schema_version=2, resource_groups=('waist', 'left_arm', 'right_arm'), runtime_mode='real')
+                mark('motion_ready')
                 engine.submit(motion, now)
+                mark('submitted')
                 engine.tick(now)
+                mark('first_tick')
                 self.startup_motion = motion
             except (Rejected, RuntimeError) as exc:
                 engine.halt(now, 'STARTUP_HOLD_FAILED', revoke=True)

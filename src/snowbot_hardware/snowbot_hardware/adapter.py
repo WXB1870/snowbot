@@ -38,6 +38,27 @@ class SnowbotAdapter(ExecutionNode):
         reply.ok, reply.code = False, 'SNOWBOT_SIM_FAULT_UNAVAILABLE'
         return reply
 
+    def event(self, state, code, task_id='', command_id='', observation_id=''):
+        if state in ('DEVICE_COMMAND_DETAIL', 'DEVICE_FEEDBACK_DETAIL'):
+            logged = getattr(self, '_device_fault_commands', {})
+            if state not in logged or logged[state] != command_id:
+                data = dict(state=state, code=code, command_id=command_id, task_id=task_id,
+                    snapshot_at='event_emission',
+                    feedback_callbacks=self.snowbot_devices.health.observation_diagnostic(),
+                    startup_timing=getattr(self.snowbot_devices, 'startup_timing', None),
+                    tick_timing=getattr(self, '_tick_timing', None),
+                    runtime_tick_timing=getattr(self, 'runtime_tick_timing', None),
+                    previous_runtime_tick_timing=getattr(self, 'previous_runtime_tick_timing', None))
+                try:
+                    payload = json.dumps(data, separators=(',', ':'), allow_nan=False)
+                except (TypeError, ValueError) as exc:
+                    self.get_logger().warn('DEVICE_FAULT_LOG_ERROR:'+str(exc), throttle_duration_sec=1.)
+                else:
+                    self.get_logger().warn('DEVICE_FAULT '+payload)
+                    logged[state] = command_id
+                    self._device_fault_commands = logged
+        return super().event(state, code, task_id, command_id, observation_id)
+
     def begin_shutdown(self):
         self.grippers.stop()
         self.robot_io.command_enabled = False
