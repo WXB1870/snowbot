@@ -576,7 +576,7 @@ class PositionSessionDevices:
                 self.node.event('STARTUP_HOLD_FAILED', self.target_fault or 'TAKEOVER_NOT_CONFIRMED')
             elif self.takeover_pending is None and self.applied_sequence:
                 home = getattr(self, 'startup_home', False)
-                engine.halt(now, revoke=not home)
+                engine.halt(now, 'CANCELED' if home else 'POWERED_HOLD', revoke=not home)
                 self.startup_hold_state = 'holding' if home else 'stopping'
         elif state == 'holding' and not engine.stopping:
             self.startup_home_deadline = now+self.io.profile.max_transition_duration
@@ -608,6 +608,12 @@ class PositionSessionDevices:
                 self.startup_hold_state = 'failed'
                 self.node.event('STARTUP_HOLD_FAILED', str(exc))
         elif state == 'stopping' and not engine.stopping:
+            if not getattr(self, 'startup_home', False):
+                result = engine.results[self.startup_motion.command_id]
+                if result.state != 'SUCCEEDED' or result.code != 'POWERED_HOLD':
+                    self.startup_hold_state = 'failed'
+                    self.node.event('STARTUP_HOLD_FAILED', result.code)
+                    return
             self.startup_hold_state = 'ready'
             self.node.event('STARTUP_HOLD_READY', 'POWERED_HOLD')
             self.node.get_logger().info('SNOWBOT_STARTUP_HOLD_READY: powered hold; squeeze controls following')

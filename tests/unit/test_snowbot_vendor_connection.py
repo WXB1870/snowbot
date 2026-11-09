@@ -461,6 +461,7 @@ class DeploymentEntryTests(unittest.TestCase):
             feedback_tolerances={'joint_position': .01}, stop_position_tolerances={names[0]: .02}),
             stop_arrival_joints=GROUPS['waist'], replay_position_tolerances=dict.fromkeys(names, .035),
             sampled_reference=Mock(return_value=(10., {}, {}, {})))
+        devices.startup_home = True
         devices.startup_hold_state = 'holding'; devices.target_fault = ''; devices.takeover_pending = None
         devices.startup_motion = Motion('hold', 'lease', 7, 'profile', 'startup_hold', '', 'joint_target', '',
             10., .2, names=names, positions=(.2,)*16, schema_version=2,
