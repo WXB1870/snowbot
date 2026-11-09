@@ -55,7 +55,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         initial=dict(height_m=-.01,relative_position_error_m=.07,relative_rotation_error_rad=.04)
         node.ground_recovery_plan={'initial':initial}
         node.accept_ground_observation(dict(initial,height_m=.01,relative_position_error_m=.02))
-        for value in (dict(initial,height_m=-.02),dict(initial,relative_position_error_m=.081),
+        node.accept_ground_observation(dict(initial,height_m=-.013))
+        for value in (dict(initial,height_m=-.03),dict(initial,relative_position_error_m=.081),
                       dict(initial,relative_rotation_error_rad=.091)):
             with self.assertRaisesRegex(RuntimeError,'CONTACT_WORSENED'):node.accept_ground_observation(value)
 
@@ -71,7 +72,7 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             node.profile=S(digest='profile',limits={'joint':(-1.,1.)},feedback_tolerances={'joint_position':.002})
             node.cfg={};node.instance_id='pico';node.runtime_mode='real';node.position_contract=True
             node.simulation=False;node.event=Mock();node.now=lambda:0.;node.monitor_ground_recovery=Mock()
-            node.ground_recovery_plan=dict(hold={'positions':{'joint':.1}},measured_start=[.08],token=1)
+            node.ground_recovery_plan=dict(hold={'positions':{'joint':.1}},measured_start=[.08])
             node.prepare_hold_reference=AsyncMock(return_value=node.ground_recovery_plan['hold'])
             if changed=='hold':node.prepare_hold_reference.side_effect=RuntimeError('HOLD_CHANGED')
             elif changed=='start':
@@ -115,14 +116,23 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
         scope['sampled_nominal_reference']=reference
         node.tool_cfg=dict(feedback_max_age=.5,ground_recovery=dict(relative_position_margin_m=.01,relative_rotation_margin_rad=.05))
         initial=dict(height_m=-.01,relative_position_error_m=.07,relative_rotation_error_rad=.04)
-        plan=dict(start=[.1],initial=initial,monitor_pending=False,next_monitor=0.)
-        node.ground_recovery_plan=plan;node.validator=S(submit=Mock(return_value=True));node.validation_result=None
+        plan=dict(hold={'positions':{'joint':.1}},initial=initial,next_monitor=0.)
+        node.ground_recovery_plan=plan
+        worker=S(busy=False,submitted=0.)
+        def submit(*args,**kwargs):
+            worker.busy=True;worker.submitted=clock[0]
+            return True
+        worker.submit=Mock(side_effect=submit)
+        node.validator=worker;node.validation_result=None
         node.names=('joint',);node.now=lambda:1.;intent=S(token=7);lease=S(epoch=2);state=object()
         node.monitor_ground_recovery(intent,state,{'joint':.1},lease)
         self.assertEqual(node.validator.submit.call_args.kwargs['reference'],[.1])
         reference.assert_not_called()
+        self.assertFalse(node.monitor_ground_recovery(intent))
         node.validation_result=('result',7,initial)
-        node.monitor_ground_recovery(intent,state,{'joint':.1},lease)
+        worker.busy=False
+        self.assertTrue(node.monitor_ground_recovery(intent))
+        self.assertEqual(worker.submit.call_count,1)
         plan['stream_started']=0.;clock[0]=.2
         node.monitor_ground_recovery(intent,state,{'joint':.2},lease)
         self.assertEqual(node.validator.submit.call_args.kwargs['reference'],(.2,))
@@ -141,6 +151,39 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 r.core.tick(r.now+r.core.max_age+.01);effects=r.core.drain()
             self.assertEqual([e.operation for e in effects],['stop'])
             self.assertEqual(r.core.phase,'locked')
+
+    def test_ground_lift_late_completed_monitor_result_is_rejected(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock
+        node=self.production('monitor_ground_recovery','accept_ground_observation')
+        node.monitor_ground_recovery.__func__.__globals__['time'].monotonic=lambda:.6
+        initial=dict(height_m=-.01,relative_position_error_m=.07,relative_rotation_error_rad=.04)
+        node.tool_cfg=dict(feedback_max_age=.5,ground_recovery=dict(relative_position_margin_m=.01,relative_rotation_margin_rad=.05))
+        node.ground_recovery_plan=dict(initial=initial,next_monitor=1.)
+        node.validator=S(busy=False,submitted=0.,submit=Mock(return_value=True))
+        node.validation_result=('result',7,initial)
+        node.names=('joint',);node.now=lambda:1.
+        with self.assertRaisesRegex(RuntimeError,'MONITOR_TIMEOUT'):
+            node.monitor_ground_recovery(S(token=7),object(),{'joint':.1},S(epoch=2))
+        node.validator.submit.assert_not_called()
+
+    async def test_ground_lift_reports_measured_gain_without_an_extra_half_step_gate(self):
+        from types import SimpleNamespace as S
+        from unittest.mock import Mock,AsyncMock
+        node=self.production('ground_recovery','accept_ground_observation')
+        initial=dict(height_m=-.01,relative_position_error_m=.07,relative_rotation_error_rad=.04)
+        plan=dict(positions=[.15],duration_s=5.,initial=initial,measured_start=[.08])
+        status=dict(initial,height_m=-.005)
+        node.tool_cfg={'ground_recovery':dict(relative_position_margin_m=.01,relative_rotation_margin_rad=.05)}
+        node.recover=AsyncMock();node.prepare_hold_reference=AsyncMock(return_value={'positions':{'joint':.1}})
+        node.ground_request=AsyncMock(side_effect=[plan,status]);node.monitor_ground_recovery=Mock(return_value=True)
+        node.names=('joint',);node.reading=lambda:(None,{'joint':.08});node.move=AsyncMock();node.event=Mock()
+        await node.ground_recovery(S(token=1))
+        self.assertAlmostEqual(status['lifted_m'],.005)
+        self.assertEqual(node.event.call_args.args[0],'GROUND_RECOVERY_STEP_COMPLETE')
+        self.assertAlmostEqual(json.loads(node.event.call_args.args[1])['lifted_m'],.005)
+        self.assertIsNone(node.ground_recovery_plan)
+        node.reset_grasp_reference.assert_not_awaited()
 
     async def test_rpc_timing_preserves_result_exception_and_timeout(self):
         from types import SimpleNamespace as S

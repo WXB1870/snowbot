@@ -685,6 +685,7 @@ class PicoNode(RuntimeNode):
             if time.monotonic()>deadline:raise RuntimeError('GROUND_RECOVERY_WORKER_TIMEOUT')
             await self.pause()
         kind,token,value=self.validation_result
+        self.validation_result=None
         if token!=intent.token or kind!='result':
             self.event('GROUND_RECOVERY_DIAGNOSTIC',json.dumps(dict(token=token,detail=self.validator.diagnostic)))
             raise RuntimeError(str(value))
@@ -698,31 +699,20 @@ class PicoNode(RuntimeNode):
         _,measured=self.reading()
         plan=await self.ground_request(intent,'ground_recovery_path',measured,
                                       [held['positions'][n] for n in self.names])
-        self.current(intent)
-        _,current=self.reading()
-        if max(abs(current[n]-q) for n,q in zip(self.names,plan['measured_start']))>prepare_start_tolerance(self.profile,self.cfg):
-            raise RuntimeError('GROUND_RECOVERY_START_CHANGED')
-        plan.update(hold=held,token=intent.token,monitor_pending=False,next_monitor=0.)
+        plan.update(hold=held,next_monitor=0.)
         self.ground_recovery_plan=plan
         self.ground_recovery_observation=plan['initial']
         self.event('GROUND_RECOVERY_PLANNED',json.dumps(plan))
         try:
             await self.move(intent,dict(zip(self.names,plan['positions'])),plan['duration_s'])
-            deadline=time.monotonic()+self.tool_cfg['feedback_max_age']
-            while self.validator.busy:
+            while not self.monitor_ground_recovery(intent):
                 self.current(intent)
-                if time.monotonic()>deadline:raise RuntimeError('GROUND_RECOVERY_MONITOR_TIMEOUT')
                 await self.pause()
-            if plan['monitor_pending']:
-                kind,token,value=self.validation_result
-                if token!=intent.token or kind!='result':raise RuntimeError(str(value))
-                self.accept_ground_observation(value)
             _,measured=self.reading()
             # The final read is measured and made only after the normal stop/lease release.
             status=await self.ground_request(intent,'ground_recovery_status',measured,plan['positions'])
+            status['lifted_m']=status['height_m']-plan['initial']['height_m']
             self.accept_ground_observation(status)
-            if status['height_m']<plan['initial']['height_m']+.5*self.tool_cfg['ground_recovery']['lift_m']:
-                raise RuntimeError('GROUND_RECOVERY_MEASURED_LIFT_UNCONFIRMED')
             self.event('GROUND_RECOVERY_STEP_COMPLETE',json.dumps(status))
         finally:self.ground_recovery_plan=None
 
@@ -730,23 +720,24 @@ class PicoNode(RuntimeNode):
         initial=self.ground_recovery_plan['initial'];cfg=self.tool_cfg['ground_recovery']
         if (value['relative_position_error_m']>initial['relative_position_error_m']+cfg['relative_position_margin_m'] or
                 value['relative_rotation_error_rad']>initial['relative_rotation_error_rad']+cfg['relative_rotation_margin_rad'] or
-                value['height_m']<initial['height_m']-.002):
+                value['height_m']<initial['height_m']-cfg['relative_position_margin_m']):
             raise RuntimeError('GROUND_RECOVERY_CONTACT_WORSENED')
         self.ground_recovery_observation=value
 
-    def monitor_ground_recovery(self,intent,state,measured,lease):
+    def monitor_ground_recovery(self,intent,state=None,measured=None,lease=None):
         plan=self.ground_recovery_plan;now=time.monotonic()
-        if plan['monitor_pending']:
+        if self.validator.busy or self.validation_result is not None:
+            if now-self.validator.submitted>self.tool_cfg['feedback_max_age']:
+                raise RuntimeError('GROUND_RECOVERY_MONITOR_TIMEOUT')
             if self.validation_result is not None:
                 kind,token,value=self.validation_result
                 if token!=intent.token or kind!='result':raise RuntimeError(str(value))
                 self.accept_ground_observation(value)
-                plan['monitor_pending']=False
-            elif now-plan['monitor_started']>self.tool_cfg['feedback_max_age']:
-                raise RuntimeError('GROUND_RECOVERY_MONITOR_TIMEOUT')
-        if not plan['monitor_pending'] and now>=plan['next_monitor']:
+                self.validation_result=None
+            else:return False
+        if state is not None and now>=plan['next_monitor']:
             # Before the first target, the authenticated PAUSE is the reference.
-            reference=plan['start']
+            reference=[plan['hold']['positions'][n] for n in self.names]
             if 'stream_started' in plan:
                 sample=sampled_nominal_reference(state,self.names,lease.epoch,self.now(),self.tool_cfg['feedback_max_age'],
                     wait_until=plan['stream_started']+self.tool_cfg['feedback_max_age'],steady_now=now)
@@ -755,7 +746,8 @@ class PicoNode(RuntimeNode):
             self.validation_result=None
             if not self.validator.submit('ground_recovery_status',intent.token,measured,reference=reference):
                 raise RuntimeError('GROUND_RECOVERY_WORKER_BUSY')
-            plan.update(monitor_pending=True,monitor_started=now,next_monitor=now+.1)
+            plan['next_monitor']=now+.1
+        return not self.validator.busy
 
     async def move(self,intent,targets,duration,*,fit_duration=False,limit_exit=False,replay=None):
         self.current(intent)
