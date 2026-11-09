@@ -328,7 +328,7 @@ class PositionSessionDevices:
     def log_stale_observation(self, detail):
         if self.pdo_delivery is not None:
             self.pdo_delivery.trigger(detail, self.health.steady())
-        message = 'SNOWBOT_PDO_STALE '+json.dumps(detail, separators=(',', ':'))
+        message = detail.get('code', 'SNOWBOT_PDO_STALE')+' '+json.dumps(detail, separators=(',', ':'))
         if detail['stage'] == 'receive':
             self.node.get_logger().warn(message, throttle_duration_sec=1.)
         else:

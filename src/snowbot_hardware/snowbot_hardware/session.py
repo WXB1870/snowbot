@@ -100,6 +100,8 @@ class PdoDeliveryWindow:
         if self.window is None:
             self.window = dict(trigger=detail, before=list(self.history), after=[])
             self.deadline = now + .1
+        elif detail.get('code') == 'SNOWBOT_PDO_NOT_ADVANCING' and self.window['trigger'].get('code') != detail['code']:
+            self.window.setdefault('progress_interruption', detail)
 
     def finish(self, now):
         if self.window is None or (len(self.window['after']) < 3 and now < self.deadline):
@@ -123,6 +125,7 @@ class SessionHealth:
         self.measurement_stamp = 0.
         self.boot = self.sample = 0
         self.progress = None
+        self.progress_gap_reported = False
         self.invalid = ''
         self.messages = {'servo': {}}
         self.observation_callback_count = 0
@@ -172,6 +175,7 @@ class SessionHealth:
                 raise ValueError('SNOWBOT_PDO_SEQUENCE')
             if msg.pdo_sample > self.sample:
                 self.progress = self.steady()
+                self.progress_gap_reported = False
             self.boot, self.sample = msg.boot_id, msg.pdo_sample
             self.observation = msg
             self.measurement_stamp = result[2]
@@ -255,7 +259,15 @@ class SessionHealth:
                 self.stale_read_reported = True
                 self._report_stale('read_rejected', self.rejected_stale_observation, self.now())
             raise RuntimeError(self.invalid)
-        if self.progress is None or not 0 <= self.steady()-self.progress <= ROS_FEEDBACK_TIMEOUT_S:
+        checked_steady = self.steady()
+        if self.progress is None or not 0 <= checked_steady-self.progress <= ROS_FEEDBACK_TIMEOUT_S:
+            if self.on_stale is not None and not self.progress_gap_reported:
+                self.progress_gap_reported = True
+                self.on_stale(dict(code='SNOWBOT_PDO_NOT_ADVANCING', stage='read_progress',
+                    boot_id=self.boot or None, pdo_sample=self.sample or None,
+                    measurement_stamp_ros=self.measurement_stamp if self.observation is not None else None,
+                    callback_received_ros=self.callback_received_ros, last_progress_steady=self.progress,
+                    checked_steady=checked_steady, checked_ros=self.now()))
             raise RuntimeError('SNOWBOT_PDO_NOT_ADVANCING')
         obs = self.observation
         checked_ros = self.now()
