@@ -19,6 +19,8 @@ class PositionOperations:
         if self.config.get('simulation_only', False) is not node.simulation:
             raise ValueError('PICO_GRIPPER_CONFIG_MODE_MISMATCH')
         self.states = {}
+        self.received_ns = {}
+        self.last_rejection = {}
         self.lease = None
         self.lease_instance = None
         self.acquire_future = None
@@ -34,22 +36,71 @@ class PositionOperations:
         if (msg.side in SIDES and n.matches_mode(msg) and msg.profile_hash == n.profile.digest and
                 msg.config_hash == self.config_hash):
             self.states[msg.side] = msg
+            self.received_ns[msg.side] = time.monotonic_ns()
 
     def reading(self, side, *, recovery=False):
         n = self.node
         if self.stop_unconfirmed and not recovery:
             raise RuntimeError('PICO_GRIPPER_STOP_UNCONFIRMED')
         msg = self.states.get(side)
-        if (msg is None or n.state is None or msg.instance_id != n.state.instance_id or
-                self.lease_instance is not None and msg.instance_id != self.lease_instance or
-                not msg.feedback_valid or not (msg.calibrated or self.config.get('allow_uncalibrated_direct', False)) or
-                not 0 <= n.now()-seconds(msg.stamp) <= .2 or
-                not 0 <= n.now()-seconds(msg.feedback_stamp) <= .2 or
-                not all(math.isfinite(v) for v in (msg.measured_position, msg.measured_velocity))):
+        state_checked = feedback_checked = None
+        if msg is None:
+            reason = 'no_cached_state'
+        elif n.state is None:
+            reason = 'no_execution_state'
+        elif msg.instance_id != n.state.instance_id:
+            reason = 'execution_instance_mismatch'
+        elif self.lease_instance is not None and msg.instance_id != self.lease_instance:
+            reason = 'lease_instance_mismatch'
+        elif not msg.feedback_valid:
+            reason = 'feedback_invalid'
+        elif not (msg.calibrated or self.config.get('allow_uncalibrated_direct', False)):
+            reason = 'calibration_required'
+        elif not 0 <= (state_checked := n.now()) - seconds(msg.stamp) <= .2:
+            reason = 'state_age_out_of_range'
+        elif not 0 <= (feedback_checked := n.now()) - seconds(msg.feedback_stamp) <= .2:
+            reason = 'feedback_age_out_of_range'
+        elif not math.isfinite(msg.measured_position):
+            reason = 'nonfinite_position'
+        elif not math.isfinite(msg.measured_velocity):
+            reason = 'nonfinite_velocity'
+        else:
+            reason = None
+        if reason is not None:
+            checked = feedback_checked if feedback_checked is not None else state_checked
+            self.log_rejection(side, msg, reason, checked if checked is not None else n.now(),
+                               state_checked, recovery)
             raise RuntimeError('PICO_GRIPPER_FEEDBACK_OR_CALIBRATION_REQUIRED:'+side)
+        self.last_rejection.pop(side, None)
         if msg.state == 'FAULT' and not (recovery and msg.code=='GRIPPER_STOP_UNCONFIRMED:HOLD_TIMEOUT'):
             raise RuntimeError(msg.code)
         return msg
+
+    def log_rejection(self, side, msg, reason, checked, state_checked, recovery):
+        # Repeated health polls of a persistent fault share the first diagnostic.
+        phase = self.node.control.phase
+        signature = (reason, phase, recovery)
+        if self.last_rejection.get(side) == signature:
+            return
+        detail = dict(side=side, reason=reason, phase=phase, recovery=recovery,
+                      checked_ros=checked, checked_steady_ns=time.monotonic_ns(),
+                      cached=msg is not None, cache_received_steady_ns=self.received_ns.get(side),
+                      execution_instance=self.node.state.instance_id if self.node.state is not None else None,
+                      lease_instance=self.lease_instance,
+                      allow_uncalibrated_direct=self.config.get('allow_uncalibrated_direct', False),
+                      age_limit_ms=200, state_age_ms=None, feedback_age_ms=None, feedback_valid=None)
+        if msg is not None:
+            state_stamp, feedback_stamp = seconds(msg.stamp), seconds(msg.feedback_stamp)
+            state_clock = state_checked if state_checked is not None else checked
+            detail.update(cached_instance=msg.instance_id, feedback_valid=msg.feedback_valid,
+                          calibrated=msg.calibrated, state=msg.state, code=msg.code,
+                          state_stamp_ros=state_stamp, feedback_stamp_ros=feedback_stamp,
+                          state_checked_ros=state_clock, state_age_ms=(state_clock-state_stamp)*1000,
+                          feedback_age_ms=(checked-feedback_stamp)*1000,
+                          measured_position=msg.measured_position if math.isfinite(msg.measured_position) else str(msg.measured_position),
+                          measured_velocity=msg.measured_velocity if math.isfinite(msg.measured_velocity) else str(msg.measured_velocity))
+        self.node.get_logger().warn('PICO_GRIPPER_FEEDBACK_REJECT '+json.dumps(detail, separators=(',', ':'), allow_nan=False))
+        self.last_rejection[side] = signature
 
     async def recover(self, intent):
         """Recheck a revoked manual hold without resending any gripper target."""
