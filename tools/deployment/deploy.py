@@ -361,7 +361,8 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                 for line in lines:
                     thread = re.search(r'\[SCHED-THREAD\] role=(pdo|control|middle|adapter) pid=(\d+) tid=(\d+)',line)
                     if thread and Path('/proc/'+thread[3]).exists():
-                        if startup_window and startup_deadline is None:
+                        if (startup_window and startup_deadline is None and
+                                (startup_window!='adapter' or thread[1]=='adapter')):
                             startup_deadline=time.monotonic_ns()+15000000000
                         if tids.get(thread[1])!=int(thread[3]):identified_ns[thread[1]]=time.monotonic_ns()
                         tids[thread[1]] = int(thread[3])
@@ -862,8 +863,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('prepare', 'build', 'start', 'plan', 'services', 'operator', 'open-grippers', 'trace-scheduling'))
     parser.add_argument('--workspace', type=Path, default=ROOT/'artifacts/robot')
-    parser.add_argument('--startup-window',action='store_true',
-                        help='trace-scheduling: stop 15 seconds after finding a live base thread')
+    parser.add_argument('--startup-window',nargs='?',choices=('base','adapter'),const='base',
+                        help='trace-scheduling: capture 15 seconds from base or adapter startup')
     parser.add_argument('--bindu-source', type=Path, help='Verify an existing matching checkout; never modify it')
     parser.add_argument('--machine', choices=sorted(p.stem for p in MACHINES.glob('*.json')),
                         help='Select machine defaults; prepare/build remember the selection for later runs')
