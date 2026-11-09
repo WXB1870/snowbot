@@ -35,10 +35,20 @@
 +    return int64_t(value.tv_sec)*1000000000+value.tv_nsec;
 +}
 
-@@ -150,3 +157,3 @@
+@@ -150,3 +157,13 @@
      position_state_pub_=create_publisher<snowbot_ctl_msgs::msg::PositionSessionState>("/bindu/position/middle_state",1);
 -    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());position_nominal_stamp_=0;
-+    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_log_interrupt("observation_endpoint_unavailable");position_gate_.interrupt();return;}position_feedback_.observe(*msg,this->now().nanoseconds(),std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());position_nominal_stamp_=0;
++    position_feedback_sub_=create_subscription<snowbot_ctl_msgs::msg::PositionObservation>("/bindu/position/observation",rclcpp::SensorDataQoS().keep_last(1),[this](const snowbot_ctl_msgs::msg::PositionObservation::SharedPtr msg){if(!position_endpoint()){position_log_interrupt("observation_endpoint_unavailable");position_gate_.interrupt();return;}const auto previous=position_feedback_;
++        const auto receive_ros=this->now().nanoseconds();
++        const auto receive_steady=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        position_feedback_.observe(*msg,receive_ros,receive_steady);position_nominal_stamp_=0;
++        if((previous.advances>=2 && position_feedback_.advances<2) || (previous.boot && previous.boot!=msg->boot_id))
++            RCLCPP_WARN(this->get_logger(),"POSITION_FEEDBACK_RESET steady_ns=%lld session=%llu seq=%llu previous_advances=%u advances=%u previous_boot=%llu boot=%llu previous_sample=%llu packet_sample=%llu previous_progress_gap_ms=%.3f source_age_ms=%.3f pdo_age_ms=%.3f WKC=%d/%d valid=0x%x faults=0x%x",
++                (long long)receive_steady,(unsigned long long)position_gate_.last().session,(unsigned long long)position_gate_.last().sequence,
++                previous.advances,position_feedback_.advances,(unsigned long long)previous.boot,(unsigned long long)msg->boot_id,
++                (unsigned long long)previous.sample,(unsigned long long)msg->pdo_sample,previous.progress?(receive_steady-previous.progress)*1e-6:-1.,
++                (receive_ros-(int64_t(msg->header.stamp.sec)*1000000000+msg->header.stamp.nanosec))*1e-6,msg->pdo_age*1000.,
++                msg->wkc,msg->expected_wkc,unsigned(position_feedback_.valid),unsigned(position_feedback_.faults));
          if(msg->reference_mode==2&&msg->reference_valid&&msg->output_valid&&msg->session_selected){
 @@ -155,3 +162,4 @@
                  for(unsigned i=0;i<14;++i){position_nominal_q_[i]=msg->reference_position[i];position_nominal_v_[i]=msg->reference_speed[i];}}}
