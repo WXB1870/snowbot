@@ -27,7 +27,14 @@ def pinned(path):
 
 def adapter_trace_env():
     from ament_index_python.packages import get_package_prefix
-    private = Path(get_package_prefix('snowbot_hardware')) / PRIVATE_DDS
+    prefix = Path(get_package_prefix('snowbot_hardware'))
+    user_probe = prefix / 'lib/snowbot_hardware/pdo-userspace/reader.so'
+    if user_probe.is_file() and pinned(DDS):
+        digest = hashlib.sha256(user_probe.read_bytes()).hexdigest()
+        if digest == '55c350d5c7c274757f6129a89c45aeb6c308094a7213218e449f2108fba18bb7':
+            preload = ' '.join(filter(None, (str(user_probe), os.getenv('LD_PRELOAD'))))
+            return {'LD_PRELOAD': preload, 'SNOWBOT_PDO_USERSPACE': '1'}
+    private = prefix / PRIVATE_DDS
     if not private.is_file() or not pinned(DDS) or not pinned(private):
         return {}
     preload = ' '.join(filter(None, (str(private), os.getenv('LD_PRELOAD'))))

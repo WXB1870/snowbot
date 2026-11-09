@@ -188,6 +188,10 @@ def main():
     os.environ.setdefault('RMW_FASTRTPS_PUBLICATION_MODE', 'ASYNCHRONOUS')
     if os.environ.get('ROS_DISTRO') == 'humble':
         from .pdo_executor import HumbleObservationExecutor
-        run_execution(SnowbotAdapter, executor_factory=HumbleObservationExecutor)
+        if os.environ.get('SNOWBOT_PDO_USERSPACE') == '1':
+            from .pdo_runtime_trace import ReaderTraceExecutor
+            run_execution(SnowbotAdapter, executor_factory=ReaderTraceExecutor)
+        else:
+            run_execution(SnowbotAdapter, executor_factory=HumbleObservationExecutor)
     else:
         run_execution(SnowbotAdapter)
