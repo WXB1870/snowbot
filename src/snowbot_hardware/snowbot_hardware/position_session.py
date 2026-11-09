@@ -21,8 +21,11 @@ class PositionSessionIO(SnowbotIO):
     servo_reference = None
     captured_pause_request = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, reference_diagnostic=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.reference_diagnostic = reference_diagnostic
+        self.reference_export_empty = False
+        self.reference_unavailable_reason = 'not_received'
         self.pause_targets = None
         self.writable_groups = CONTROL_GROUPS
         self.coupled_group_sets = (CONTROL_GROUPS,)
@@ -46,14 +49,23 @@ class PositionSessionIO(SnowbotIO):
         self.captured_pause_request = previous_pause
         self.pause_request = None
         self.servo_reference = None
+        self.reference_export_empty = False
+        self.reference_unavailable_reason = 'capture_reset'
         self.after_capture()
 
     def sampled_reference(self):
         # ROS snapshot lifetime; the servo's local RT deadline remains 20 ms.
-        sample = self.servo_reference
-        if (sample is None or not (self.targets or self.stop_targets) or
-                not 0 <= self.now()-sample[0] <= ROS_FEEDBACK_TIMEOUT_S):
-            return (self.now(), {}, {}, {})
+        sample, now = self.servo_reference, self.now()
+        if not (self.targets or self.stop_targets):
+            self.reference_export_empty = False
+            return (now, {}, {}, {})
+        if sample is None or not 0 <= now-sample[0] <= ROS_FEEDBACK_TIMEOUT_S:
+            reason = self.reference_unavailable_reason if sample is None else 'sample_expired'
+            if not self.reference_export_empty and self.reference_diagnostic is not None:
+                self.reference_diagnostic(reason, None if sample is None else sample[0], now)
+            self.reference_export_empty = True
+            return (now, {}, {}, {})
+        self.reference_export_empty = False
         return sample
 
     @property
@@ -99,8 +111,6 @@ class PositionSessionIO(SnowbotIO):
 
 
 class PositionSessionDevices:
-    last_reference_diagnostic = 0.
-
     def __init__(self, node, profile):
         from rcl_interfaces.msg import ParameterDescriptor
         from snowbot_ctl_msgs.msg import PositionObservation, PositionSessionCommand, PositionSessionState
@@ -143,7 +153,8 @@ class PositionSessionDevices:
         self.takeover_previous_hold = None
         self.io = PositionSessionIO(profile, self.send, node.now,
                             command_enabled=node.get_parameter('command_enabled').value,
-                            simulated=False, check_ready=self.check_ready, check_health=self.check_health)
+                            simulated=False, check_ready=self.check_ready, check_health=self.check_health,
+                            reference_diagnostic=self.reference_diagnostic)
         self.io.source_motion = None
         self.io.trajectory_reference = True
         self.io.target_stream = True
@@ -300,6 +311,18 @@ class PositionSessionDevices:
             self.health.states.pop(layer, None)
             self.node.get_logger().warn(str(exc), throttle_duration_sec=1.)
 
+    def reference_diagnostic(self, reason, cached_stamp, now):
+        obs = self.health.observation
+        sample = cached_stamp if cached_stamp is not None else (
+            obs.sample_time_ns*1e-9 if obs is not None else None)
+        detail = dict(stage='adapter_export',reason=reason,exported_at=now,
+            reference_stamp=sample,reference_age_ms=None if sample is None else (now-sample)*1000,
+            expected_session=int(self.envelopes.session),
+            observation_stamp=None if obs is None else obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9,
+            session=None if obs is None else int(obs.session),sequence=None if obs is None else int(obs.command_sequence),
+            segment_id=None if obs is None else int(obs.segment_id),pdo_sample=None if obs is None else int(obs.pdo_sample))
+        self.node.event('TRAJECTORY_REFERENCE_EMPTY',json.dumps(detail,separators=(',', ':')))
+
     def receive(self, msg):
         entered = self.health.steady()
         source = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
@@ -321,16 +344,21 @@ class PositionSessionDevices:
             self.io.observe(q, v, stamp, self.node.now(), sample=msg.pdo_sample)
             if msg.session_selected and msg.session == self.envelopes.session:
                 self.takeover_previous_hold = None
-            previous_reference = self.io.servo_reference
             self.io.servo_reference = None
             sample = getattr(msg, 'sample_time_ns', 0)*1e-9
             arrays = [getattr(msg, field, ()) for field in
                       ('reference_position','reference_speed','reference_acceleration')]
-            if (msg.session_selected and msg.session == self.envelopes.session and
-                    getattr(msg, 'reference_mode', 0) == 2 and getattr(msg, 'reference_valid', False) and
-                    getattr(msg, 'output_valid', False) and getattr(msg, 'segment_id', 0) == msg.command_sequence and
-                    0 <= self.node.now()-sample <= ROS_FEEDBACK_TIMEOUT_S and
-                    all(all(math.isfinite(x) for x in values) for values in arrays)):
+            reference_checks = (
+                (msg.session_selected, 'not_selected'),
+                (msg.session == self.envelopes.session, 'session_mismatch'),
+                (getattr(msg, 'reference_mode', 0) == 2, 'reference_mode'),
+                (getattr(msg, 'reference_valid', False), 'reference_invalid'),
+                (getattr(msg, 'output_valid', False), 'output_invalid'),
+                (getattr(msg, 'segment_id', 0) == msg.command_sequence, 'segment_mismatch'),
+                (0 <= self.node.now()-sample <= ROS_FEEDBACK_TIMEOUT_S, 'sample_expired'),
+                (all(all(math.isfinite(x) for x in values) for values in arrays), 'nonfinite'))
+            self.io.reference_unavailable_reason = next((reason for valid,reason in reference_checks if not valid), '')
+            if all(valid for valid,_ in reference_checks):
                 self.io.servo_reference = (sample, *[dict(zip(CONTROL_NAMES, values)) for values in arrays])
                 source = self.sent.get(msg.command_sequence)
                 if (source is not None and msg.command_sequence > self.applied_sequence and
@@ -341,19 +369,6 @@ class PositionSessionDevices:
                         session=msg.session, sequence=msg.command_sequence,
                         sample_time_ns=msg.sample_time_ns), separators=(',', ':')),
                         command_id=source[2])
-            if (previous_reference is not None and
-                    (self.io.servo_reference is None or self.node.now()-previous_reference[0] > ROS_FEEDBACK_TIMEOUT_S) and
-                    entered-self.last_reference_diagnostic >= 1.):
-                self.last_reference_diagnostic = entered
-                self.node.event('TRAJECTORY_REFERENCE_GAP', json.dumps(dict(
-                    session=int(msg.session), expected_session=int(self.envelopes.session),
-                    sequence=int(msg.command_sequence), segment_id=int(msg.segment_id), pdo_sample=int(msg.pdo_sample),
-                    sample_time_ns=int(msg.sample_time_ns), sample_age_ms=(self.node.now()-sample)*1000,
-                    previous_age_ms=(self.node.now()-previous_reference[0])*1000,
-                    selected=bool(msg.session_selected), reference_mode=int(msg.reference_mode),
-                    reference_valid=bool(msg.reference_valid), output_valid=bool(msg.output_valid),
-                    finite=all(all(math.isfinite(x) for x in values) for values in arrays),
-                    export_valid=self.io.servo_reference is not None), separators=(',', ':')))
             outcome = 'accepted'
         except (ValueError, RuntimeError) as exc:
             outcome = str(exc)
