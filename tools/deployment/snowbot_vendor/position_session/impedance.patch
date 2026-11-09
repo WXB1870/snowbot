@@ -29,7 +29,7 @@
  };
  // Same SPSC ownership protocol as observation, reversed direction (ROS -> RT).
  class OutputCache {
-@@ -17,7 +18,8 @@
+@@ -17,8 +18,9 @@
   void publish(const Output& value){slots_[back_]=value;back_=middle_.exchange(back_|4u,std::memory_order_acq_rel)&3u;}
   Output read(){if(middle_.load(std::memory_order_acquire)&4u)front_=middle_.exchange(front_,std::memory_order_acq_rel)&3u;return slots_[front_];}
  };
@@ -39,6 +39,7 @@
 + uint64_t sensor_sample=0;uint8_t sensor_failures=0;
   CycleFault first_cycle_fault{};
   Output output{};uint8_t reason=OK;bool disabled=false,captured=false;
+  uint64_t session=0,sequence=0,hold_sample=0,seen_admission=0;
 @@ -40,7 +41,7 @@
   }
   void report_hold(Observation& obs,uint32_t written)const{
