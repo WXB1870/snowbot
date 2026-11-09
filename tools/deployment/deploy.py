@@ -277,11 +277,16 @@ def keep_service_log(line, previous_wkc, now):
     return True
 
 
-def sched_event_filters(tids):
+def sched_event_filters(tids, *, startup_window=False):
     tids = sorted(set(map(int, tids)))
-    return {
+    filters = {
         'sched_switch': ' || '.join(f'prev_pid == {tid} || next_pid == {tid}' for tid in tids) or 'prev_pid < 0',
         'sched_wakeup': ' || '.join(f'pid == {tid}' for tid in tids) or 'pid < 0'}
+    if startup_window:
+        # Catch the adapter by its kernel comm before its first log arrives.
+        filters['sched_switch'] += ' || prev_comm == "snowbot_adapter" || next_comm == "snowbot_adapter"'
+        filters['sched_wakeup'] += ' || comm == "snowbot_adapter"'
+    return filters
 
 
 def sched_trace_window(text, fault_ns, before_s=2.):
@@ -312,13 +317,14 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
     handlers = {s:signal.signal(s,lambda *_:stopped.set()) for s in (signal.SIGINT,signal.SIGTERM)}
     def write(name, value): (instance/name).write_text(str(value))
     source, control_source, offsets, tids, fault_ns, noticed_ns = None, None, {}, {}, None, None
+    identified_ns={}
     deadline, configured, simulation, before_s = None, set(), False, 15. if startup_window else 2.
     startup_deadline=None
     buffer_kb=8192 if startup_window else 2048
     try:
         write('tracing_on',0); write('current_tracer','nop'); write('trace_clock','mono')
         write('buffer_size_kb',buffer_kb); write('options/overwrite',1)
-        for event, expression in sched_event_filters([]).items():
+        for event, expression in sched_event_filters([],startup_window=startup_window).items():
             write('events/sched/'+event+'/filter',expression)
             write('events/sched/'+event+'/enable',1)
         write('trace',''); write('tracing_on',1)
@@ -327,18 +333,18 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
             candidates = list((workspace/'startup-logs').glob('services-*/servo.log'))
             latest = max(candidates,key=lambda p:p.stat().st_mtime_ns) if candidates else None
             if latest is not None and latest != source and noticed_ns is None:
-                source, control_source, offsets, tids = latest, None, {}, {}
+                source, control_source, offsets, tids, identified_ns = latest, None, {}, {}, {}
                 write('tracing_on',0)
-                for event,expression in sched_event_filters([]).items():write('events/sched/'+event+'/filter',expression)
+                for event,expression in sched_event_filters([],startup_window=startup_window).items():write('events/sched/'+event+'/filter',expression)
                 write('trace','');write('tracing_on',1);configured=set()
             if source is not None:
                 controls = list((workspace.parent/'dependencies/bindu/log/vr').glob('*/control.log'))
                 latest_control = max(controls,key=lambda p:p.stat().st_mtime_ns) if controls else None
                 if latest_control != control_source and noticed_ns is None:
                     if control_source is not None:offsets.pop(str(control_source),None)
-                    control_source=latest_control;tids.pop('adapter',None)
+                    control_source=latest_control;tids.pop('adapter',None);identified_ns.pop('adapter',None)
                     if set(tids.values()) != configured:
-                        for event,expression in sched_event_filters(tids.values()).items():
+                        for event,expression in sched_event_filters(tids.values(),startup_window=startup_window).items():
                             write('events/sched/'+event+'/filter',expression)
                         configured=set(tids.values())
                 lines = []
@@ -357,9 +363,10 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
                     if thread and Path('/proc/'+thread[3]).exists():
                         if startup_window and startup_deadline is None:
                             startup_deadline=time.monotonic_ns()+15000000000
+                        if tids.get(thread[1])!=int(thread[3]):identified_ns[thread[1]]=time.monotonic_ns()
                         tids[thread[1]] = int(thread[3])
                         if set(tids.values()) != configured:
-                            for event, expression in sched_event_filters(tids.values()).items():
+                            for event, expression in sched_event_filters(tids.values(),startup_window=startup_window).items():
                                 write('events/sched/'+event+'/filter',expression)
                             configured=set(tids.values())
                             print('SCHED_TRACE_ARMED '+json.dumps(tids),flush=True)
@@ -401,7 +408,9 @@ def trace_scheduling(workspace, *, tracefs=None, startup_window=False):
         info=dict(clock='mono',fault_ns=fault_ns,noticed_ns=noticed_ns,frozen_ns=frozen_ns,
             requested_before_s=before_s,post_notice_s=.2,buffer_kb_per_cpu=buffer_kb,
             startup_window=startup_window,startup_deadline_ns=startup_deadline,
-            tids=tids,source_log=str(source) if source else None,
+            tids=tids,tids_identified_ns=identified_ns,
+            adapter_comm_filter='snowbot_adapter' if startup_window else None,
+            source_log=str(source) if source else None,
             source_logs=[str(p) for p in paths] if source else [],coverage=coverage,threads=thread_info,
             manual_stop=stopped.is_set(),simulation=simulation,hardware_started=False)
         (output/'metadata.json').write_text(json.dumps(info,indent=2)+'\n')

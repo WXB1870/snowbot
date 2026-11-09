@@ -652,6 +652,13 @@ class DeploymentEntryTests(unittest.TestCase):
         for field in ('prev_pid == 41','next_pid == 41','prev_pid == 42','next_pid == 42'):
             self.assertIn(field,filters['sched_switch'])
         self.assertNotIn('common_pid',filters['sched_wakeup'])
+        early=sched_event_filters([],startup_window=True)
+        self.assertIn('prev_comm == "snowbot_adapter"',early['sched_switch'])
+        self.assertIn('next_comm == "snowbot_adapter"',early['sched_switch'])
+        self.assertIn('comm == "snowbot_adapter"',early['sched_wakeup'])
+        discovered=sched_event_filters([41],startup_window=True)
+        self.assertIn('prev_pid == 41',discovered['sched_switch'])
+        self.assertIn('prev_comm == "snowbot_adapter"',discovered['sched_switch'])
 
     def test_scheduler_trace_uses_monotonic_fault_window(self):
         from tools.deployment.deploy import sched_trace_window
