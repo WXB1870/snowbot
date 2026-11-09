@@ -1,6 +1,6 @@
+#include <unistd.h>
 #ifdef __linux__
 #include <sys/syscall.h>
-#include <unistd.h>
 #endif
 // Production callback pump, with a deterministic executor double; no ROS/IO.
 #include "servo_control/position_clock.h"
@@ -20,8 +20,13 @@
 #include <cerrno>
 static std::atomic<bool> sigInterrupt{false};
 static int setup_result=0;
+static int feedback_setup_result=0;
+static std::atomic<unsigned> feedback_setups{0};
+static const pthread_t fixture_parent=pthread_self();
 static int fixture_setschedparam(pthread_t thread,int policy,const sched_param* param){
- assert(policy==SCHED_FIFO&&param->sched_priority==20);
+ const bool feedback=pthread_equal(thread,fixture_parent);
+ assert(policy==SCHED_FIFO&&param->sched_priority==(feedback?5:20));
+ if(feedback){++feedback_setups;if(feedback_setup_result)return feedback_setup_result;}
  if(setup_result)return setup_result;
  return std::getenv("SNOWBOT_NATIVE_FIFO")?pthread_setschedparam(thread,policy,param):0;
 }
@@ -128,7 +133,10 @@ static void check_control_cycle(){
  ServoNode node;node.position_control_fifo_=true;
  setup_result=EPERM;assert(!node.position_start_control());
  assert(!node.position_control_thread_.joinable());setup_result=0;
+ feedback_setup_result=EPERM;assert(!node.position_start_control());
+ assert(!node.position_control_thread_.joinable());feedback_setup_result=0;
  assert(node.position_start_control());
+ assert(feedback_setups>=2);
  // A stalled ordinary DDS publisher must not hold the control-state mutex.
  node.msg_publish();node.publisher.block=true;
  std::thread publisher([&]{node.feedback_send();});
@@ -141,11 +149,13 @@ static void check_control_cycle(){
  assert(node.cycles.load()==stopped&&!node.position_control_thread_.joinable());
  int after_policy=0;sched_param after_param{};
  assert(!pthread_getschedparam(pthread_self(),&after_policy,&after_param));
- assert(after_policy==parent_policy&&after_param.sched_priority==parent_param.sched_priority);
+ if(std::getenv("SNOWBOT_NATIVE_FIFO"))assert(after_policy==SCHED_FIFO&&after_param.sched_priority==5);
+ else assert(after_policy==parent_policy&&after_param.sched_priority==parent_param.sched_priority);
  // Worker exceptions request the existing shutdown path and remain failures.
  sigInterrupt=false;node.fail_step=true;assert(node.position_start_control());
  while(!sigInterrupt.load()){assert(std::chrono::steady_clock::now()<deadline);std::this_thread::yield();}
  node.position_stop_control();assert(node.shutdown_exit_code_==1);sigInterrupt=false;
+ if(std::getenv("SNOWBOT_NATIVE_FIFO"))assert(!pthread_setschedparam(pthread_self(),parent_policy,&parent_param));
  // PDO keeps one producer; two serialized readers must see coherent snapshots.
  position_session::ObservationCache cache;std::atomic<bool> done{false};
  const auto read=[&]{do{const auto s=cache.read();assert(s.position[0]==float(s.sample));}while(!done.load());};
@@ -153,7 +163,7 @@ static void check_control_cycle(){
  for(unsigned i=1;i<=5000;++i){position_session::Observation s;s.sample=i;s.position[0]=float(i);cache.publish(s);}
  done=true;first.join();second.join();
  getter_delay=true;feedback_now=saved_clock;
- std::cout<<"PASS isolated production cycle: FIFO20 setup/failure, blocked DDS independence, join before shutdown, exception propagation and coherent concurrent PDO readers\n";
+ std::cout<<"PASS isolated production cycle: control FIFO20 and ROS FIFO5 setup/failure, blocked DDS independence, join before shutdown, exception propagation and coherent concurrent PDO readers\n";
 }
 #endif
 int main(){
