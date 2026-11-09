@@ -49,6 +49,7 @@ int main(int argc,char** argv){
  if(argc>1 && std::string(argv[1])=="--timeout-probe"){
   const int timeout_us=std::stoi(argv[2]),count=std::stoi(argv[3]),pause_ms=std::stoi(argv[4]);
   const bool packet=argc>5 && std::string(argv[5])=="--isolated-packet";
+  const int frame_wait_us=argc>6?std::stoi(argv[6]):0;
   if(packet)assert(unshare(CLONE_NEWNET)==0); // Fresh namespace has no physical NIC.
   SocketPort s;timeval timeout{timeout_us/1000000,timeout_us%1000000};
   if(packet){
@@ -67,7 +68,8 @@ int main(int argc,char** argv){
   for(int i=0;i<count;++i){
    std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
    s.port.rxbufstat[12]=EC_BUF_TX;const auto begin=mono(),used=cpu();
-   const int result=ecx_inframe(&s.port,12,0);const auto end=mono();
+   const int result=frame_wait_us?ecx_waitinframe(&s.port,12,frame_wait_us):ecx_inframe(&s.port,12,0);
+   const auto end=mono();
    samples.push_back({begin,end,cpu()-used,result});
   }
   std::cout<<"{\"timeout_us\":"<<timeout_us<<",\"hardware_accessed\":false,\"samples\":[";
