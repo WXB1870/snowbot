@@ -694,7 +694,7 @@ def loading_guide(view, modes):
     if view.get('phase')=='ground_recovery':
         return dict(title='正在人工抬升退让',detail='继续按住左手 X；松开 X 或按 A/B/Y 停止。结束后按右手 B 复核',key='X',step='ground_recovery')
     if view.get('phase')=='locked' and view.get('ground_recovery_candidate'):
-        return dict(title='可请求人工抬升退让',detail='负载大不等于触地。确认适合向上退让，松开双侧握、扳机及 X，再长按左手 X；右手 B 仅复核待命',key='X',step='ground_recovery_request')
+        return dict(title='误差过大，进入保护',detail='确认适合向上退让，松开双侧握、扳机及 X，再长按左手 X；右手 B 仅复核待命',key='X',step='ground_recovery_request')
     phase, goal = view['phase'], view.get('loading_goal')
     operation = '装夹' if goal=='held' else '卸载'
     if view.get('measured_limit_joints') and phase in ('standby','tool_standby','preparing'):

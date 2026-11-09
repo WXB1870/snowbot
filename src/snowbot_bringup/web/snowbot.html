@@ -440,8 +440,8 @@ function explainReason(reason){
   if((reason||'').includes('PICO_GRASP_POSITION_CHANGED'))return '夹爪开度偏离当前握持方式，已停止跟随。';
   if((reason||'').includes('LEFT_GRIPPER_NOT_CLOSED')||(reason||'').includes('LEFT_NOT_CLOSED_STATIONARY'))return '左夹爪尚未闭合停稳，无法换握。';
   if((reason||'').includes('PREPARE_TOOL_COUPLING'))return '回准备位的候选路径会改变双手握持关系，已拒绝执行。';
-  if((reason||'').includes('GROUND_RECOVERY_GEOMETRY_WORSENED'))return '退让过程中握持偏差增大或杆体继续下沉，已停止；这不是触地原因识别。';
-  if((reason||'').includes('BIMANUAL_GRASP_POSE')||(reason||'').includes('BIMANUAL_MEASURED_GRASP_ERROR')||(reason||'').includes('relative pose safety threshold'))return '双手相对握持几何偏差超限，原因未判明；正常铲雪也可能有大负载，不能据此判定触地。';
+  if((reason||'').includes('GROUND_RECOVERY_GEOMETRY_WORSENED'))return '退让过程中误差增大或杆体继续下沉，进入保护。';
+  if((reason||'').includes('BIMANUAL_GRASP_POSE')||(reason||'').includes('BIMANUAL_MEASURED_GRASP_ERROR')||(reason||'').includes('relative pose safety threshold'))return '双手相对误差过大，进入保护。';
   if((reason||'').includes('PICO_GRIPPER_CONFIRMATION_REQUIRED'))return '接合需要夹爪实际闭合并停稳；当前反馈尚未满足。';
   if((reason||'').includes('PICO_PREPARE_PRESET_REQUIRED'))return '尚未配置现场准备位。';
   if((reason||'').includes('CALIBRATION'))return '夹爪标定未完成，当前不能执行开合。';
@@ -487,7 +487,7 @@ function operatorState(p,online,fresh,pcFresh,tracked,execution={}){
   if(p.phase==='following')return tracked?{...result,status:'跟随中',next:'移动双手柄控制工具；松握即可暂停。',tone:'good'}:{...result,status:'输入失效，停止待确认',reason:'当前手柄输入不可用，尚不能确认机器人已停稳。',next:'松开双侧握，等待停止反馈。',tone:'bad'};
   if(p.phase==='tool_standby')return {...result,status:p.stop_confirmed===true?'已暂停，可以接合':'正在暂停',reason:p.stop_confirmed===true?'机器人已停稳，工具保持当前姿态。':'已收到暂停请求，正在等待停稳反馈。',next:p.stop_confirmed===true?'先松开双侧握，再同时握住开始跟随。':'保持双侧握松开，等待停稳确认。',tone:p.stop_confirmed===true?'good':'warn'};
   if(p.phase==='preparing')return {...result,status:'正在前往准备姿态',reason:'机器人正移动到装夹准备位置。',next:'继续按住 A；松开 A 可中断准备。',key:'A'};
-  if(p.phase==='ground_recovery')return {...result,status:'正在人工抬升退让',reason:Number.isFinite(p.ground_recovery?.height_m)?`模型估计距地 ${(p.ground_recovery.height_m*100).toFixed(1)} 厘米，仅作参考`:'正在检查抬升路径；负载大小不作为触地判据。',next:'继续按住左手 X；松开 X 或按 A/B/Y 停止，结束后按右手 B 复核。',key:'X'};
+  if(p.phase==='ground_recovery')return {...result,status:'正在人工抬升退让',reason:Number.isFinite(p.ground_recovery?.height_m)?`模型估计距地 ${(p.ground_recovery.height_m*100).toFixed(1)} 厘米，仅作参考`:'正在检查抬升路径。',next:'继续按住左手 X；松开 X 或按 A/B/Y 停止，结束后按右手 B 复核。',key:'X'};
   if(p.phase==='engaging')return {...result,reason:'正在以当前手柄和工具姿态建立跟随基准。',next:'保持双侧握；松开任一侧可暂停。'};
   if(p.phase==='switching'){
     const target=p.grasp_requested==='right_axial'?'右手虚握':p.grasp_requested==='rigid'?'双手刚握':'新握持方式';

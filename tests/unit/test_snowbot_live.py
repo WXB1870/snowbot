@@ -40,7 +40,7 @@ const locked={phase:'locked',teleop_mode:'bimanual_tool',reason:'BIMANUAL_MEASUR
   stop_confirmed:true,ground_recovery_candidate:true,dual_modes:true};
 let s=operatorState(locked,true,true,true,true);
 assert.equal(s.key,'X');assert.match(s.status,/人工/);
-assert.match(s.reason,/大负载.*不能.*触地/);
+assert.equal(s.reason,'双手相对误差过大，进入保护。');
 assert.match(s.next,/左手 X/);assert.match(s.next,/右手 B 仅复核/);assert.doesNotMatch(s.next,/接近地面|2厘米/);
 const active={...locked,phase:'ground_recovery',stop_confirmed:false,ground_recovery:{height_m:.3}};
 s=operatorState(active,true,true,true,true);

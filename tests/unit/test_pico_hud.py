@@ -19,7 +19,7 @@ class GroundRecoveryHudTests(unittest.TestCase):
         base=dict(mode='locked',reason='BIMANUAL_MEASURED_GRASP_ERROR',fault_active=True,
                   ground_recovery_candidate=True,stop_confirmed=True)
         self.assertIn('X',hud_spec(base)['action'])
-        self.assertIn('负载大不等于触地',hud_spec(base)['detail'])
+        self.assertEqual(hud_spec(base)['title'],'误差过大，进入保护')
         self.assertIn('右 B 仅复核',hud_spec(base)['action'])
         for extra in (dict(stop_confirmed=False),dict(recovery_required='device_inspection'),
                       dict(stop_failure={'code':'STOP_UNCONFIRMED'})):

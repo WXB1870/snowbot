@@ -275,8 +275,8 @@
       ]
     ],
     "lift_m": 0.05,
-    "max_speed_m_s": 0.02,
-    "max_joint_speed_rad_s": 0.05,
+    "max_speed_m_s": 0.05,
+    "max_joint_speed_rad_s": 0.1,
     "relative_position_margin_m": 0.01,
     "relative_rotation_margin_rad": 0.05
   }
