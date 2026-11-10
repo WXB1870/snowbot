@@ -6,7 +6,8 @@ import time
 import resource
 
 from snowbot_hardware.protocol import CommandNotSent, SnowbotIO, GROUPS
-from snowbot_hardware.session import CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S, SessionHealth, SourceEnvelope, new_session_id
+from snowbot_hardware.session import (CONTROL_GROUPS, CONTROL_NAMES, ROS_FEEDBACK_TIMEOUT_S,
+                                      TARGET_FEEDBACK_MAX_AGE_S, SessionHealth, SourceEnvelope, new_session_id)
 from bindu_runtime.teleop_deployment import TARGET_STREAM_LIMIT_DEFAULTS, target_stream_limits
 from .parameters import load_parameters, parameters_for
 
@@ -185,7 +186,7 @@ class PositionSessionDevices:
         self.io.held_reference = self.held_reference
         self.io.prepare_replay = self.prepare_replay
         self.io.stop_confirmation_window = self.runtime_parameters['execution']['stop_confirmation_window_s']
-        self.io.stop_confirmation_max_gap = ROS_FEEDBACK_TIMEOUT_S
+        self.io.stop_confirmation_max_gap = TARGET_FEEDBACK_MAX_AGE_S
         self.io.stop_requires_arrival = False
         self.startup_hold_state = ('waiting' if self.io.command_enabled else 'disabled')
         self.startup_home = node.declare_parameter('startup_home', os.environ.get('SNOWBOT_STARTUP_HOME') == '1',
@@ -235,9 +236,9 @@ class PositionSessionDevices:
         if (self.node.closing or engine.active or engine.stopping or engine.stop_fault or self.io.stop_failures):
             raise RuntimeError('SNOWBOT_HELD_REFERENCE_REQUIRES_STOPPED_LEASE')
         identity = getattr(self.io, 'pause_request', None) or self.io.captured_pause_request
-        targets = self.health.confirmed_hold(identity)
+        targets = self.health.confirmed_hold(identity, max_age=ROS_FEEDBACK_TIMEOUT_S)
         if targets is None:
-            reason = self.health.hold_failure(identity)
+            reason = self.health.hold_failure(identity, max_age=ROS_FEEDBACK_TIMEOUT_S)
             detail = json.dumps(dict(reason=reason, pause_request=identity,
                 **self.health.observation_diagnostic()), separators=(',', ':'))
             self.node.event('HELD_REFERENCE_REJECTED', detail)
@@ -538,6 +539,8 @@ class PositionSessionDevices:
             self.node.event('STARTUP_HOLD_FAILED', engine.stop_fault or 'STOP_UNCONFIRMED')
             return
         if state == 'waiting':
+            if not self.health.target_feedback_ready():
+                return  # Capture the startup hold point from a fresh measurement.
             self.startup_timing = dict(points=[])
             def mark(phase):
                 self.startup_timing['points'].append(dict(phase=phase,
@@ -546,8 +549,10 @@ class PositionSessionDevices:
                     measurement_stamp=self.health.measurement_stamp))
             mark('acquire_begin')
             try:
+                execution = parameters_for(self, 'execution')
                 lease, epoch = engine.acquire('snowbot_startup_hold',
-                    ('waist', 'left_arm', 'right_arm'), parameters_for(self,'execution')['startup_lease_ttl_s'], now)
+                    ('waist', 'left_arm', 'right_arm'), execution['startup_lease_ttl_s'], now,
+                    velocity_tolerances={'arm_r_joint_7': execution['startup_right_wrist_velocity_tolerance_rad_s']})
             except (Rejected, RuntimeError):
                 return  # Discovery/fresh measured feedback may not yet be ready.
             mark('acquired')
@@ -688,14 +693,19 @@ class PositionSessionDevices:
                 not self.io.profile.limits[n][0] <= target[n] <= self.io.profile.limits[n][1]
                 for n in CONTROL_NAMES):
             raise RuntimeError('SNOWBOT_TARGET_LAYOUT_OR_LIMIT')
-        identity = None
         motion = self.io.source_motion
-        # PAUSE may follow revocation/clearing of the Motion. Retain the last
-        # source identity in this session; stopping never invents ownership.
-        identity = ((motion.command_id, motion.lease_id, motion.epoch, self.io.profile.digest)
-                    if motion is not None else self.source_identity if self.io.sending_hold else None)
+        # A deferred replacement has never reached the servo. Stop the source
+        # that actually owned the most recent packet, including after revocation.
+        identity = self.source_identity if self.io.sending_hold else None
+        if not self.io.sending_hold and motion is not None:
+            identity = (motion.command_id, motion.lease_id, motion.epoch, self.io.profile.digest)
         if identity is None:
             raise RuntimeError('SNOWBOT_SOURCE_IDENTITY_LAYOUT')
+        # Let the executor dispatch its PDO subscription before issuing a target.
+        # PAUSE remains available, and neither an envelope nor a stop footprint
+        # is created for a write deferred inside the ROS delivery budget.
+        if not self.io.sending_hold and not self.health.target_feedback_ready():
+            return False
         if self.takeover_pending is not None and not self.io.sending_hold:
             return  # Retain the latest original Motion in IO; no identity/TTL renewal.
         metadata = self.envelopes.command(self.io.source_motion, pause=self.io.sending_hold)

@@ -25,7 +25,7 @@ def temporary_capture_refusal(code, accepted_commands):
         proof = json.loads(code[len(prefix):])
     except (ValueError, TypeError):
         return False
-    return (isinstance(proof, dict) and proof.get('reason') == 'FEEDBACK_NOT_STATIONARY' and
+    return (isinstance(proof, dict) and proof.get('reason') in ('FEEDBACK_NOT_STATIONARY','BIMANUAL_START_INPUT_TIMEOUT') and
             bool(proof.get('instance_id')) and bool(proof.get('profile_hash')) and
             type(proof.get('epoch')) is int and proof['epoch'] >= 0)
 
@@ -254,6 +254,17 @@ class PicoControl:
         if (acquiring or idle_reconnect) and any(not f.valid for f in pair):
             if not idle_reconnect or not any(f.stop for f in pair):
                 return  # Wait for tracking before adopting the new input.
+        if (self.phase in ('standby','tool_standby') and not self.pending and self.rest(now)
+                and left.source_id==right.source_id==self.source and left.seq==right.seq
+                and any(not f.valid for f in pair) and self.frames
+                and all(not f.stop and not f.buttons and not f.init
+                        and f.grip < self.settings['grip_release_threshold']
+                        and f.trigger < self.settings['trigger_release_threshold']
+                        and f.button_edges == old.button_edges and f.clutch_seq == old.clutch_seq
+                        for f,old in zip(pair,self.frames))):
+            # No control edge or motion is pending. The last good pair still
+            # owns the input deadline; losing tracking continuously expires it.
+            return
         try:
             poses=tuple(pose_matrix(f.pose) for f in pair)
         except (ValueError,TypeError):

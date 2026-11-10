@@ -102,9 +102,9 @@ Tracker ready_tracker(){
  assert(t.fresh(tracker_ros,tracker_steady));return t;
 }
 void check_ros_feedback_budget(){
- static_assert(ros_feedback_timeout_ns==40*ms && maximum_target_ttl==400*ms);
- for(const auto delay:{21*ms,39*ms,40*ms,41*ms}){
-  const bool expected=delay<=40*ms;TrackerObservation m;Tracker receipt,progress;
+ static_assert(ros_feedback_timeout_ns==100*ms);
+ for(const auto delay:{21*ms,41*ms,53*ms,92*ms,98*ms,100*ms,101*ms}){
+  const bool expected=delay<=100*ms;TrackerObservation m;Tracker receipt,progress;
   receive_tracker(receipt,m,1,tracker_ros-ms,tracker_steady-ms,delay);
   receive_tracker(receipt,m,2,tracker_ros,tracker_steady,delay);
   assert((receipt.advances==2)==expected && receipt.fresh(tracker_ros,tracker_steady)==expected);
@@ -136,11 +136,12 @@ void check_ros_feedback_budget(){
   assert(!t.fresh(tracker_ros+ms,tracker_steady+ms));
  }
  auto t=ready_tracker();assert(!t.fresh(tracker_ros-1,tracker_steady) && !t.fresh(tracker_ros,tracker_steady-1));
- TrackerObservation m;receive_tracker(t,m,2,tracker_ros+41*ms,tracker_steady+41*ms);
- assert(!t.fresh(tracker_ros+41*ms,tracker_steady+41*ms)); // Duplicate PDO cannot renew progress.
+ TrackerObservation m;receive_tracker(t,m,2,tracker_ros+101*ms,tracker_steady+101*ms);
+ assert(!t.fresh(tracker_ros+101*ms,tracker_steady+101*ms)); // Duplicate PDO cannot renew progress.
  Meta command{1,1,tracker_ros,tracker_ros+400*ms,1};assert(fresh(command,tracker_ros));
- assert(!fresh(command,tracker_ros+400*ms));++command.expires;assert(!fresh(command,tracker_ros));
- std::cout<<"PASS ROS feedback 40ms boundaries; raw PDO 20ms, WKC/Fault/validity/sequence/clocks and command TTL400ms preserved\n";
+ assert(!fresh(command,tracker_ros+400*ms));
+ command.expires=command.stamp+maximum_target_ttl+1;assert(!fresh(command,tracker_ros));
+ std::cout<<"PASS ROS feedback 100ms boundaries; raw PDO 20ms, WKC/Fault/validity/sequence/clocks and source deadline preserved\n";
 }
 } // namespace
 

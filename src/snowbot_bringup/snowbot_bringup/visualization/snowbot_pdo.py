@@ -3,6 +3,7 @@ from collections import Counter, deque
 from collections.abc import Mapping
 import copy
 import math
+from snowbot_hardware.parameters import PDO_MAX_AGE_S, ROS_FEEDBACK_TIMEOUT_S
 
 
 AXES = tuple([*(f'L{i}' for i in range(1, 9)), *(f'R{i}' for i in range(1, 9)),
@@ -85,7 +86,7 @@ def observation_payload(msg):
 
 class PdoMonitor:
     """Diagnostic validity only. This class never grants control readiness."""
-    def __init__(self, max_age=.02):
+    def __init__(self, max_age=ROS_FEEDBACK_TIMEOUT_S):
         self.max_age = max_age
         self.boot = self.sample = None
         self.progress = self.received = None
@@ -164,7 +165,7 @@ class PdoMonitor:
                 stamp, pdo_age = self.measurement_time
                 age = ros_now-stamp + pdo_age
                 result['measurement_age_s'] = age
-                if (not 0 <= pdo_age <= self.max_age or
+                if (not 0 <= pdo_age <= PDO_MAX_AGE_S or
                         not 0 <= ros_now-stamp <= self.max_age or
                         not 0 <= age <= self.max_age):
                     reasons.append('PDO_MEASUREMENT_STALE')

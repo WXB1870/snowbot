@@ -7,6 +7,12 @@ from pathlib import Path
 from functools import lru_cache
 
 
+# ROS callbacks share CPU with other work. The PDO sampler has a separate clock.
+ROS_FEEDBACK_TIMEOUT_S = .100
+TARGET_FEEDBACK_MAX_AGE_S = .040
+PDO_MAX_AGE_S = .020
+
+
 _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
  'solver': ('timeout_s', 'worker_timeout_s', 'startup_timeout_s'),
  'pico': ('remote_input_timeout_s', 'remote_source_timeout_s', 'controller_fps',
@@ -31,6 +37,7 @@ _FIELDS = {'teleop': ('input_max_age_s', 'feedback_max_age_s', 'command_ttl_s'),
  'execution': ('target_stream_brake_lead_s', 'stop_confirmation_window_s',
                'held_reference_velocity_tolerance_rad_s',
                'startup_hold_ttl_s',
+               'startup_right_wrist_velocity_tolerance_rad_s',
                'startup_lease_ttl_s',
                'startup_home_waist_max_velocity_rad_s',
                'prepare_start_velocity_tolerance_rad_s',

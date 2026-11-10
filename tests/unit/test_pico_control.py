@@ -318,6 +318,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
             reason='FEEDBACK_NOT_STATIONARY',instance_id='executor',profile_hash='p',epoch=3))
         for accepted,stop_ok,code in ((0,True,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
                 (0,True,lease_refusal),(1,True,lease_refusal),(0,False,lease_refusal),
+                (0,True,lease_refusal.replace('FEEDBACK_NOT_STATIONARY','BIMANUAL_START_INPUT_TIMEOUT')),
+                (0,False,lease_refusal.replace('FEEDBACK_NOT_STATIONARY','BIMANUAL_START_INPUT_TIMEOUT')),
                 (0,True,lease_refusal.replace('FEEDBACK_NOT_STATIONARY','DEVICE_FAULT')),
                 (0,True,'BIMANUAL_LEASE_NOT_ACQUIRED:FEEDBACK_NOT_STATIONARY'),
                 (1,True,'SNOWBOT_HELD_REFERENCE_NOT_STATIONARY'),
@@ -1586,6 +1588,36 @@ class DualModeTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_untracked_neutral_pose_only_drops_in_settled_standby(self):
+        for case in ('recovers','expires','stop','active','trigger'):
+            with self.subTest(case=case):
+                rig=Rig()
+                core=rig.core
+                previous=core.frames
+                if case=='active':
+                    core.phase='following'
+                left,right=[replace(f,seq=f.seq+1,stamp=rig.now+.01,valid=False,pose=(0.,)*16)
+                            for f in previous]
+                if case=='stop':right=replace(right,stop=True)
+                if case=='trigger':right=replace(right,trigger=1.)
+                core.ingest(left,right,rig.now+.01)
+                if case in ('recovers','expires'):
+                    self.assertIs(core.frames,previous)
+                    self.assertEqual(core.stamp,rig.now)
+                    self.assertEqual(core.drain(),[])
+                    if case=='recovers':
+                        rig.step()
+                        self.assertGreater(core.stamp,left.stamp)
+                        self.assertEqual(core.phase,'standby')
+                    else:
+                        now=rig.now+core.max_age+.01
+                        core.update_feedback(PicoFeedback(now,True),now)
+                        core.tick(now)
+                        self.assertEqual(core.reason,'PICO_INPUT_TIMEOUT')
+                else:
+                    self.assertEqual(core.phase,'locked')
+                    self.assertEqual([i.operation for i in core.drain()],['stop'])
+
     def test_b_explains_unmet_conditions_and_success_means_standby_only(self):
         from snowbot_teleop.control import loading_guide
         r=Rig();r.core.lock('BIMANUAL_WORKER_TIMEOUT',r.now);r.core.drain();r.complete()

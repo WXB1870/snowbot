@@ -22,10 +22,11 @@ class ReferenceDeliveryBudgetTests(unittest.TestCase):
         io = PositionSessionIO.__new__(PositionSessionIO)
         io.now = lambda: 10.
         io.targets, io.stop_targets = {'arm_l_joint_1': .1}, {}
-        for age in (.021408, .039):
+        io.reference_diagnostic, io.reference_unavailable_reason = None, 'no_sample'
+        for age in (.021408, .039, .053, .098):
             io.servo_reference = (10.-age, {'arm_l_joint_1': .1}, {}, {})
             self.assertEqual(io.sampled_reference()[1], io.targets)
-        for age in (.040001, -.001):
+        for age in (.100001, -.001):
             io.servo_reference = (10.-age, {'arm_l_joint_1': .1}, {}, {})
             self.assertEqual(io.sampled_reference()[1], {})
         io.servo_reference = None
@@ -98,24 +99,24 @@ class SessionSensorBudgetTests(unittest.TestCase):
         self.assertIs(health.require_observation(), first)
         self.assertEqual(records, [])
 
-        now = 10.041
+        now = 10.101
         for _ in range(2):
             with self.assertRaisesRegex(RuntimeError, '^SNOWBOT_PDO_STALE$'):
                 health.require_observation()
         newer = copy.deepcopy(first)
         newer.pdo_sample = 48146
         newer.header.stamp.nanosec = 30_000_000
-        now = 10.075
+        now = 10.135
         with self.assertRaisesRegex(ValueError, '^SNOWBOT_PDO_STALE$'):
-            health.observe(newer, received_ros=10.070)
-        now = 10.080
+            health.observe(newer, received_ros=10.130)
+        now = 10.140
         with self.assertRaisesRegex(RuntimeError, '^SNOWBOT_PDO_STALE$'):
             health.require_observation()
         self.assertIs(health.observation, first)
         self.assertEqual([(r['stage'], r['pdo_sample'], r['callback_received_ros'], r['checked_ros'])
-                          for r in records], [('read_cached', 48116, 10.003, 10.041),
-                                              ('receive', 48146, 10.070, 10.075),
-                                              ('read_rejected', 48146, 10.070, 10.080)])
+                          for r in records], [('read_cached', 48116, 10.003, 10.101),
+                                              ('receive', 48146, 10.130, 10.135),
+                                              ('read_rejected', 48146, 10.130, 10.140)])
         for record, measured in zip(records, (9.999, 10.029, 10.029)):
             self.assertAlmostEqual(record['measurement_stamp_ros'], measured)
         newer.header.stamp.nanosec = 80_000_000
@@ -197,10 +198,11 @@ class PdoTests(unittest.TestCase):
         monitor = PdoMonitor()
         self.assertTrue(monitor.receive(frame(),10.001,1.)['pdo_valid'])
         self.assertTrue(monitor.receive(frame(stamp=10.01),10.011,1.01)['pdo_valid'])
-        frozen = monitor.receive(frame(stamp=10.03),10.031,1.03)
+        self.assertTrue(monitor.receive(frame(stamp=10.095),10.096,1.095)['pdo_valid'])
+        frozen = monitor.receive(frame(stamp=10.101),10.102,1.101)
         self.assertFalse(frozen['pdo_valid'])
         self.assertIn('PDO_NOT_ADVANCING',frozen['reasons'])
-        self.assertTrue(monitor.receive(frame(2,10.04),10.041,1.04)['pdo_valid'])
+        self.assertTrue(monitor.receive(frame(2,10.11),10.111,1.11)['pdo_valid'])
 
     def test_partial_wkc_invalid_mask_and_old_measurement_cannot_look_healthy(self):
         monitor = PdoMonitor()
@@ -215,13 +217,15 @@ class PdoTests(unittest.TestCase):
 
     def test_combined_age_and_absent_messages_become_stale(self):
         monitor = PdoMonitor()
-        result = monitor.receive(frame(stamp=10.,pdo_age=.015),10.01,1.)
+        result = monitor.receive(frame(stamp=10.,pdo_age=.015),10.086,1.)
+        self.assertIn('PDO_MEASUREMENT_STALE',result['reasons'])
+        result = monitor.receive(frame(stamp=10.09,pdo_age=.020001),10.091,1.09)
         self.assertIn('PDO_MEASUREMENT_STALE',result['reasons'])
         value = frame(2,10.1)
         monitor.receive(value,10.101,1.1)
         value['stamp'] = value['pdo_age'] = -100.
         self.assertTrue(monitor.poll(10.102,1.101)['pdo_valid'])
-        result = monitor.poll(10.14,1.14)
+        result = monitor.poll(10.21,1.21)
         self.assertIn('PDO_OBSERVER_STALE',result['reasons'])
         self.assertIn('PDO_NOT_ADVANCING',result['reasons'])
         self.assertFalse(result['pdo_valid'])

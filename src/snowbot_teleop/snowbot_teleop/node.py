@@ -272,14 +272,15 @@ class PicoNode(RuntimeNode):
     def feedback(self):
         try:
             s,q=self.reading()
+            gripper_readings=None
             if self.position_ops and getattr(self,'independent_grippers',False):
-                for side in ('left','right'):self.position_ops.reading(side)
-            modes=list(self.position_ops.modes(require_stationary=self.control.phase!='following')) if self.position_ops else []
+                gripper_readings={side:self.position_ops.reading(side,for_arms=True) for side in ('left','right')}
+            modes=list(self.position_ops.modes(require_stationary=self.control.phase!='following',readings=gripper_readings)) if self.position_ops else []
             for side in (() if self.position_ops else ('left','right')):
                 cfg=self.cfg['grippers'][side];value=q[cfg['joint']]
                 modes.append(next((m for m in ('closed','open','virtual') if abs(value-cfg[m])<.003),'unknown'))
             stopped=((self.handoff_complete or not s.lease_active) and s.state not in ('RUNNING','STOPPING') and not s.reference.name and
-                     joints_at_rest(s.joints,self.names,self.profile.feedback_tolerances.get('joint_velocity',.01)) and (not self.position_ops or self.position_ops.stopped()))
+                     joints_at_rest(s.joints,self.names,self.profile.feedback_tolerances.get('joint_velocity',.01)) and (not self.position_ops or self.position_ops.stopped(gripper_readings)))
             if self.base and self.base.writable and self.base.cfg['require_feedback']:
                 clock = time.monotonic()
                 if not self.base.core.healthy(self.now(), clock):

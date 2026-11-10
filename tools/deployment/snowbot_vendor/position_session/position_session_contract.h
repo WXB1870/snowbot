@@ -10,7 +10,7 @@ constexpr int64_t maximum_target_ttl=1500000000;
 // A target-stream PAUSE is a separate stop command, never a motion renewal.
 constexpr int64_t maximum_target_pause_ttl=2000000000;
 // ROS delivery and progress budget; the raw PDO age limit remains 20 ms.
-constexpr int64_t ros_feedback_timeout_ns=40000000;
+constexpr int64_t ros_feedback_timeout_ns=100000000;
 // Independent position contract: L1..7, R1..7, waist1..2, radians.
 constexpr unsigned joint_count=16;
 constexpr uint32_t controlled_mask=0xc7f7f;

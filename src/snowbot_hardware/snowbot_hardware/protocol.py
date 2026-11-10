@@ -166,7 +166,7 @@ class SnowbotIO:
             raise RuntimeError('SNOWBOT_JOINT_LIMIT')
         self.sending_hold = hold
         try:
-            self.send(groups, target)
+            return self.send(groups, target)
         finally:
             self.sending_hold = False
 
@@ -181,7 +181,9 @@ class SnowbotIO:
         packet = dict(target)
         may_have_sent = True
         try:
-            self._send(packet)
+            if self._send(packet) is False:
+                may_have_sent = False
+                return
         except CommandNotSent:
             may_have_sent = False
             raise

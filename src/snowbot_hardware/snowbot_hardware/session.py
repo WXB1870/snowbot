@@ -4,15 +4,13 @@ import math
 import time
 
 from .protocol import GROUPS, SLOT_MASKS
+from .parameters import PDO_MAX_AGE_S, ROS_FEEDBACK_TIMEOUT_S, TARGET_FEEDBACK_MAX_AGE_S
 
 ARMS = frozenset(('left_arm', 'right_arm'))
 CONTROL_GROUPS = ARMS | {'waist'}
 # Independent wire order; QP/resource order is mapped by joint name.
 CONTROL_NAMES = (*GROUPS['left_arm'], *GROUPS['right_arm'], *GROUPS['waist'])
 CONTROL_MASK = sum(SLOT_MASKS[g] for g in CONTROL_GROUPS)
-# ROS delivery can lag the local PDO sampler. Keep these budgets independent.
-ROS_FEEDBACK_TIMEOUT_S = .04
-PDO_MAX_AGE_S = .02
 SENSOR_MAX_AGE_S = .1
 TARGET_STREAM_MAX_TTL_S = 1.5
 SLOTS = [*(f'arm_l_joint_{i}' for i in range(1, 9)),
@@ -206,22 +204,22 @@ class SessionHealth:
         self.received[layer] = self.steady()
         return True
 
-    def confirmed_hold(self, request):
+    def confirmed_hold(self, request, *, max_age=TARGET_FEEDBACK_MAX_AGE_S):
         """Return the adopted fixed reference, never physical-stop confirmation.
 
         A trajectory impedance PAUSE adopts a fixed nominal reference and keeps
         its controller. Executor confirms measured rest separately from arrival.
         """
-        if self.hold_failure(request):
+        if self.hold_failure(request, max_age=max_age):
             return None
         return dict(zip(CONTROL_NAMES, self.observation.hold_position))
 
-    def hold_failure(self, request):
+    def hold_failure(self, request, *, max_age=TARGET_FEEDBACK_MAX_AGE_S):
         """Explain the same ACK gate without changing state or publishing."""
         if request is None:
             return 'PAUSE_REQUEST_MISSING'
         try:
-            self.require(CONTROL_GROUPS, acquiring=True)
+            self.require(CONTROL_GROUPS, acquiring=True, max_age=max_age)
         except RuntimeError as exc:
             return str(exc)
         obs = self.observation
@@ -252,7 +250,7 @@ class SessionHealth:
             return 'HOLD_POSITION_INVALID'
         return ''
 
-    def require_observation(self):
+    def require_observation(self, max_age=ROS_FEEDBACK_TIMEOUT_S):
         """Use the decoded PDO snapshot; only its freshness changes between reads."""
         if self.invalid:
             if self.rejected_stale_observation is not None and not self.stale_read_reported:
@@ -260,7 +258,7 @@ class SessionHealth:
                 self._report_stale('read_rejected', self.rejected_stale_observation, self.now())
             raise RuntimeError(self.invalid)
         checked_steady = self.steady()
-        if self.progress is None or not 0 <= checked_steady-self.progress <= ROS_FEEDBACK_TIMEOUT_S:
+        if self.progress is None or not 0 <= checked_steady-self.progress <= max_age:
             if self.on_stale is not None and not self.progress_gap_reported:
                 self.progress_gap_reported = True
                 self.on_stale(dict(code='SNOWBOT_PDO_NOT_ADVANCING', stage='read_progress',
@@ -272,15 +270,19 @@ class SessionHealth:
         obs = self.observation
         checked_ros = self.now()
         if not (obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9 <= checked_ros <=
-                self.measurement_stamp+ROS_FEEDBACK_TIMEOUT_S):
+                self.measurement_stamp+max_age):
             if not self.stale_read_reported:
                 self.stale_read_reported = True
                 self._report_stale('read_cached', obs, checked_ros)
             raise RuntimeError('SNOWBOT_PDO_STALE')
         return obs
 
-    def require(self, groups, *, acquiring=False):
-        obs = self.require_observation()
+    def target_feedback_ready(self):
+        return (self.progress is not None and self.steady() <= self.progress + TARGET_FEEDBACK_MAX_AGE_S
+                and self.now() <= self.measurement_stamp + TARGET_FEEDBACK_MAX_AGE_S)
+
+    def require(self, groups, *, acquiring=False, max_age=ROS_FEEDBACK_TIMEOUT_S):
+        obs = self.require_observation(max_age)
         if any(status & 8 for i, status in enumerate(obs.status) if CONTROL_MASK & (1 << i)):
             raise RuntimeError('SNOWBOT_DRIVE_FAULT')
         if obs.valid_mask & CONTROL_MASK != CONTROL_MASK:

@@ -53,6 +53,7 @@
     "stop_confirmation_window_s": 0.1,
     "held_reference_velocity_tolerance_rad_s": 0.005,
     "startup_hold_ttl_s": 0.4,
+    "startup_right_wrist_velocity_tolerance_rad_s": 0.015,
     "startup_lease_ttl_s": 2.0,
     "startup_home_waist_max_velocity_rad_s": 0.05,
     "prepare_start_velocity_tolerance_rad_s": 0.005,

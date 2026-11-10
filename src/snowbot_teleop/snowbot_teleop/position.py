@@ -38,7 +38,7 @@ class PositionOperations:
             self.states[msg.side] = msg
             self.received_ns[msg.side] = time.monotonic_ns()
 
-    def reading(self, side, *, recovery=False):
+    def reading(self, side, *, recovery=False, for_arms=False):
         n = self.node
         if self.stop_unconfirmed and not recovery:
             raise RuntimeError('PICO_GRIPPER_STOP_UNCONFIRMED')
@@ -68,8 +68,12 @@ class PositionOperations:
             reason = None
         if reason is not None:
             checked = feedback_checked if feedback_checked is not None else state_checked
-            self.log_rejection(side, msg, reason, checked if checked is not None else n.now(),
-                               state_checked, recovery)
+            checked = checked if checked is not None else n.now()
+            if (for_arms and reason in ('feedback_invalid','state_age_out_of_range','feedback_age_out_of_range')
+                    and seconds(msg.stamp) <= checked and seconds(msg.feedback_stamp) <= checked
+                    and self.unused_trigger(side, msg)):
+                return None
+            self.log_rejection(side, msg, reason, checked, state_checked, recovery)
             raise RuntimeError('PICO_GRIPPER_FEEDBACK_OR_CALIBRATION_REQUIRED:'+side)
         self.last_rejection.pop(side, None)
         if msg.state == 'FAULT' and not (recovery and msg.code=='GRIPPER_STOP_UNCONFIRMED:HOLD_TIMEOUT'):
@@ -139,13 +143,27 @@ class PositionOperations:
         self.acquire_future=None
         self.release_pending=self.stop_unconfirmed=False
 
-    def modes(self, *, require_stationary=True):
+    def unused_trigger(self, side, msg):
+        n = self.node
+        c = n.control
+        frame = n.frames.get(side)
+        return (msg.state == 'IDLE' and msg.code == 'NO_COMMAND' and not msg.lease_active
+                and c.teleop_mode == 'independent_arms' and c.load == 'empty' and c.load_source != 'teleop_mode'
+                and c.phase in ('standby','engaging','following') and (not c.pending or c.pending.operation == 'follow')
+                and not n.stop_request and not self.lease and self.acquire_future is None and not self.release_pending
+                and frame is not None and frame.source_id == c.source and frame.valid and not frame.stop
+                and frame.trigger < c.settings['trigger_release_threshold'] and not any(frame.button_edges[6:8]))
+
+    def modes(self, *, require_stationary=True, readings=None):
         if not self.config['calibrated']:
             return ('unknown', 'unknown')  # Manual endpoints do not confirm a tool grasp.
         result = []
         for side in SIDES:
             try:
-                msg = self.reading(side)
+                msg = self.reading(side) if readings is None else readings[side]
+                if msg is None:
+                    result.append('unknown')
+                    continue
                 # During loaded following, contact can change velocity while
                 # the opening stays inside its calibrated band. Switching and
                 # stop completion still require stationary measured feedback.
@@ -169,7 +187,7 @@ class PositionOperations:
             raise RuntimeError('PICO_AXIAL_GRASP_UNAVAILABLE')
         return {JOINTS['right']:self.config['grippers']['right']['virtual' if virtual else 'closed']}
 
-    def stopped(self):
+    def stopped(self, readings=None):
         if (self.stop_unconfirmed or self.acquire_future is not None or self.release_pending or
                 self.lease is not None):
             return False
@@ -177,7 +195,8 @@ class PositionOperations:
             if (self.config.get('independent_trigger_control',False) and
                     self.node.control.phase!='locked'):
                 # Arm mode transitions do not wait for independent finger travel.
-                return all(self.reading(side).state!='FAULT' for side in SIDES)
+                return (all(msg is None or msg.state!='FAULT' for msg in readings.values())
+                        if readings is not None else all(self.reading(side).state!='FAULT' for side in SIDES))
             return all(s.state not in ('MOVING','STOPPING','FAULT') and
                 abs(s.measured_velocity) <= self.config['velocity_tolerance']
                 for s in (self.reading(side) for side in SIDES))

@@ -6,7 +6,7 @@ from pathlib import Path
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import qos_profile_sensor_data
 from snowbot_hardware.gripper import GripperController, SIDES, GROUPS, JOINTS, MASKS, native_command
-from snowbot_hardware.parameters import load_mode_config, mode_config_digest
+from snowbot_hardware.parameters import TARGET_FEEDBACK_MAX_AGE_S, load_mode_config, mode_config_digest
 from bindu_contracts.teleoperation import VRFrame
 from bindu_interfaces.msg import GripperState, VRInput
 from bindu_interfaces.srv import GripperControl, Lease
@@ -52,7 +52,7 @@ class SnowbotGrippers:
         engine = getattr(self.node, 'engine', None)
         if getattr(self.node, 'gripper_only', False):
             from .session import CONTROL_NAMES, CONTROL_MASK
-            obs = self.devices.health.require_observation()
+            obs = self.devices.health.require_observation(TARGET_FEEDBACK_MAX_AGE_S)
             velocities = self.devices.io.last_feedback.joint_velocities
             return bool(engine and not engine.stop_fault and not engine.lease_id and
                 not engine.active and not engine.stopping and obs.valid_mask & CONTROL_MASK == CONTROL_MASK and
@@ -66,7 +66,7 @@ class SnowbotGrippers:
 
     def health(self):
         sides = self.core.feedback_sides()
-        obs = self.devices.health.require_observation()
+        obs = self.devices.health.require_observation(TARGET_FEEDBACK_MAX_AGE_S)
         for side, slot in (('left', 7), ('right', 15)):
             if side not in sides:
                 continue
