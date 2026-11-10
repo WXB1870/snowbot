@@ -102,6 +102,9 @@ def new_fault(log):
             wkc = re.search(rb'\bWKC=(-?\d+)/(\d+)\b', line)
             if wkc:
                 fault['wkc'], fault['expected_wkc'] = map(int, wkc.groups())
+            index = re.search(rb'\btx_index=(-?\d+)\b', line)
+            if index:
+                fault['tx_index'] = int(index[1])
             return fault
 
 
@@ -112,6 +115,8 @@ def fault_frames(frames, metadata):
         return None
     if 'recv_begin_ns' not in fault or 'recv_end_ns' not in fault:
         return {'status': 'missing_receive_call_timestamps'}
+    if fault.get('tx_index') == -1:
+        return {'status': 'no_unique_processdata_index'}
     send, end = fault['send_ns'], fault['recv_end_ns']
     clocks = metadata['clocks']
     before = [pair for pair in clocks if pair[0][2] <= send]
@@ -128,7 +133,7 @@ def fault_frames(frames, metadata):
 
     transmit = []
     for i, row in enumerate(frames):
-        if row[1] != 'TX':
+        if row[1] != 'TX' or ('tx_index' in fault and row[3] != fault['tx_index']):
             continue
         bounds = aligned(row[7], 0)
         if bounds and bounds[0] <= fault['recv_begin_ns'] and bounds[1] >= send:
@@ -158,15 +163,18 @@ def collect(sock, log, phc_clock, stopped):
     reported_rx = set()
     fault = stop_at = None
     next_poll = next_clock = 0
-    while not stopped():
+    while True:
         now = time.monotonic_ns()
         if now >= next_clock:
             clocks.append((clock_pair(time.CLOCK_REALTIME), clock_pair(phc_clock) if phc_clock is not None else None))
             next_clock = now + 250_000_000
         if not fault and now >= next_poll:
+            stopping = stopped()
             fault = new_fault(log)
             if fault:
                 stop_at = now + 100_000_000
+            elif stopping:
+                break
             next_poll = now + 20_000_000
         if stop_at and now >= stop_at:
             break
@@ -217,6 +225,7 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, required=True, help='new directory for this window')
     parser.add_argument('--enable-hardware-rx', action='store_true',
                         help='temporarily request all-frame RX hardware timestamps and restore the prior filter')
+    parser.add_argument('--service-pid', type=int, help='automatic base capture, save only the first fault')
     args = parser.parse_args(argv)
     if sys.platform != 'linux' or struct.calcsize('P') != 8:
         parser.error('capture requires 64-bit Linux')
@@ -230,9 +239,15 @@ def main(argv=None):
         phc = next((Path('/sys/class/net')/args.interface/'device/ptp').glob('ptp[0-9]*'), None)
         phc_clock = None
         if phc:
-            fd = os.open('/dev/'+phc.name, os.O_RDONLY)
-            stack.callback(os.close, fd)
-            phc_clock = ((~fd) << 3) | 3  # Linux FD_TO_CLOCKID
+            try:
+                fd = os.open('/dev/'+phc.name, os.O_RDONLY)
+            except OSError as exc:
+                if not args.service_pid:
+                    raise
+                print('ECAT_CAPTURE_PHC_UNAVAILABLE', exc, flush=True)
+            else:
+                stack.callback(os.close, fd)
+                phc_clock = ((~fd) << 3) | 3  # Linux FD_TO_CLOCKID
         if args.enable_hardware_rx and phc_clock is None:
             parser.error('no interface PHC found for alignment with PDO CLOCK_MONOTONIC')
         # Protocol zero keeps the observer inactive until the filtered socket is bound.
@@ -242,15 +257,26 @@ def main(argv=None):
         sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPING, (1<<2)|(1<<3)|(1<<4)|(1<<6))
         if args.output.exists():
             parser.error('output directory already exists')
-        stack.enter_context(rx_hardware_filter(sock, args.interface, args.enable_hardware_rx))
+        try:
+            stack.enter_context(rx_hardware_filter(sock, args.interface,
+                                args.enable_hardware_rx or (args.service_pid and phc_clock is not None)))
+        except (OSError, RuntimeError) as exc:
+            if not args.service_pid or args.enable_hardware_rx:
+                raise
+            print('ECAT_CAPTURE_SOFTWARE_TIMESTAMPS', exc, flush=True)
         netdev = Path('/sys/class/net')/args.interface
         counters_before = interface_counters(netdev)
-        log.seek(0, os.SEEK_END)
+        if args.service_pid is None:
+            log.seek(0, os.SEEK_END)
         sock.bind((args.interface, ETH_P_ALL))
-        args.output.mkdir(parents=True, exist_ok=False)
         print('ECAT_CAPTURE_READY', args.interface, str(args.servo_log), flush=True)
-        frames, metadata = collect(sock, log, phc_clock, stopped.is_set)
+        parent = Path('/proc')/str(args.service_pid) if args.service_pid else None
+        frames, metadata = collect(sock, log, phc_clock,
+                                   lambda: stopped.is_set() or (parent is not None and not parent.exists()))
+        if parent is not None and not metadata['fault']:
+            return
         metadata['interface_counters'] = dict(start=counters_before, end=interface_counters(netdev))
+    args.output.mkdir(parents=True, exist_ok=False)
     with (args.output/'frames.csv').open('x', newline='') as out:
         writer = csv.writer(out)
         writer.writerow(FRAME_FIELDS)

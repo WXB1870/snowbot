@@ -675,7 +675,7 @@ class DeploymentEntryTests(unittest.TestCase):
         self.assertIsNone(capture.new_fault(log))
         position = log.tell()
         log.seek(0, 2)
-        log.write(b' WKC=-1/67\n')
+        log.write(b' WKC=-1/67 tx_index=4\n')
         log.seek(position)
         fault = capture.new_fault(log)
         self.assertEqual((fault['sequence'], fault['wkc'], fault['expected_wkc']), (832850, -1, 67))
@@ -702,6 +702,10 @@ class DeploymentEntryTests(unittest.TestCase):
         self.assertEqual(result['matching_rx'], [dict(record=2, first_wkc=67,
             hw_mono_estimate_ns=[start+119_992,start+120_008],
             sw_mono_estimate_ns=[end+39_995,end+40_005])])
+        self.assertEqual(fault['tx_index'], 4)
+        other = record('TX', 7, start+1500)
+        self.assertEqual(capture.fault_frames([other, tx, rx], info)['tx_record'], 1)
+        self.assertEqual(capture.fault_frames([other, rx], info)['candidate_count'], 0)
         self.assertEqual(capture.fault_frames([tx, tx], info)['status'], 'ambiguous_tx')
         self.assertEqual(capture.fault_frames([tx], info)['matching_rx'], [])
         sw_only = capture.fault_frames([tx, record('RX', 4, end)], info)

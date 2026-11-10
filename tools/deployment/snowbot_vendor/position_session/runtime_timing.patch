@@ -318,7 +318,7 @@
      if (pdo_timing_initialized_) {
          const auto period_us = static_cast<uint64_t>(
              std::chrono::duration_cast<std::chrono::microseconds>(
-@@ -901,9 +907,27 @@
+@@ -901,9 +907,31 @@
          }
      }
      csp_snapshot.send_attempt_ns=position_session::steady_ns();
@@ -326,6 +326,9 @@
 +    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&io_cpu_start);
 +    const auto send_start=std::chrono::steady_clock::now();
      ec_send_processdata();
++    // Capture the unique SOEM datagram index before receive clears its stack.
++    const auto& indices=*ecx_context.idxstack;
++    const int tx_index=(indices.pushed==indices.pulled+1) ? indices.idx[indices.pulled] : -1;
 +    const auto send_end=std::chrono::steady_clock::now();
 -    wkc_ = ec_receive_processdata(EC_CYCLETIME_US);
 +    wkc_ = ecx_receive_processdata_single_reader(&ecx_context, EC_CYCLETIME_US);
@@ -337,6 +340,7 @@
 +    trace.send_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(send_start.time_since_epoch()).count();
 +    trace.recv_begin_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(send_end.time_since_epoch()).count();
 +    trace.receive_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(io_end.time_since_epoch()).count();
++    trace.tx_index=tx_index;
 +    trace.period_ns=pdo_period_ns;
 +    trace.send_elapsed_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(send_end-send_start).count();
 +    trace.receive_elapsed_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(io_end-send_end).count();
@@ -357,12 +361,12 @@
 +            (unsigned long long)trace.trigger_sequence,trace.count,position_session::PdoFaultTrace::post_cycles);
 +        for(unsigned i=0;i<trace.count;++i){
 +            const auto& s=trace.cycles[(trace.next+position_session::PdoFaultTrace::capacity-trace.count+i)%position_session::PdoFaultTrace::capacity];
-+            printf("[ECAT-FAULT-CYCLE] tid=%d sequence=%llu first_bad=%u wake_ns=%lld deadline_ns=%lld wake_late_us=%.3f pre_io_us=%.3f period_us=%.3f send_ns=%lld receive_ns=%lld recv_begin_ns=%lld recv_end_ns=%lld send_us=%.3f receive_us=%.3f io_cpu_us=%.3f dc_time_ns=%lld dc_adjust_ns=%lld sleep_rc=%d WKC=%d/%d\n",
++            printf("[ECAT-FAULT-CYCLE] tid=%d sequence=%llu first_bad=%u wake_ns=%lld deadline_ns=%lld wake_late_us=%.3f pre_io_us=%.3f period_us=%.3f send_ns=%lld receive_ns=%lld recv_begin_ns=%lld recv_end_ns=%lld send_us=%.3f receive_us=%.3f io_cpu_us=%.3f dc_time_ns=%lld dc_adjust_ns=%lld sleep_rc=%d WKC=%d/%d tx_index=%d\n",
 +                s.tid,(unsigned long long)s.sequence,unsigned(s.sequence==trace.trigger_sequence),
 +                (long long)s.wake_ns,(long long)s.deadline_ns,
 +                s.deadline_ns ? (s.wake_ns-s.deadline_ns)*1e-3 : 0.,s.wake_ns ? (s.send_ns-s.wake_ns)*1e-3 : 0.,s.period_ns*1e-3,
 +                (long long)s.send_ns,(long long)s.receive_ns,(long long)s.recv_begin_ns,(long long)s.receive_ns,s.send_elapsed_ns*1e-3,s.receive_elapsed_ns*1e-3,s.io_cpu_ns*1e-3,
-+                (long long)s.dc_time_ns,(long long)s.dc_adjust_ns,s.sleep_result,s.wkc,s.expected_wkc);
++                (long long)s.dc_time_ns,(long long)s.dc_adjust_ns,s.sleep_result,s.wkc,s.expected_wkc,s.tx_index);
 +        }
 +    }
      const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(

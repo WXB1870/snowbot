@@ -18,7 +18,9 @@ python3 -m tools.deployment.deploy prepare
 
 Orin 首次选择 `python3 -m tools.deployment.deploy prepare --with-impedance --machine orin`；已有部署可在下一次 `build` 时指定 `--machine orin`。选择保存在生成的部署元数据中，后续构建和 `run_robot.sh` 自动复用。机器配方 [orin.json](src/snowbot_bringup/config/deployments/machines/orin.json) 固定网卡、默认 ROS 域 88、阻抗模式、VR 端口及 TLS 路径引用；证书与私钥内容留在机器上。显式设置的 `ROS_DOMAIN_ID` 仍优先。不选机器配方时沿用原现场配置。
 
-Orin 现场需要定位单周期 WKC 超时，可在当轮 `servo.log` 出现后，另开终端运行独立的被动记录器。将下面的日志路径替换为当轮文件，输出路径须尚未存在。
+现场人员启动 base 后，会同时启动独立的被动 EtherCAT 记录器。首个坏周期触发保存到当轮 `startup-logs/services-*/ethercat/{frames.csv,window.json}`，健康退出只留下采集状态日志。记录器按主站发送时间及 SOEM 索引关联收发帧；有 PHC 时尝试获取硬件接收时间戳，条件不足时保留软件时间戳和缺失标记。`servo.log` 中的 `CURVE_REJECT_INPUT` 保留每个伺服进程前 8 次 `INVALID_PREPARED_CURVE` 的原始目标、轨迹段、种子状态、历史趋势和限值。
+
+单独手工采集时，可在当轮 `servo.log` 出现后另开终端运行记录器。将下面的日志路径替换为当轮文件，输出路径须尚未存在。
 
 ```bash
 sudo python3 -m tools.deployment.capture_ethercat --interface enP5p5s0 \

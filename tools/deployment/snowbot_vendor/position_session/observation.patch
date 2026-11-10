@@ -156,7 +156,7 @@
 + int64_t wake_ns=0,deadline_ns=0,send_ns=0,recv_begin_ns=0,receive_ns=0;
 + int64_t period_ns=0,send_elapsed_ns=0,receive_elapsed_ns=0,io_cpu_ns=0;
 + int64_t dc_time_ns=0,dc_adjust_ns=0;
-+ int wkc=0,expected_wkc=0,sleep_result=0,tid=0;
++ int wkc=0,expected_wkc=0,sleep_result=0,tid=0,tx_index=-1;
 +};
 +class PdoFaultTrace {
 +public:

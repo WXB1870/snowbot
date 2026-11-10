@@ -1,10 +1,45 @@
 --- a/servo_control/src/ros_controller/rosLoop.cpp
 +++ b/servo_control/src/ros_controller/rosLoop.cpp
-@@ -149,7 +149,18 @@
+@@ -8,3 +8,5 @@
+ #include <cstddef>
++#include <cstdio>
++#include <nlohmann/json.hpp>
+ #include <cstdlib>
+ #include <cmath>    // std::abs
+@@ -149,7 +151,47 @@
          const auto endpoint=position_connection::check_publisher(*this,position_feedback_sub_,"/servo_node","snowbot_ctl_msgs/msg/PositionObservation");
          if(!endpoint.ready())throw std::invalid_argument(endpoint.reason);
          position_session::FixedText publisher;if(!publisher.assign(endpoint.publisher_gid)||!(publisher==result.context.publisher))throw std::invalid_argument("feedback_publisher_changed");
-+    },[this](const auto& result){
++    },[this, curve_records=0u](const auto& result) mutable {
++        // Admission worker only. Never publish large replay inputs over ROS.
++        if(result.error=="INVALID_PREPARED_CURVE" && curve_records<8){
++            using nlohmann::json;
++            const auto& m=result.packet->meta;
++            const auto& w=result.packet->trajectory;
++            const auto& s=result.snapshot;
++            const auto& t=position_trajectory_.tuning();
++            const json record={
++                {"session",m.session},{"sequence",m.sequence},{"operation",m.operation},
++                {"source_stamp_ns",m.source_stamp_ns},{"expires_at_ns",m.expires_at_ns},
++                {"source_command_id",m.source_command_id},{"version",w.version},{"segment_id",w.segment_id},
++                {"effective_at_ns",w.effective_at_ns},{"goal",result.command.target},
++                {"max_velocity",w.max_velocity},{"max_acceleration",w.max_acceleration},{"max_jerk",w.max_jerk},
++                {"piece_start",w.piece_start},{"duration",w.duration},{"source_duration",w.source_duration},
++                {"source_elapsed",w.source_elapsed},{"control_count",w.control_count},{"controls",w.controls},
++                {"snapshot",{{"q",s.q},{"v",s.v},{"a",s.a},{"effective_ros",s.effective_ros},
++                    {"effective_steady",s.effective_steady},{"version",s.version},{"valid",s.valid},
++                    {"inner_reference",s.inner_reference},{"held_takeover",s.held_takeover}}},
++                {"trend",{{"goal",s.trend.goal},{"velocity",s.trend.velocity},{"grasp",s.trend.grasp},
++                    {"stamp",s.trend.stamp},{"session",s.trend.session},{"rigid",s.trend.rigid}}},
++                {"tuning",{{"separate_waist",t.separate_waist},{"trend_min_interval_s",t.trend_min_interval_s},
++                    {"trend_max_interval_s",t.trend_max_interval_s},{"trend_filter_s",t.trend_filter_s},
++                    {"trend_velocity_fraction",t.trend_velocity_fraction}}},
++                {"lower",position_session::lower},{"upper",position_session::upper},{"arm_margin",SNOWBOT_ARM_REFERENCE_MARGIN},
++                {"model_sha256",prediction_model::source_sha256},
++                {"servo_limits",{trajectory_max_velocity_,trajectory_max_acceleration_,trajectory_max_jerk_}}};
++            std::fprintf(stderr,"[CURVE_REJECT_INPUT] %s\n",record.dump().c_str());
++            ++curve_records;
++        }
 +        if(result.command.derived || result.packet->trajectory.version!=3)return;
 +        position_session::PredictionTrace trace;if(result.prepared)trace=result.prepared->prediction;
 +        RCLCPP_INFO(this->get_logger(),"TARGET_PREDICTION session=%llu sequence=%llu recipe=3 prepared=%d accepted=%d gain=%.3f prepare_us=%.3f effective_ns=%lld reason=%s error=%s",

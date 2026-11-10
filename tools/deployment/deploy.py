@@ -591,10 +591,16 @@ def popen_group(command, **kwargs):
         *command], **kwargs)
 
 
-def copy_service_output(name, child, writer):
+def copy_service_output(name, child, writer, fault_log=None):
     try:
         for line in child.stdout:
             writer.write_text(name, f'[{name}] '+line)
+            if fault_log is not None and '[ECAT-FAULT-CYCLE]' in line and ' first_bad=1 ' in line:
+                try:
+                    fault_log.write_text(line)
+                except OSError as exc:
+                    print(f'ECAT_CAPTURE_TRIGGER_FAILED {exc}', file=sys.stderr, flush=True)
+                fault_log = None
     finally:
         child.stdout.close()
 
@@ -650,6 +656,20 @@ def services(bindu, workspace, execution_mode='impedance'):
     try:
         try:
             print(f'LOGS {logdir}', flush=True)
+            fault_log = logdir/'first-bad-cycle.log'
+            try:
+                import yaml
+                config = yaml.safe_load((workspace/'vendor-position.yaml').read_text())
+                interface = config['/servo_node']['ros__parameters'].get('ethercat_interface', 'enp2s0')
+                fault_log.touch()
+                with (logdir/'ethercat-capture.log').open('w') as log:
+                    popen_group(['sudo', '-n', '/usr/bin/python3', '-I',
+                                 str(ROOT/'tools/deployment/capture_ethercat.py'),
+                                 '--interface', interface, '--servo-log', str(fault_log),
+                                 '--output', str(logdir/'ethercat'), '--service-pid', str(os.getpid())],
+                                stdout=log, stderr=subprocess.STDOUT)
+            except (OSError, ImportError, ValueError, KeyError) as exc:
+                print(f'ECAT_CAPTURE_UNAVAILABLE {exc}', file=sys.stderr, flush=True)
             from snowbot_hardware.pdo_reader_trace import PRIVATE_DDS
             private_dds = workspace/'upper/install/snowbot_hardware'/PRIVATE_DDS
             if os.environ.get('BINDU_TIMING_TRACE') == '1' and private_dds.is_file():
@@ -672,7 +692,7 @@ def services(bindu, workspace, execution_mode='impedance'):
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, errors='replace')
                 children.append((name, child))
-                reader = threading.Thread(target=copy_service_output, args=(name, child, writer), daemon=True)
+                reader = threading.Thread(target=copy_service_output, args=(name, child, writer, fault_log if name=="servo" else None), daemon=True)
                 reader.start(); readers.append(reader)
                 print(f'START {name} pid={child.pid}', flush=True)
                 if not wait_service(children, lambda: ready(name),
