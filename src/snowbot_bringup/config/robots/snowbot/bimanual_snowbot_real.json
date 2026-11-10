@@ -60,7 +60,7 @@
     }
   },
   "relative_gain": 12.0,
-  "max_relative_error": 0.08,
+  "max_relative_error": 0.14604,
   "max_linear_speed": 1.2,
   "max_angular_speed": 2.4,
   "demo": {
@@ -176,8 +176,8 @@
     0.0,
     1.0
   ],
-  "grasp_position_tolerance_m": 0.06,
-  "grasp_rotation_tolerance_rad": 0.08726646259971647,
+  "grasp_position_tolerance_m": 0.08,
+  "grasp_rotation_tolerance_rad": 0.12217304763960307,
   "tool_gain": 10.0,
   "posture_gain": 0.1,
   "shared_motion_weight": 0.0011,
