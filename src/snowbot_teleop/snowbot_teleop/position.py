@@ -22,6 +22,8 @@ class PositionOperations:
         self.states = {}
         self.received_ns = {}
         self.last_rejection = {}
+        self.pending_receive_trace = {}
+        self.last_seen = {}
         self.trace_request = node.create_publisher(String, 'gripper/state_trace_request', 10)
         self.lease = None
         self.lease_instance = None
@@ -35,10 +37,21 @@ class PositionOperations:
 
     def receive(self, msg):
         n = self.node
-        if (msg.side in SIDES and n.matches_mode(msg) and msg.profile_hash == n.profile.digest and
-                msg.config_hash == self.config_hash):
+        if msg.side not in SIDES:
+            return
+        entered=time.monotonic_ns()
+        accepted=(n.matches_mode(msg) and msg.profile_hash==n.profile.digest and msg.config_hash==self.config_hash)
+        self.last_seen[msg.side]=(entered,msg,accepted)
+        if accepted:
             self.states[msg.side] = msg
-            self.received_ns[msg.side] = time.monotonic_ns()
+            self.received_ns[msg.side] = entered
+        checked=self.pending_receive_trace.pop(msg.side,None)
+        if checked is not None:
+            n.event('PICO_GRIPPER_NEXT_RECEIVE',json.dumps(dict(side=msg.side,checked_ns=checked,
+                callback_ns=entered,instance=msg.instance_id,accepted=accepted,
+                mode_matches=n.matches_mode(msg),profile_matches=msg.profile_hash==n.profile.digest,
+                config_matches=msg.config_hash==self.config_hash,state_stamp_ns=msg.stamp.sec*10**9+msg.stamp.nanosec,
+                measurement_stamp_ns=msg.feedback_stamp.sec*10**9+msg.feedback_stamp.nanosec)))
 
     def reading(self, side, *, recovery=False, for_arms=False):
         n = self.node
@@ -112,10 +125,14 @@ class PositionOperations:
         return msg
 
     def request_publications(self, side, msg, outcome, checked_ns):
-        payload=json.dumps(dict(instance=msg.instance_id, run=self.node.run_id, side=side, outcome=outcome,
+        entered,seen,accepted=self.last_seen[side]
+        payload=json.dumps(dict(last_callback_ns=entered,last_callback_accepted=accepted,
+            last_callback_state_ns=seen.stamp.sec*10**9+seen.stamp.nanosec,
+            last_callback_instance=seen.instance_id,instance=msg.instance_id, run=self.node.run_id, side=side, outcome=outcome,
             cache_received_ns=self.received_ns[side], checked_ns=checked_ns,
             cached_state_ns=msg.stamp.sec*10**9+msg.stamp.nanosec,
             cached_measurement_ns=msg.feedback_stamp.sec*10**9+msg.feedback_stamp.nanosec))
+        self.pending_receive_trace[side]=checked_ns
         self.trace_request.publish(String(data=payload))
         self.node.event('PICO_GRIPPER_STATE_TRACE_REQUEST',payload)
 
