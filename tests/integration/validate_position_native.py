@@ -447,6 +447,8 @@ def main():
                 command[1:1]=['-DTARGET_AUXILIARY']
                 command+=['-Wno-sign-compare','-Wno-comment']
             if args.sanitize:command[1:1]=['-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer']
+            if name in ('test_position_session','test_production_position_cycle') and 'follow_receive' in manifest['components']:
+                command.insert(1,'-DPOSITION_FOLLOW_RECEIVE_TEST')
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
                 if trajectory.is_file() and 'hold_receive' in manifest['components']:

@@ -207,7 +207,62 @@ void check_hold_receive_window(){
  std::cout<<"PASS confirmed hold: one/two missing frames freeze output, third latches, independent faults remain active\n";
 }
 #endif
+#ifdef POSITION_FOLLOW_RECEIVE_TEST
+void check_follow_receive_window(){
+ constexpr int64_t start=1000000000,ms=1000000;
+ for(const std::string scenario:{"one","four","fifth","late_first","late_send","late_full",
+                                 "partial","partial_after_miss","tracking","expired","rt_expired","untagged"}){
+  Watchdog w;Observation o;ObservationCache cache;Output p;
+  p.selected=p.trajectory=p.impedance=p.impedance_mode=true;
+  p.vr_follow=scenario!="untagged";p.session=7;p.sequence=2;p.policy=2;p.reference_mode=2;
+  p.trajectory_phase=2;p.follow_error_limit=.25;p.deadline=start+(scenario=="expired"?2:100)*ms;
+  p.rt_deadline=start+(scenario=="rt_expired"?2:20)*ms;p.reference_position.fill(.11);
+  o.status.fill(0x27);o.position.fill(.11f);
+  auto receive=[&](int wkc,int64_t offset){
+   o.wkc=wkc;o.expected_wkc=67;o.attempted_ns=start+offset;++o.attempt;
+   o.reference_valid=wkc==67 && w.output.trajectory;
+   o.valid_mask=wkc==67?0xfffff:0;o.sensor_valid_mask=wkc==67?3:0;
+   if(wkc==67){o.sampled_ns=o.attempted_ns;o.sensor_sampled_ns.fill(o.sampled_ns);++o.sample;}
+   cache.publish(o,w.finish_hold_receive(o));
+  };
+  receive(67,0);w.evaluate(p,o,start);receive(67,0);
+  const auto confirmed=w.output;
+  ++p.sequence;p.q[0]=.14f;p.reference_position[0]=.14;p.torque[0]=3;p.deadline+=ms;p.rt_deadline+=ms;
+  w.evaluate(p,o,start+1); // This new TX gets no acknowledgement.
+  const int misses=scenario=="four"||scenario=="fifth"?4:1;
+  const auto interval=scenario=="late_first"?5*ms:900000;
+  for(int n=1;n<=misses;++n){
+   receive(scenario=="partial"?40:-1,n*interval);w.evaluate(p,o,start+n*interval);
+   if(scenario=="partial"||scenario=="late_first"||scenario=="untagged"){assert(w.disabled);break;}
+   const auto retained=cache.read();
+   assert(retained.awaiting_hold_rx && retained.sampled_ns==start && retained.sample==2);
+   assert(!w.disabled && w.output.q==confirmed.q && w.output.torque==confirmed.torque &&
+          w.output.sequence==confirmed.sequence && w.output.rt_deadline==confirmed.rt_deadline &&
+          w.output.deadline==confirmed.deadline);
+  }
+  if(w.disabled)continue;
+  if(scenario=="late_send" || scenario=="expired" || scenario=="rt_expired"){
+   w.evaluate(p,o,start+(scenario=="late_send"?5:2)*ms);assert(w.disabled);continue;
+  }
+  if(scenario=="tracking")o.position[0]+=.3f;
+  const auto offset=scenario=="late_full"?5*ms:(misses+1)*interval;
+  receive(scenario=="fifth"?-1:scenario=="partial_after_miss"?40:67,offset);
+  w.evaluate(p,o,start+offset);
+  if(scenario=="one" || scenario=="four"){
+   assert(!w.disabled && w.output.sequence==confirmed.sequence && o.follow_pause_ns==offset);
+   p.follow_pause_ns=o.follow_pause_ns;w.evaluate(p,o,start+offset+1);
+   assert(!w.disabled && w.output.sequence==p.sequence && !cache.read().awaiting_hold_rx);
+   receive(67,offset+ms);receive(-1,offset+2*ms);w.evaluate(p,o,start+offset+2*ms);
+   assert(!w.disabled && cache.read().awaiting_hold_rx);
+  }else{assert(w.disabled && w.latched_failure);}
+ }
+ std::cout<<"PASS following receive: confirmed target and TTL, count/time bounds, fresh tracking, partial WKC and recovery\n";
+}
+#endif
 int main(){
+#ifdef POSITION_FOLLOW_RECEIVE_TEST
+ check_follow_receive_window();
+#endif
 #ifdef POSITION_HOLD_RECEIVE_TEST
  check_hold_receive_window();
 #endif

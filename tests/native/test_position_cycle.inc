@@ -200,4 +200,26 @@ void check_cycle_fault_diagnostics(){
  std::cout<<"PASS unchanged 9/11ms hold boundary, independent 23ms RT expiry, first-failure latch/recovery, tracking/sampling distinctions and zero periodic allocation\n";
 }
 
-int main(){check_cycle_fault_diagnostics();check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();check_cycle_powered_retake();}
+#ifdef POSITION_FOLLOW_RECEIVE_TEST
+void check_follow_interpolation(){
+ CycleHarness h;h.node.position_submit(h.command(1));h.settle();
+ for(unsigned i=0;i<20;++i)h.tick();
+ auto target=h.command();target->meta.source_command_id="vr_follow_test_3";
+ h.node.position_submit(target);h.settle();
+ for(unsigned i=0;i<30;++i)h.tick();
+ const auto before=h.cache.read();assert(before.vr_follow && before.reference_speed[0]>0);
+ snapshot.awaiting_hold_rx=true;
+ for(unsigned i=0;i<3;++i){const auto frozen=h.tick();assert(frozen.sample_time_ns==before.sample_time_ns);}
+ snapshot.awaiting_hold_rx=false;snapshot.follow_pause_ns=4000000;
+ const auto resumed=h.tick();
+ assert(resumed.vr_follow && resumed.follow_pause_ns==4000000 && resumed.deadline==before.deadline);
+ assert(std::abs(resumed.reference_position[0]-before.reference_position[0])<1e-7);
+ assert(h.tick().reference_position[0]>resumed.reference_position[0]);
+ std::cout<<"PASS moving trajectory frozen through gap, resumed on same reference, unchanged expiry\n";
+}
+#endif
+int main(){
+#ifdef POSITION_FOLLOW_RECEIVE_TEST
+ check_follow_interpolation();
+#endif
+ check_cycle_fault_diagnostics();check_cycle_stream(20,1);check_cycle_stream(10,2);check_cycle_stream(20,1,10000);check_cycle_stream(10,2,-10000);check_cycle_expiry_fault_revoke();check_cycle_powered_retake();}

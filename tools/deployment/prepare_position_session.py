@@ -166,7 +166,8 @@ def prepare(source,output,*,observation_only=False,with_impedance=False,executio
             patches=(*patches,'head_teleop')
             if with_impedance:
                 subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'hold_receive.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
-                patches=(*patches,'hold_receive')
+                subprocess.run(['patch','-p1','--batch','--forward','--fuzz=0','-i',str(ASSETS/'follow_receive.patch')],cwd=stage/'src',check=True,capture_output=True,text=True)
+                patches=(*patches,'hold_receive','follow_receive')
         # Remove only patch-generated backups, retaining any pre-existing assets.
         for p in (stage/'src').rglob('*.orig'):
             if not (source/p.relative_to(stage/'src')).exists():p.unlink()
