@@ -426,6 +426,13 @@ class GripperController:
                         else:
                             c.update(state=c['result'], code=c['result_code'])
             except RuntimeError as exc:
+                # The shutdown hold was already sent. A delayed sample cannot
+                # confirm it; wait within its original deadline for new evidence.
+                if (c['state']=='STOPPING' and c['code']=='GRIPPER_SHUTDOWN'
+                        and str(exc) in ('SNOWBOT_PDO_STALE','SNOWBOT_PDO_NOT_ADVANCING','GRIPPER_FEEDBACK_STALE')
+                        and now<c['deadline'] and steady<c['steady_deadline']):
+                    c['settled']=None
+                    continue
                 self.stop(str(exc), revoke=True)
                 self.fail(str(exc), stop_trigger=str(exc))
 

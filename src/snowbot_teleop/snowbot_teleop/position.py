@@ -82,6 +82,21 @@ class PositionOperations:
                     and seconds(msg.stamp) <= checked and seconds(msg.feedback_stamp) <= checked
                     and self.unused_trigger(side, msg)):
                 return None
+            if (for_arms and reason=='feedback_age_out_of_range' and msg.state=='SUCCEEDED'
+                    and msg.code=='POSITION_REACHED' and self.config.get('independent_trigger_control',False)
+                    and n.control.phase=='following' and n.control.teleop_mode=='independent_arms'
+                    and n.control.load in ('empty','unknown') and not n.stop_request and (not n.control.pending or n.control.pending.operation=='follow')
+                    and self.lease is None and self.acquire_future is None and not self.release_pending
+                    and math.isfinite(msg.measured_position) and abs(msg.measured_velocity)<=self.config['velocity_tolerance']
+                    and 0<=checked-seconds(msg.feedback_stamp)<=n.tool_cfg['feedback_max_age']):
+                frame=n.frames.get(side)
+                previous=n.control.frames[SIDES.index(side)] if n.control.frames else None
+                if (frame and previous and frame.source_id==previous.source_id==n.control.source
+                        and frame.valid and not frame.stop and not frame.init
+                        and frame.trigger<n.control.settings['trigger_release_threshold']
+                        and tuple(frame.button_edges[6:8])==tuple(previous.button_edges[6:8])):
+                    # Arm-only status can omit this completed finger until the next measurement.
+                    return None
             self.log_rejection(side, msg, reason, checked, state_checked, recovery)
             raise RuntimeError('PICO_GRIPPER_FEEDBACK_OR_CALIBRATION_REQUIRED:'+side)
         self.last_rejection.pop(side, None)
