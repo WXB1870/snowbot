@@ -28,7 +28,9 @@ sudo python3 -m tools.deployment.capture_ethercat --interface enP5p5s0 \
 
 `--enable-hardware-rx` 临时请求该网卡给所有入帧打硬件戳，正常退出或 Ctrl+C 时恢复原过滤设置。省略此选项沿用现场设置。等到 `ECAT_CAPTURE_READY` 后观察是否出现 `RX hardware timestamp: present`。采集只监听 EtherType `0x88a4`，从日志末尾等待下一条 `first_bad=1`，再收 100 ms 后冻结。手工 Ctrl+C 也可保存。每轮只写一次，最多保留 8192 条帧摘要和 128 组时钟校准，通常在 1 kHz、每周期一发一收时覆盖约 4 秒。提前退出的旧会话应另选新日志和输出目录。
 
-`frames.csv` 保留帧方向、首数据报命令／index／地址／WKC、内核软件戳及原始 PHC 硬件戳。`window.json` 保留故障周期、套接字丢包数、覆盖数和 PHC／系统时钟相对单调时钟的校准区间。`fault_frames` 使用落在本周期发送调用内的唯一 TX 软件戳，列出相同首数据报且在 index 复用前出现的 RX 候选。记录序号从 0 计。对照 RX 的 `hw_mono_estimate_ns`、`sw_mono_estimate_ns` 与 `fault.recv_end_ns`，同时查看 1 ms 名义截止时间。校准跨越时钟跳变、配对不唯一、关键戳缺失或落在误差区间时，结论仍为未知；观察套接字的丢包计数影响对缺帧的判读。目标 SOEM 套接字入队和匹配耗时需要额外的目标路径证据。
+`frames.csv` 保留帧方向、首数据报命令／index／地址／WKC、内核软件戳及原始 PHC 硬件戳。`window.json` 保留故障周期、套接字丢包数、覆盖数和 PHC／系统时钟相对单调时钟的校准区间。其中 `fault.wkc` 和 `fault.expected_wkc` 来自伺服首坏行，`interface_counters` 保存整段采集起止时网卡的 CRC、漏收、丢包和链路变化计数。缺失值为 `null`，增量只能归到采集时间段。
+
+`fault_frames` 使用落在本周期发送调用内的唯一 TX 软件戳，列出相同首数据报且在 index 复用前出现的 RX 候选。记录序号从 0 计。对照 RX 的 `hw_mono_estimate_ns`、`sw_mono_estimate_ns` 与 `fault.recv_end_ns`，同时查看 1 ms 名义截止时间。校准跨越时钟跳变、配对不唯一、关键戳缺失或落在误差区间时，结论仍为未知；观察套接字的丢包计数影响对缺帧的判读。目标 SOEM 套接字入队和匹配耗时需要额外的目标路径证据。
 
 完成构建后，按[现场配置](docs/运行与验证.md#首次现场配置)设置设备、标定和 PICO 网络，再按[启动顺序](docs/运行与验证.md#日常启动)运行。开发和仿真见[仿真与浏览器操作台](docs/运行与验证.md#仿真与浏览器操作台)。
 

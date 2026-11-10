@@ -26,8 +26,7 @@ FRAME_LIMIT = 8192
 FRAME_FIELDS = ('observed_mono_ns', 'direction', 'command', 'index', 'address',
                 'data_len', 'first_wkc', 'software_realtime_ns', 'hardware_phc_ns')
 BAD_CYCLE = re.compile(rb'\[ECAT-FAULT-CYCLE\].*?sequence=(\d+) first_bad=1\b.*?'
-                       rb'send_ns=(\d+).*?recv_begin_ns=(\d+) recv_end_ns=(\d+)')
-FAULT_FIELDS = ('sequence', 'send_ns', 'recv_begin_ns', 'recv_end_ns')
+                       rb'send_ns=(\d+)')
 
 
 def frame_record(frame, direction, ancillary, observed_ns):
@@ -94,7 +93,16 @@ def new_fault(log):
             return None
         match = BAD_CYCLE.search(line)
         if match:
-            return dict(zip(FAULT_FIELDS, map(int, match.groups())))
+            sequence, send_ns = map(int, match.groups())
+            fault = dict(sequence=sequence, send_ns=send_ns)
+            for field in ('receive_ns', 'recv_begin_ns', 'recv_end_ns'):
+                value = re.search(rb'\b'+field.encode()+rb'=(\d+)', line)
+                if value:
+                    fault[field] = int(value[1])
+            wkc = re.search(rb'\bWKC=(-?\d+)/(\d+)\b', line)
+            if wkc:
+                fault['wkc'], fault['expected_wkc'] = map(int, wkc.groups())
+            return fault
 
 
 def fault_frames(frames, metadata):
@@ -102,6 +110,8 @@ def fault_frames(frames, metadata):
     fault = metadata['fault']
     if not fault:
         return None
+    if 'recv_begin_ns' not in fault or 'recv_end_ns' not in fault:
+        return {'status': 'missing_receive_call_timestamps'}
     send, end = fault['send_ns'], fault['recv_end_ns']
     clocks = metadata['clocks']
     before = [pair for pair in clocks if pair[0][2] <= send]
@@ -187,6 +197,19 @@ def collect(sock, log, phc_clock, stopped):
                         hardware_stamped_rx=sum(r[1]=='RX' and r[-1] is not None for r in frames))
 
 
+def interface_counters(netdev):
+    # Interface-wide counters sampled outside the control process.
+    counters = {}
+    started = time.monotonic_ns()
+    for name in ('rx_errors', 'rx_crc_errors', 'rx_missed_errors', 'rx_dropped', 'carrier_changes'):
+        path = netdev/name if name == 'carrier_changes' else netdev/'statistics'/name
+        try:
+            counters[name] = int(path.read_text())
+        except (OSError, ValueError):
+            counters[name] = None
+    return dict(read_begin_ns=started, read_end_ns=time.monotonic_ns(), counters=counters)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--interface', required=True)
@@ -220,11 +243,14 @@ def main(argv=None):
         if args.output.exists():
             parser.error('output directory already exists')
         stack.enter_context(rx_hardware_filter(sock, args.interface, args.enable_hardware_rx))
+        netdev = Path('/sys/class/net')/args.interface
+        counters_before = interface_counters(netdev)
         log.seek(0, os.SEEK_END)
         sock.bind((args.interface, ETH_P_ALL))
         args.output.mkdir(parents=True, exist_ok=False)
         print('ECAT_CAPTURE_READY', args.interface, str(args.servo_log), flush=True)
         frames, metadata = collect(sock, log, phc_clock, stopped.is_set)
+        metadata['interface_counters'] = dict(start=counters_before, end=interface_counters(netdev))
     with (args.output/'frames.csv').open('x', newline='') as out:
         writer = csv.writer(out)
         writer.writerow(FRAME_FIELDS)

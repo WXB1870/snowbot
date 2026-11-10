@@ -165,7 +165,10 @@ class GripperOnlyTests(unittest.TestCase):
             lambda:self.clock, lambda:True, enabled=True, steady=lambda:self.clock,
             require_driver_ack=False)
         self.observe()
-        self.node = S(grippers=S(core=self.core), snowbot_devices=S(health=S(progress=10.)),
+        receiver = S(node_namespace='/', node_name='servo_node', topic_type='std_msgs/msg/Float64MultiArray')
+        graph = S(get_subscriptions_info_by_topic=lambda topic:[receiver])
+        self.node = S(grippers=S(core=self.core, topics={s:s+'_cmd' for s in SIDES}),
+                      snowbot_devices=S(health=S(progress=10.), graph=graph, receivers={'head':'/servo_node'}),
                       now=lambda:self.clock)
         source = root/'src/snowbot_hardware/snowbot_hardware/gripper_node.py'
         tree = ast.parse(source.read_text())
@@ -223,6 +226,11 @@ class GripperOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'GRIPPER_STOP_UNCONFIRMED'):
             self.run_open(spin)
         self.assertFalse(self.core.lease_id)
+        first = self.core.first_stop_failure
+        self.assertIn('STALE', first['reason'])
+        self.assertTrue(any(ch['previous_state'] == 'MOVING' for ch in first['channels'].values()))
+        self.core.fail('SECONDARY_FAULT')
+        self.assertIs(self.core.first_stop_failure, first)
 
     def test_gripper_only_requires_valid_stationary_arms_without_arm_lease(self):
         from snowbot_hardware.session import CONTROL_NAMES, CONTROL_MASK

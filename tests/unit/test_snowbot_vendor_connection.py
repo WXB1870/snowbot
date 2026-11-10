@@ -678,7 +678,11 @@ class DeploymentEntryTests(unittest.TestCase):
         log.write(b' WKC=-1/67\n')
         log.seek(position)
         fault = capture.new_fault(log)
-        self.assertEqual(fault['sequence'], 832850)
+        self.assertEqual((fault['sequence'], fault['wkc'], fault['expected_wkc']), (832850, -1, 67))
+        old = capture.new_fault(io.BytesIO(b'[ECAT-FAULT-CYCLE] sequence=228630 first_bad=1 '
+            b'send_ns=1477225329952 receive_ns=1477225597545 WKC=40/67\n'))
+        self.assertEqual(old['wkc'], 40)
+        self.assertEqual(capture.fault_frames([], {'fault':old})['status'], 'missing_receive_call_timestamps')
         start, end = fault['send_ns'], fault['recv_end_ns']
         def pair(mono):
             return ((mono-5, mono+2_000_000, mono+5), (mono-8, mono+3_000_000, mono+8))

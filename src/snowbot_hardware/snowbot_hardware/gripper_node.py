@@ -29,6 +29,7 @@ class SnowbotGrippers:
         prefix = node.get_parameter('vendor_namespace').value.rstrip('/')
         self.topics = {side: prefix+'/gripper/'+side+'_cmd' for side in SIDES}
         self.sent_positions = {}
+        self.reported_stop_failure = None
         enabled = node.robot_io.command_enabled or getattr(node, 'gripper_only', False)
         self.publishers = ({side: node.create_publisher(devices.array_type, topic, 1)
                             for side, topic in self.topics.items()}
@@ -92,13 +93,14 @@ class SnowbotGrippers:
         # Native servo topics interpolate each target but have no speed cap.
         # Bound target increments here; a delivery gap cannot create a large step.
         now = time.monotonic()
-        previous, when = self.sent_positions.get(side, (self.core.q[JOINTS[side]], now))
+        last = self.sent_positions.get(side)
+        previous, when = (last[0], last[1]) if last else (self.core.q[JOINTS[side]], now)
         if not hold:
             step = cfg['max_speed']*min(max(now-when, 0.), self.node.profile.control_period)
             position = previous+max(-step, min(step, position-previous))
         values = native_command(position, cfg)
         self.publishers[side].publish(self.devices.array_type(data=values))
-        self.sent_positions[side] = (position, now)
+        self.sent_positions[side] = (position, now, sequence, hold, self.core.epoch)
 
     def lease(self, req, reply):
         try:
@@ -132,8 +134,28 @@ class SnowbotGrippers:
             if self.core.last_request_rejection is not previous:
                 self.node.event('GRIPPER_REQUEST_REJECTED',json.dumps(self.core.last_request_rejection))
 
+    def log_stop_failure(self):
+        first = self.core.first_stop_failure
+        if first is None or first is self.reported_stop_failure:
+            return
+        channels = {}
+        for side, data in first['channels'].items():
+            entry = dict(data)
+            for key in ('measured_position_rad', 'measured_velocity_rad_s'):
+                if entry[key] is not None and not math.isfinite(entry[key]):
+                    entry[key] = None
+            last = self.sent_positions.get(side)
+            entry['last_published'] = None if last is None else dict(
+                position_rad=last[0], send_started_steady_s=last[1], local_sequence=last[2],
+                hold=last[3], lease_epoch=last[4])
+            channels[side] = entry
+        self.node.event('GRIPPER_STOP_DETAIL', json.dumps(dict(first, channels=channels,
+                        driver_ack_available=self.core.require_driver_ack), allow_nan=False))
+        self.reported_stop_failure = first
+
     def tick(self):
         self.core.tick()
+        self.log_stop_failure()
         for side in SIDES:
             data = self.core.snapshot(side)
             when = data.pop('feedback_stamp')
@@ -144,6 +166,7 @@ class SnowbotGrippers:
     def stop(self):
         if self.core:
             self.core.stop('GRIPPER_SHUTDOWN', revoke=True)
+            self.log_stop_failure()
 
     @property
     def stopping(self):

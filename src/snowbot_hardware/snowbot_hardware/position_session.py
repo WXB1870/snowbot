@@ -523,6 +523,30 @@ class PositionSessionDevices:
                 if state.reason in ('command_source_discovering', 'command_source_conflict', 'legacy_source_conflict'):
                     raise RuntimeError('SNOWBOT_COMMAND_ENDPOINT:'+layer+':'+state.reason)
 
+    def log_startup_wait(self, reason, engine, velocity_tolerances=None):
+        # A startup can wait indefinitely. Only the first occurrence of each cause is useful.
+        if not hasattr(self, '_startup_wait_causes'):
+            self._startup_wait_causes = set()
+        cause = reason.partition(':')[0]
+        if cause in self._startup_wait_causes:
+            return
+        self._startup_wait_causes.add(cause)
+        detail = dict(reason=reason, pdo_sample=self.health.sample,
+                      measurement_stamp=self.health.measurement_stamp, progress_steady=self.health.progress)
+        if reason in ('FEEDBACK_NOT_STATIONARY', 'FEEDBACK_VELOCITY_UNAVAILABLE'):
+            feedback = engine.feedback
+            default = engine.profile.feedback_tolerances.get('joint_velocity', .01)
+            blockers = {}
+            for joint in CONTROL_NAMES:
+                speed = feedback.joint_velocities.get(joint)
+                limit = velocity_tolerances.get(joint, default)
+                if speed is None or not math.isfinite(speed) or abs(speed) > limit:
+                    blockers[joint] = dict(velocity_rad_s=speed if speed is not None and math.isfinite(speed) else None,
+                                           limit_rad_s=limit)
+            detail.update(feedback_stamp=feedback.stamp, joint_blockers=blockers)
+            detail['base_velocity'] = [v if math.isfinite(v) else None for v in feedback.base_velocity]
+        self.node.event('STARTUP_HOLD_WAIT', json.dumps(detail, allow_nan=False))
+
     def advance_startup_hold(self, engine):
         """One write-enabled startup, using the normal lease/command/ACK path.
 
@@ -543,6 +567,7 @@ class PositionSessionDevices:
             return
         if state == 'waiting':
             if not self.health.target_feedback_ready():
+                self.log_startup_wait('TARGET_FEEDBACK_NOT_READY', engine)
                 return  # Capture the startup hold point from a fresh measurement.
             trace = getattr(self.node, 'trace_timing', False)
             if trace:
@@ -555,12 +580,15 @@ class PositionSessionDevices:
                     ros=self.node.now(), pdo_sample=self.health.sample,
                     measurement_stamp=self.health.measurement_stamp))
             mark('acquire_begin')
+            tolerances = {}
             try:
                 execution = parameters_for(self, 'execution')
+                tolerances = {'arm_r_joint_7': execution['startup_right_wrist_velocity_tolerance_rad_s']}
                 lease, epoch = engine.acquire('snowbot_startup_hold',
                     ('waist', 'left_arm', 'right_arm'), execution['startup_lease_ttl_s'], now,
-                    velocity_tolerances={'arm_r_joint_7': execution['startup_right_wrist_velocity_tolerance_rad_s']})
-            except (Rejected, RuntimeError):
+                    velocity_tolerances=tolerances)
+            except (Rejected, RuntimeError) as exc:
+                self.log_startup_wait(str(exc), engine, tolerances)
                 return  # Discovery/fresh measured feedback may not yet be ready.
             mark('acquired')
             self.startup_hold_state = 'takeover'

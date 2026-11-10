@@ -96,6 +96,7 @@ class GripperController:
         self.trigger_opened = dict.fromkeys(SIDES, False)
         self.trigger_source = None
         self.trigger_frames = {}
+        self.first_stop_failure = None
         self.last_request_rejection = None
         self.channels = {s: dict(state='IDLE', code='NO_COMMAND', touched=False, target=0.,
             hold=0., ack=0, sent_at=0., sample=0, deadline=0., steady_deadline=0.,
@@ -299,7 +300,15 @@ class GripperController:
         self.send(side, position, hold, self.wire_sequence)
         return self.wire_sequence
 
-    def fail(self, code):
+    def fail(self, code, *, stop_trigger=None):
+        if not self.fault:
+            self.first_stop_failure = dict(reason=code, stop_trigger=stop_trigger,
+                stamp=self.now(), feedback_stamp=self.feedback_stamp,
+                channels={side:dict(previous_state=c['state'], previous_code=c['code'],
+                    requested_target_rad=c['target'], transition_local_sequence=c['ack'],
+                    feedback_error=self.feedback_errors.get(side) or self.invalid,
+                    measured_position_rad=self.q.get(JOINTS[side]), measured_velocity_rad_s=self.v.get(JOINTS[side]))
+                    for side,c in self.channels.items() if c['touched']})
         self.fault = 'GRIPPER_STOP_UNCONFIRMED:'+code
         self.recovery_since = None
         self.lease_id, self.owner, self.authorized = '', '', False
@@ -356,7 +365,7 @@ class GripperController:
             self.lease_id, self.owner = '', ''
             self.epoch += 1
         if errors:
-            self.fail(','.join(errors))
+            self.fail(','.join(errors), stop_trigger=code)
 
     def tick(self):
         now, steady = self.now(), self.steady()
@@ -418,7 +427,7 @@ class GripperController:
                             c.update(state=c['result'], code=c['result_code'])
             except RuntimeError as exc:
                 self.stop(str(exc), revoke=True)
-                self.fail(str(exc))
+                self.fail(str(exc), stop_trigger=str(exc))
 
     def independent_input(self, frame):
         """Fresh coordinator trigger edges own a separate, expiring gripper lease."""
