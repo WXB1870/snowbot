@@ -144,6 +144,13 @@ TARGET_FIELDS = r"""
 """
 
 
+# These fixtures exercise position mode. An impedance call would be a test failure.
+POSITION_ONLY_IMPEDANCE = """
+bool ServoNode::session_impedance_ready()const{std::abort();}
+bool ServoNode::session_impedance_step(double){std::abort();}
+"""
+
+
 def write_target_poll_check(source, work, root):
     fixture=(root/'test_session_impedance.cpp').read_text()
     text=(source/'servo_control/src/ros_controller/rosLoop.cpp').read_text()
@@ -153,7 +160,7 @@ def write_target_poll_check(source, work, root):
     body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
     body='\n'.join(line for line in body.splitlines() if
         'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.rindex('\n};')]+TARGET_FIELDS+'};\n'
+    body=body[:body.rindex('\n};')]+TARGET_FIELDS+'};\n'+POSITION_ONLY_IMPEDANCE
     body=body.replace('snapshot.sensor_sampled_ns.fill(t);','')
     start=text.index('void ServoNode::position_interrupt()') if 'void ServoNode::position_interrupt()' in text else text.index('void ServoNode::position_submit(')
     methods=text[start:text.index('void ServoNode::position_step()',start)]
@@ -172,7 +179,7 @@ def write_position_cycle_check(source, work, root):
     body=fixture[fixture.index('constexpr double TEMPTIME'):fixture.index('// PRODUCTION_POLL_METHODS')]
     body='\n'.join(line for line in body.splitlines() if
         'snowbot_impedance::' not in line and 'constexpr double TEMPTIME' not in line)+'\n'
-    body=body[:body.rindex('\n};')]+TARGET_FIELDS+'};\n'
+    body=body[:body.rindex('\n};')]+TARGET_FIELDS+'};\n'+POSITION_ONLY_IMPEDANCE
     body=body.replace('snapshot.sensor_sampled_ns.fill(t);','').replace('position_session::steady_ns()','cycle_clock()')
     body=body.replace('nanoseconds()const{return cycle_clock();}', 'nanoseconds()const{return cycle_clock()+cycle_ros_offset_ns;}')
     body=body.replace('position_feedback_.ready_ros=t;', 'position_feedback_.ready_ros=t+cycle_ros_offset_ns;')
