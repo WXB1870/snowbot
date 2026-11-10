@@ -109,7 +109,7 @@ class SnowbotAdapter(ExecutionNode):
             if window is not None:
                 window['run_id'] = self.get_parameter('run_id').value
                 payload = json.dumps(window, separators=(',', ':'))
-                self.get_logger().warn('SNOWBOT_PDO_DELIVERY_WINDOW '+payload)
+                self.event('SNOWBOT_PDO_DELIVERY_WINDOW', payload)
                 if self.reader_trace:
                     from .pdo_reader_trace import notify
                     notify(payload, self.get_logger())

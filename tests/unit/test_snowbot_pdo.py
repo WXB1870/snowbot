@@ -64,6 +64,31 @@ def frame(sample=1, stamp=10., **changes):
 
 
 class SessionSensorBudgetTests(unittest.TestCase):
+    def test_frozen_pdo_reports_first_evidence_and_short_periodic_warnings(self):
+        from snowbot_hardware.position_session import PositionSessionDevices
+        devices = PositionSessionDevices.__new__(PositionSessionDevices)
+        warnings, events, triggers = [], [], []
+        devices.node = S(get_logger=lambda: S(warn=warnings.append),
+                         event=lambda code, payload: events.append((code, json.loads(payload))))
+        devices.health = S(steady=lambda: now, progress=0.)
+        devices.pdo_delivery = S(trigger=lambda detail, stamp: triggers.append(detail))
+        devices.stale_reports = {}
+        for i in range(601):
+            now = i / 100.
+            for stage in ('receive', 'read_rejected'):
+                detail = dict(boot_id=1, pdo_sample=52168, stage=stage, pdo_age_ms=8976.+10*i,
+                              wkc=51, expected_wkc=67, checked_ros=now)
+                devices.log_stale_observation(detail)
+        self.assertEqual(len(warnings), 4)
+        self.assertTrue(all(len(line)<100 and 'WKC=51/67' in line for line in warnings))
+        self.assertEqual([data for _, data in events], triggers)
+        self.assertEqual([(t['stage'],t['checked_ros']) for t in triggers],
+                         [('receive',0.),('read_rejected',0.)])
+        devices.health.progress = now
+        devices.log_stale_observation(dict(detail, pdo_sample=53000))
+        self.assertEqual(events[-1][1]['pdo_sample'], 53000)
+        self.assertEqual(len(warnings), 5)
+
     def test_dds_delivery_fault_window_preserves_sample_identity_and_deadline(self):
         from snowbot_hardware.session import PdoDeliveryWindow
         window = PdoDeliveryWindow()

@@ -151,6 +151,7 @@ class PositionSessionDevices:
             ('head', 'servo_receiver_node', '/servo_node'))}
         self.health = SessionHealth(node.now, execution_mode=node.snowbot_execution_mode,
                                     on_stale=self.log_stale_observation)
+        self.stale_reports = {}
         self.trajectory_limits = target_stream_limits({
             key: node.declare_parameter(key, default,
                                         descriptor=ParameterDescriptor(read_only=True)).value
@@ -338,13 +339,24 @@ class PositionSessionDevices:
         self.node.event(event,json.dumps(detail,separators=(',', ':')))
 
     def log_stale_observation(self, detail):
-        if self.pdo_delivery is not None:
-            self.pdo_delivery.trigger(detail, self.health.steady())
-        message = detail.get('code', 'SNOWBOT_PDO_STALE')+' '+json.dumps(detail, separators=(',', ':'))
-        if detail['stage'] == 'receive':
-            self.node.get_logger().warn(message, throttle_duration_sec=1.)
-        else:
-            self.node.get_logger().warn(message)
+        stage = detail['stage']
+        code = detail.get('code', 'SNOWBOT_PDO_STALE')
+        now = self.health.steady()
+        # Republishing a frozen measurement does not start a new incident.
+        identity = (detail['boot_id'], self.health.progress)
+        previous = self.stale_reports.get(stage)
+        first = previous is None or previous[0] != identity
+        if not first and now - previous[1] < 5.:
+            return
+        self.stale_reports[stage] = (identity, now)
+        if first:
+            if self.pdo_delivery is not None:
+                self.pdo_delivery.trigger(detail, now)
+            self.node.event(code, json.dumps(detail, separators=(',', ':')))
+        message = f"{code} stage={stage} sample={detail['pdo_sample']}"
+        if 'pdo_age_ms' in detail:
+            message += f" age={detail['pdo_age_ms']:.1f}ms WKC={detail['wkc']}/{detail['expected_wkc']}"
+        self.node.get_logger().warn(message)
 
     def receive(self, msg):
         entered = self.health.steady()
