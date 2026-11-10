@@ -3,6 +3,7 @@ import json
 import math
 import time
 from pathlib import Path
+from std_msgs.msg import String
 from bindu_interfaces.msg import GripperState
 from bindu_interfaces.srv import GripperControl, Lease
 from snowbot_hardware.gripper import SIDES, GROUPS, JOINTS, validate_config, target_position_tolerance
@@ -21,6 +22,7 @@ class PositionOperations:
         self.states = {}
         self.received_ns = {}
         self.last_rejection = {}
+        self.trace_request = node.create_publisher(String, 'gripper/state_trace_request', 10)
         self.lease = None
         self.lease_instance = None
         self.acquire_future = None
@@ -67,6 +69,7 @@ class PositionOperations:
         else:
             reason = None
         if reason is not None:
+            checked_ns=round(time.monotonic()*1e9) if reason in ('state_age_out_of_range','feedback_age_out_of_range') else None
             checked = feedback_checked if feedback_checked is not None else state_checked
             checked = checked if checked is not None else n.now()
             # A delayed idle finger state may be omitted from the standby arm display.
@@ -95,21 +98,35 @@ class PositionOperations:
                         and frame.valid and not frame.stop and not frame.init
                         and frame.trigger<n.control.settings['trigger_release_threshold']
                         and tuple(frame.button_edges[6:8])==tuple(previous.button_edges[6:8])):
+                    signature=('omitted', reason, n.control.phase)
+                    if self.last_rejection.get(side)!=signature:
+                        self.request_publications(side,msg,'arm_status_omitted',checked_ns)
+                        self.last_rejection[side]=signature
                     # Arm-only status can omit this completed finger until the next measurement.
                     return None
-            self.log_rejection(side, msg, reason, checked, state_checked, recovery)
+            self.log_rejection(side, msg, reason, checked, state_checked, recovery, checked_ns)
             raise RuntimeError('PICO_GRIPPER_FEEDBACK_OR_CALIBRATION_REQUIRED:'+side)
         self.last_rejection.pop(side, None)
         if msg.state == 'FAULT' and not (recovery and msg.code=='GRIPPER_STOP_UNCONFIRMED:HOLD_TIMEOUT'):
             raise RuntimeError(msg.code)
         return msg
 
-    def log_rejection(self, side, msg, reason, checked, state_checked, recovery):
+    def request_publications(self, side, msg, outcome, checked_ns):
+        payload=json.dumps(dict(instance=msg.instance_id, run=self.node.run_id, side=side, outcome=outcome,
+            cache_received_ns=self.received_ns[side], checked_ns=checked_ns,
+            cached_state_ns=msg.stamp.sec*10**9+msg.stamp.nanosec,
+            cached_measurement_ns=msg.feedback_stamp.sec*10**9+msg.feedback_stamp.nanosec))
+        self.trace_request.publish(String(data=payload))
+        self.node.event('PICO_GRIPPER_STATE_TRACE_REQUEST',payload)
+
+    def log_rejection(self, side, msg, reason, checked, state_checked, recovery, checked_ns):
         # Repeated health polls of a persistent fault share the first diagnostic.
         phase = self.node.control.phase
         signature = (reason, phase, recovery)
         if self.last_rejection.get(side) == signature:
             return
+        if msg is not None and reason in ('state_age_out_of_range','feedback_age_out_of_range'):
+            self.request_publications(side,msg,'rejected',checked_ns)
         detail = dict(side=side, reason=reason, phase=phase, recovery=recovery,
                       checked_ros=checked, checked_steady_ns=time.monotonic_ns(),
                       cached=msg is not None, cache_received_steady_ns=self.received_ns.get(side),

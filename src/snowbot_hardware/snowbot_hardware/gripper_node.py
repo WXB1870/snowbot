@@ -1,8 +1,10 @@
 """Native Snowbot gripper commands; measured state comes from PositionObservation."""
+from collections import deque
 import json
 import math
 import time
 from pathlib import Path
+from std_msgs.msg import String
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import qos_profile_sensor_data
 from snowbot_hardware.gripper import GripperController, SIDES, GROUPS, JOINTS, MASKS, native_command
@@ -39,6 +41,8 @@ class SnowbotGrippers:
                                       enabled=enabled, require_driver_ack=False,
                                       runtime_parameters=getattr(devices,'runtime_parameters',None))
         self.bind_services()
+        self.publications={side:deque(maxlen=256) for side in SIDES}
+        node.create_subscription(String,'gripper/state_trace_request',self.publication_trace,10)
 
     def bind_services(self):
         node = self.node
@@ -153,15 +157,41 @@ class SnowbotGrippers:
                         driver_ack_available=self.core.require_driver_ack), allow_nan=False))
         self.reported_stop_failure = first
 
+    def publication_trace(self, request):
+        try:
+            trace=json.loads(request.data)
+            if trace['instance']!=self.node.instance_id or trace['run']!=self.node.run_id:
+                return
+            history=self.publications[trace['side']]
+            start,end=trace['cache_received_ns'],trace['checked_ns']
+            state_ns,measurement_ns=trace['cached_state_ns'],trace['cached_measurement_ns']
+            if not all(type(v) is int for v in (start,end,state_ns,measurement_ns)) or end<start:
+                raise ValueError('invalid trace timestamps')
+        except (ValueError,KeyError,TypeError) as exc:
+            self.node.get_logger().warn('GRIPPER_STATE_TRACE_INVALID: '+str(exc),throttle_duration_sec=1.)
+            return
+        rows=[r for r in history if r[0]<=end and r[1]>=start]
+        complete=bool(history and (len(history)<history.maxlen or history[0][0]<=start))
+        self.node.event('GRIPPER_STATE_PUBLISH_WINDOW',json.dumps(dict(trace,complete=complete,
+            newer_state_returns=sum(start<=r[1]<=end and r[2]>state_ns for r in rows),
+            newer_valid_measurement_returns=sum(start<=r[1]<=end and r[4] and r[3]>measurement_ns for r in rows),
+            fields=['publish_start_ns','publish_return_ns','state_stamp_ns','measurement_stamp_ns','valid','state'],
+            rows=rows)))
+
     def tick(self):
         self.core.tick()
         self.log_stop_failure()
         for side in SIDES:
             data = self.core.snapshot(side)
             when = data.pop('feedback_stamp')
-            self.state_pub.publish(GripperState(stamp=stamp(self.node.now()), feedback_stamp=stamp(when),
+            msg=GripperState(stamp=stamp(self.node.now()), feedback_stamp=stamp(when),
                 runtime_mode=self.node.runtime_mode, instance_id=self.node.instance_id, profile_hash=self.node.profile.digest,
-                config_hash=self.config_hash, **data))
+                config_hash=self.config_hash, **data)
+            started=time.monotonic_ns()
+            self.state_pub.publish(msg)
+            self.publications[side].append((started,time.monotonic_ns(),
+                msg.stamp.sec*10**9+msg.stamp.nanosec,msg.feedback_stamp.sec*10**9+msg.feedback_stamp.nanosec,
+                msg.feedback_valid,msg.state))
 
     def stop(self):
         if self.core:
