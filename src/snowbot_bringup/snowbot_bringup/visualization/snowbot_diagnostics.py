@@ -116,6 +116,13 @@ class TimingStatistics:
                     self.add('sample_gap_s', data.get('sample_gap_s'), self.sample_gap_limit)
                 elif state == 'BIMANUAL_SUBMIT_TIMING':
                     self.add('submit_round_trip_s', data['submit_round_trip_s'])
+                    if data.get('rpc_call_monotonic') is not None:
+                        self.add('submit_call_to_observed_s', data['reply_observed_monotonic']-data['rpc_call_monotonic'])
+                    pair = data.get('input_pair')
+                    if pair:
+                        arrived = max(pair['left_callback_monotonic'],pair['right_callback_monotonic'])
+                        self.add('pair_callback_to_sample_s', data['sampled_monotonic']-arrived)
+                    self.add('worker_runqueue_wait_s',(data.get('solve_span') or {}).get('runqueue_wait_s'))
         return False
 
     def flush(self, now, *, final=False):
@@ -215,11 +222,11 @@ class DiagnosticSampler:
         self.last = {}
         self.sampled_out = 0
 
-    def keep(self, stream, value, now):
+    def keep(self, stream, value, now, *, force=False):
         period, key, state = sampling_policy(stream, value, self.settings, self.input_settings)
         if not period:return True
         previous = self.last.get(key)
-        if previous and previous[1] == state and 0 <= now-previous[0] < period:
+        if not force and previous and previous[1] == state and 0 <= now-previous[0] < period:
             self.sampled_out += 1
             return False
         self.last[key] = (now, state)
@@ -439,6 +446,9 @@ class DiagnosticWriter:
                         self.submits_after_fault -= 1
                         self._enqueue(stream, value, ros)
                         return
+                    if self.sampler.keep(stream,value,time.monotonic(),force=_field(value,'command_id','').endswith('0')):
+                        self._enqueue(stream, value, ros)
+                    return
                 elif event in _SUBMIT_FAULT_EVENTS and not self.trace_timing:
                     if self.recent_submits:
                         self._enqueue('submit-context', dict(trigger=event, task_id=_field(value,'task_id'),

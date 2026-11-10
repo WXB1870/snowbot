@@ -199,6 +199,8 @@ class PicoNode(RuntimeNode):
         self.last_status=0.;self.last_phase=None
         self.last_prepare_check=None
         self.last_context_at=self.control.context_at
+        self.projection_timings=[]
+        self.projection_source=None
         self.last_pair_at=None
         self.last_tick_at=None
         self.motion_limit=None;self.motion_limit_stamp=0.
@@ -415,6 +417,8 @@ class PicoNode(RuntimeNode):
                 head_age_s=getattr(m,'head_age_s',0.),head_seq=int(getattr(m,'head_seq',0)),
                 head_source_id=(m.head_source_id+':'+self.instance_id
                     if getattr(m,'head_source_id','')==m.source_id else getattr(m,'head_source_id','')))
+            if allowed and i==1:
+                right_publish=time.monotonic()
             self.projected.publish(projected)
             if self.independent_grippers:
                 # Ordinary arm handoff must not erase independent trigger edges.
@@ -424,6 +428,20 @@ class PicoNode(RuntimeNode):
                     self.control.fault_active or bool(self.control.stop_failure or self.control.recovery_required))
                 self.gripper_projected.publish(gripper_frame)
         self.projected_publish_s=time.monotonic()-publish_started
+        if self.projection_timings and (not allowed or self.projection_source!=projected.source_id):
+            self.flush_projection_timings()
+        if allowed:
+            self.projection_source=projected.source_id
+            self.projection_timings.append((a.seq,max(pair[0].stamp,pair[1].stamp),
+                                            now,received_monotonic,publish_started,right_publish))
+            if len(self.projection_timings)>=16:
+                self.flush_projection_timings()
+
+    def flush_projection_timings(self):
+        self.event('PICO_PROJECTION_TIMING',json.dumps(dict(source_id=self.projection_source,
+            fields=['seq','source_ros','pair_ready_ros','pair_ready_monotonic',
+                    'publish_loop_started_monotonic','right_publish_monotonic'],pairs=self.projection_timings)))
+        self.projection_timings.clear()
 
     async def pause(self):
         future=Future(executor=self.executor);self.waiters.add(future)
@@ -1434,6 +1452,8 @@ class PicoNode(RuntimeNode):
                 projected_publish_s=getattr(self,'projected_publish_s',None),
                 input_age_s=self.now()-self.control.stamp if math.isfinite(self.control.stamp) else None,
                 phase=self.control.phase,seq=self.control.seq)))
+        if self.projection_timings and tick_at-self.projection_timings[0][3]>=.3:
+            self.flush_projection_timings()
         self.last_tick_at=tick_at
         self.tick_work={}
         for f in tuple(self.waiters):

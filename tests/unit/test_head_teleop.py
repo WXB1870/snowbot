@@ -137,6 +137,7 @@ class AdapterTests(unittest.TestCase):
         n.now=lambda:self.now;n.control=rig.core;n.frames={}
         n.matches_mode=lambda msg:True;n.feedback=lambda:PicoFeedback(self.now,True)
         n.last_pair_at=n.last_pair_monotonic=n.last_prepare_check=None
+        n.projection_source=None;n.projection_timings=[]
         n.runtime_parameters={'diagnostics':{'input_gap_warning_s':1.}}
         n.base=None;n.head=S(core=Mock());n.event=Mock();n.projected=Mock()
         n.release_until=0.;n.instance_id='coordinator';n.independent_grippers=False

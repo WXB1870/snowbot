@@ -43,7 +43,9 @@ class TimingStatisticsTests(unittest.TestCase):
         for state, data in (
                 ('BIMANUAL_STARTED',dict(max_sample_gap=1.)),
                 ('BIMANUAL_QP_RESULT',dict(solve_us=200000.,result_age_s=.6,sample_gap_s=1.1)),
-                ('BIMANUAL_SUBMIT_TIMING',dict(submit_round_trip_s=.03))):
+                ('BIMANUAL_SUBMIT_TIMING',dict(submit_round_trip_s=.03, rpc_call_monotonic=2.01,
+                    reply_observed_monotonic=2.03, sampled_monotonic=2.,input_pair=dict(
+                    left_callback_monotonic=1.99,right_callback_monotonic=1.98),solve_span=dict(runqueue_wait_s=.004)))):
             self.assertFalse(stats.observe('runtime-events',S(state=state,code=json.dumps(data)),wall=100.))
         report=stats.flush(2.,final=True);metrics=report['metrics']
         self.assertEqual(metrics['pico_service_action_wait_s']['outcomes'],{'timeout':1})
@@ -56,6 +58,8 @@ class TimingStatisticsTests(unittest.TestCase):
         for name in ('solve_s','worker_result_age_s','sample_gap_s'):
             self.assertEqual(metrics[name]['over_limit_count'],1)
         self.assertEqual(metrics['submit_round_trip_s']['max_s'],.03)
+        for name,expected in [('submit_call_to_observed_s',.02),('pair_callback_to_sample_s',.01),('worker_runqueue_wait_s',.004)]:
+            self.assertAlmostEqual(metrics[name]['max_s'],expected)
         self.assertIsNone(metrics['tcp_peer_srtt_s']['over_limit_count'])
         self.assertIn('not end-to-end',report['network_scope'])
         self.assertTrue(report['final']);self.assertIsNone(stats.flush(2.,final=True))
