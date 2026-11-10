@@ -69,6 +69,15 @@ class PositionOperations:
         if reason is not None:
             checked = feedback_checked if feedback_checked is not None else state_checked
             checked = checked if checked is not None else n.now()
+            # A delayed idle finger state may be omitted from the standby arm display.
+            # Never use it as a measured position for a gripper operation or stop.
+            if (for_arms and reason in ('state_age_out_of_range', 'feedback_age_out_of_range')
+                    and msg.state == 'IDLE' and msg.code == 'NO_COMMAND' and not msg.lease_active
+                    and n.control.phase == 'standby' and not n.control.pending and not n.stop_request
+                    and self.lease is None and self.acquire_future is None and not self.release_pending
+                    and all(0 <= checked - seconds(stamp) <= n.tool_cfg['feedback_max_age']
+                            for stamp in (msg.stamp, msg.feedback_stamp))):
+                return None
             if (for_arms and reason in ('feedback_invalid','state_age_out_of_range','feedback_age_out_of_range')
                     and seconds(msg.stamp) <= checked and seconds(msg.feedback_stamp) <= checked
                     and self.unused_trigger(side, msg)):

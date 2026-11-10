@@ -10,6 +10,7 @@ from functools import lru_cache
 # ROS callbacks share CPU with other work. The PDO sampler has a separate clock.
 ROS_FEEDBACK_TIMEOUT_S = .100
 TARGET_FEEDBACK_MAX_AGE_S = .040
+GRIPPER_FEEDBACK_MAX_AGE_S = .060
 PDO_MAX_AGE_S = .020
 
 
