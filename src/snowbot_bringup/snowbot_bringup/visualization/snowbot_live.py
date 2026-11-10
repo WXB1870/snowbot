@@ -95,7 +95,8 @@ def observe(args, publish=None, stop=None):
         if diagnostics:
             from snowbot_bringup.visualization.snowbot_diagnostics import RosLogObserver, WrenchObserver
             ros_logs = RosLogObserver(node, diagnostics, args.run_id)
-            wrench_observer = WrenchObserver(node, diagnostics, args.run_id)
+            wrench_observer = WrenchObserver(node, diagnostics, args.run_id,
+                                             period_s=parameters['diagnostics']['wrench_period_s'])
     ns = '/'+args.namespace.strip('/')
     def execution(msg):
         latest.update(state=msg)

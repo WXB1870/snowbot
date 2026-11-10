@@ -64,7 +64,7 @@
     "_comment": "input_gap_warning_s 是两帧到达间隔的告警阈值（秒），调大后间隔告警会减少。",
     "state_period_s": 0.1,
     "health_period_s": 1.0,
-    "wrench_period_s": 0.01,
+    "wrench_period_s": 0.1,
     "input_gap_warning_s": 1.0,
     "publish_warning_s": 0.1,
     "pdo_before_s": 10.0,

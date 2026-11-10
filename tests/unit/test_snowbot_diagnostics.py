@@ -163,7 +163,8 @@ class WrenchObserverTests(unittest.TestCase):
                      ReliabilityPolicy=S(BEST_EFFORT='best_effort'),
                      DurabilityPolicy=S(VOLATILE='volatile'))}
         with patch.dict('sys.modules',modules):
-            observer=diagnostics.WrenchObserver(node,writer or S(record=lambda *args:records.append(args)),'run')
+            observer=diagnostics.WrenchObserver(node,writer or S(record=lambda *args:records.append(args)),
+                                                'run',period_s=.2)
         return observer,records,subscriptions
 
     def test_subscribes_to_both_existing_topics_without_control_ports(self):
@@ -176,6 +177,7 @@ class WrenchObserverTests(unittest.TestCase):
         self.assertEqual(records[-1][0],'wrench-right')
         self.assertEqual(observer.received,dict(left=0,right=1))
         self.assertFalse(records[0][1]['pdo_correlated'])
+        self.assertEqual(records[0][1]['default_max_logged_hz_per_side'],5.)
 
     def test_detaches_all_six_components_and_keeps_unknown_sensor_validity(self):
         for values in ((0.,)*6,(1.,2.,3.,4.,5.,6.),(float('nan'),2.,3.,4.,5.,6.)):
@@ -219,7 +221,7 @@ class WrenchObserverTests(unittest.TestCase):
         value=dict(frame_id='sensor',finite=True,publication_fresh=True)
         for tick in range(1000):
             for side in kept:kept[side]+=sampler.keep('wrench-'+side,value,tick*.001)
-        self.assertTrue(all(90<=n<=101 for n in kept.values()),kept)
+        self.assertEqual(kept,dict(left=10,right=10))
         self.assertEqual(sampler.sampled_out,2000-sum(kept.values()))
         self.assertTrue(sampler.keep('wrench-left',dict(value,finite=False),.9991))
         self.assertTrue(sampler.keep('wrench-left',dict(value,publication_fresh=False),.9992))
@@ -315,6 +317,23 @@ class SamplingTests(unittest.TestCase):
         self.assertTrue(sampler.keep('execution-state',value,1.))
         self.assertFalse(sampler.keep('execution-state',dict(value,command_id='new',revision=20),1.001))
         self.assertTrue(sampler.keep('execution-state',dict(value,stop_failures=['STOP_UNCONFIRMED']),1.002))
+
+    def test_idle_snapshots_thin_without_delaying_faults_or_active_motion(self):
+        sampler=diagnostics.DiagnosticSampler()
+        for stream,idle,fault,active in (
+            ('execution-state',dict(state='CANCELED'),dict(code='FAULT'),dict(state='RUNNING')),
+            ('teleop-state',dict(phase='locked',execution_state='CANCELED'),dict(stop_failure={'code':'FAULT'}),
+             dict(phase='following',execution_state='RUNNING')),
+            ('diagnostics',dict(execution='CANCELED',pico={'phase':'locked'}),dict(valid=False),
+             dict(execution='RUNNING',pico={'phase':'following'}))):
+            with self.subTest(stream=stream):
+                self.assertTrue(sampler.keep(stream,idle,0.))
+                self.assertFalse(sampler.keep(stream,idle,.2))
+                self.assertTrue(sampler.keep(stream,idle,1.))
+                self.assertTrue(sampler.keep(stream,dict(idle,**fault),1.01))
+                self.assertTrue(sampler.keep(stream,idle,1.02))
+                self.assertTrue(sampler.keep(stream,active,1.03))
+                self.assertTrue(sampler.keep(stream,active,1.14))
 
     def test_continuous_qp_diagnostics_are_sampled_but_command_mapping_is_full(self):
         sampler=diagnostics.DiagnosticSampler()

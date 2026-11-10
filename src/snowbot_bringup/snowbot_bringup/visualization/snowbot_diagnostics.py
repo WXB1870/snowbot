@@ -13,6 +13,8 @@ import time
 from snowbot_hardware.parameters import load_parameters
 
 VR_INPUT_STREAMS = ('vr-raw', 'vr-projected', 'vr-health')
+_IDLE_EXECUTION = ('WAITING', 'IDLE', 'CANCELED', 'SUCCEEDED', 'FAILED')
+_IDLE_TELEOP = ('locked', 'standby', 'tool_standby')
 
 
 def access_host(host='0.0.0.0'):
@@ -158,11 +160,16 @@ def sampling_policy(stream, value, settings=None, input_settings=None):
                  _sequence(value, 'button_edges'),
                  analog(_field(value, 'grip')), analog(_field(value, 'trigger'), 'trigger'))
     elif stream == 'execution-state':
+        if _field(value, 'state') in _IDLE_EXECUTION:
+            period = settings['health_period_s']
         state = (_fields(value, 'instance_id state code lease_active lease_epoch'),
                  _sequence(value, 'missing_feedback_groups'),
                  _sequence(value, 'stop_failures'))
     elif stream == 'teleop-state':
-        state = (_fields(value, 'source_id generation phase reason teleop_mode load_state pending recording'),
+        if _field(value, 'phase') in _IDLE_TELEOP and _field(value, 'execution_state') in _IDLE_EXECUTION:
+            period = settings['health_period_s']
+        state = (_fields(value, 'source_id generation phase reason teleop_mode load_state pending recording '
+                                'execution_state fault_active first_fault stop_failure request_failure'),
                  tuple((_fields(hand, 'valid buttons'), _sequence(hand, 'button_edges'),
                         analog(hand.get('squeeze')), analog(hand.get('trigger'), 'trigger'))
                        for hand in (value.get('controller_states', {}).get(side, {}) for side in ('left', 'right'))))
@@ -198,7 +205,10 @@ def sampling_policy(stream, value, settings=None, input_settings=None):
         period = settings['wrench_period_s']
         state = _fields(value, 'frame_id finite publication_fresh')
     elif stream == 'diagnostics':
-        state = _fields(value, 'valid execution code')
+        phase = (value.get('pico') or {}).get('phase')
+        if _field(value, 'execution') in _IDLE_EXECUTION and (phase is None or phase in _IDLE_TELEOP):
+            period = settings['health_period_s']
+        state = (_fields(value, 'valid execution code'), phase)
     elif stream == 'runtime-events':
         event = _field(value, 'state')
         # Keep command/session mapping and all other discrete events in full.
@@ -344,7 +354,7 @@ class WrenchObserver:
     """Log legacy wrist topics without claiming sensor validity or PDO alignment."""
     TOPICS = {side: '/force_sensor/'+side+'/wrench' for side in ('left', 'right')}
 
-    def __init__(self, node, writer, run_id):
+    def __init__(self, node, writer, run_id, *, period_s):
         from functools import partial
         from geometry_msgs.msg import WrenchStamped
         from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -356,7 +366,7 @@ class WrenchObserver:
         self.subscriptions = [node.create_subscription(WrenchStamped, topic,
                               partial(self.receive, side), qos) for side, topic in self.TOPICS.items()]
         writer.record('wrench-capture', dict(kind='capture_started', run_id=run_id, topics=self.TOPICS,
-            default_max_logged_hz_per_side=100, reliability='best_effort', durability='volatile',
+            default_max_logged_hz_per_side=1./period_s, reliability='best_effort', durability='volatile',
             stamp_semantics='publisher_header_not_sensor_sample_time', pdo_correlated=False,
             sensor_valid=None, sensor_data_no=None, sensor_age_s=None,
             calibration_verified=False, units_verified=False, publisher_identity_verified=False))
@@ -492,7 +502,7 @@ class DiagnosticWriter:
         return dict(active=self.thread.is_alive() and not self.error and not self.stop.is_set(),dropped=self.dropped,
                     written=self.written,queued=self.queue.qsize(),error=self.error,
                     sampled_out=self.sampler.sampled_out if self.sampler else 0,
-                    sampling='10Hz_state_changes_1Hz_health' if self.sampler else 'all_received',
+                    sampling='periodic_samples_and_state_changes' if self.sampler else 'all_received',
                     input_recording=dict(full_streams=sorted(self.full_streams),
                         closed=self.stop.is_set(),scope='observer_received_ROS_messages',
                         received=self.received_by_stream.copy(),written=self.written_by_stream.copy(),
