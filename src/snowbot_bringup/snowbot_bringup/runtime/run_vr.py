@@ -270,8 +270,13 @@ def run_session(args, manifest):
             start = time.monotonic()
             manifest['phase']='running'
             (args.output/'session.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
+            required = [child for name, child in zip(names, children) if name != 'display']
+            display = children[names.index('display')]
             while not stop.wait(.2):
-                if any(p.poll() is not None for p in children):
+                if display is not None and display.poll() is not None:
+                    print(f'只读显示已退出（{display.returncode}），遥操作继续。', file=sys.stderr, flush=True)
+                    display = None
+                if any(p.poll() is not None for p in required):
                     print('子进程已退出，正在收尾本次遥操作。', file=sys.stderr)
                     result = 1
                     break

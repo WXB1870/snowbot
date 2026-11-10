@@ -171,6 +171,9 @@ class EventLog:
 
 def _server(read_state, trace_file, output, port, ready, views, identity, stop, model_status, parameters=None):
     asyncio.set_event_loop(asyncio.new_event_loop())
+    from collections import deque
+    from types import SimpleNamespace
+    from tornado.websocket import WebSocketClosedError
     import tornado.web
     import tornado.ioloop
     from meshcat.servers.zmqserver import (ZMQWebSocketBridge, WebSocketHandler,
@@ -204,7 +207,46 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
             latest['browser'] = client_status
         return latest
 
+    def allowed_origin(request, origin):
+        from urllib.parse import urlsplit
+        local_ip = request.connection.stream.socket.getsockname()[0]
+        return urlsplit(origin).hostname in (host, local_ip, '127.0.0.1', 'localhost')
+
     class PageSocket(WebSocketHandler):
+        def open(self):
+            # Replay first, then apply live updates in order, with one write in flight.
+            replay = deque()
+            self.bridge.send_scene(SimpleNamespace(write_message=lambda data, binary: replay.append(data)))
+            self.updates = asyncio.Queue()
+            self.queued_bytes = 0
+            self.bridge.websocket_pool.add(self)
+            self.writer = asyncio.create_task(self.drain(replay))
+
+        def update(self, data):
+            self.queued_bytes += len(data)
+            if self.queued_bytes > self.ws_connection.stream.max_buffer_size:
+                self.close(1013, 'Viewer cannot keep up with scene updates')
+                return
+            self.updates.put_nowait(data)
+
+        async def drain(self, replay):
+            try:
+                while replay:
+                    await self.write_message(replay.popleft(), binary=True)
+                while True:
+                    data = await self.updates.get()
+                    self.queued_bytes -= len(data)
+                    await self.write_message(data, binary=True)
+            except WebSocketClosedError:
+                return
+            finally:
+                self.close()
+
+        def on_close(self):
+            self.bridge.websocket_pool.discard(self)
+            if hasattr(self, 'writer'):
+                self.writer.cancel()
+
         def get(self, *args, **kwargs):
             if self.request.headers.get('Upgrade','').lower() == 'websocket':
                 return super().get(*args, **kwargs)
@@ -213,8 +255,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
             self.write(html.read_text().replace('__SNOWBOT_DISPLAY_CONFIG__',json.dumps(parameters['display'])))
 
         def check_origin(self, origin):
-            from urllib.parse import urlsplit
-            return urlsplit(origin).hostname in (host,'127.0.0.1','localhost')
+            return allowed_origin(self.request, origin)
 
     class State(tornado.web.RequestHandler):
         def get(self):
@@ -223,9 +264,8 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
 
     class View(tornado.web.RequestHandler):
         def post(self):
-            from urllib.parse import urlsplit
             origin = self.request.headers.get('Origin')
-            if origin and urlsplit(origin).hostname not in (host,'127.0.0.1','localhost'):
+            if origin and not allowed_origin(self.request, origin):
                 raise tornado.web.HTTPError(403)
             try:
                 value = json.loads(self.request.body)
@@ -247,8 +287,7 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
     class ClientReport(tornado.web.RequestHandler):
         def post(self):
             nonlocal client_status
-            from urllib.parse import urlsplit
-            if urlsplit(self.request.headers.get('Origin','')).hostname not in (host,'127.0.0.1','localhost'):
+            if not allowed_origin(self.request, self.request.headers.get('Origin', '')):
                 raise tornado.web.HTTPError(403)
             if len(self.request.body)>4096:raise tornado.web.HTTPError(400)
             try:
@@ -268,6 +307,11 @@ def _server(read_state, trace_file, output, port, ready, views, identity, stop, 
             return server
 
     class LocalBridge(ZMQWebSocketBridge):
+        def forward_to_websockets(self, frames):
+            for client in tuple(self.websocket_pool):
+                if client.ws_connection is not None:
+                    client.update(frames[2])
+
         def make_app(self):
             return LocalApplication([
                 (r'/', PageSocket, {'bridge':self}),
@@ -418,6 +462,7 @@ def serve(args, read_state=None, stop=None):
             viewer[side+'_tip'].set_object(geom.Sphere(.018),geom.MeshLambertMaterial(color=color))
         start=time.monotonic();count=0;last_stamp=None;tool_enabled=True;last_save=0.;last_source=None
         print('SNOWBOT_WEB_READY '+web_url,flush=True)
+        last_tool_visible = None
         while not stop.is_set() and (not args.duration or time.monotonic()-start < args.duration):
             if not server.is_alive():
                 raise RuntimeError('WEB_SERVER_EXITED')
@@ -460,10 +505,12 @@ def serve(args, read_state=None, stop=None):
                 if tool_pose is not None:
                     viewer['shovel'].set_transform(tool_pose)
                 tool_visible=bool(tool_enabled and tool_pose is not None)
-                viewer['shovel'].set_property('visible',tool_visible)
                 status=pico.get('phase','waiting')+' | '+pico.get('reason','')
             except (OSError,ValueError,KeyError) as exc:
-                status=str(exc);viewer['shovel'].set_property('visible',False)
+                status=str(exc);tool_visible=False
+            if tool_visible != last_tool_visible:
+                viewer['shovel'].set_property('visible',tool_visible)
+                last_tool_visible = tool_visible
             if pose_source!=last_source or time.monotonic()-last_save>=1.:
                 model_status.publish(dict(updated_at=time.time(),
                     url=web_url,applied_frames=count,status=status,robot_commands_published=0,
