@@ -336,6 +336,8 @@ def stop_diagnostic(health, engine, now):
     if stop_code is None and ';' in engine.stop_fault:
         stop_code = engine.stop_fault.split(';', 1)[0]
     powered_hold = stop_code == 'POWERED_HOLD' and getattr(io, 'confirmed_stop_targets', None) is not None
+    pause_ack_only = getattr(engine, 'pause_ack_only', False)
+    require_rest = not (powered_hold or pause_ack_only)
     hold = getattr(obs, 'hold_position', ())
     targets = dict(zip(CONTROL_NAMES, hold)) if len(hold) == len(CONTROL_NAMES) else {}
     errors = {n: abs(fb.positions[n]-targets[n]) for n in names
@@ -345,6 +347,8 @@ def stop_diagnostic(health, engine, now):
               if n in fb.joint_velocities and math.isfinite(fb.joint_velocities[n])}
     position_error = max(errors.values()) if errors else None
     arrival_names = names if getattr(io, 'stop_requires_arrival', True) else tuple(getattr(io, 'stop_arrival_joints', ()))
+    if pause_ack_only:
+        arrival_names = ()
     arrival_errors = {n: errors[n] for n in arrival_names if n in errors}
     arrival_error = max(arrival_errors.values()) if arrival_errors else None
     overrides = getattr(engine.profile, 'stop_position_tolerances', {})
@@ -367,10 +371,10 @@ def stop_diagnostic(health, engine, now):
             reason = 'STOP_REFERENCE_INVALID'
         elif any(e >= arrival_tolerances[n] for n, e in arrival_errors.items()):
             reason = 'STOP_POSITION_ERROR'
-        elif not powered_hold and max_speed > velocity_tolerance:
+        elif require_rest and max_speed > velocity_tolerance:
             reason = 'STOP_SPEED_NOT_ZERO'
         else:
-            reason = 'WAIT_REST_WINDOW' if not powered_hold and getattr(io, 'stop_confirmation_window', 0.) else 'WAIT_EXECUTOR'
+            reason = 'WAIT_REST_WINDOW' if require_rest and getattr(io, 'stop_confirmation_window', 0.) else 'WAIT_EXECUTOR'
     if engine.stop_fault:
         reason = engine.stop_fault
     elif now >= engine.stop_deadline or steady >= engine.stop_steady_deadline:
@@ -380,7 +384,7 @@ def stop_diagnostic(health, engine, now):
     servo = health.states.get('servo', (None, None))[1]
     return dict(reason=reason, ack_reason=ack_reason, session=session, sequence=sequence,
         recovery_required=('device_inspection' if device_fault else
-                           'stop_confirmation' if ack_reason or engine.stop_fault else 'measured_rest'),
+                           'stop_confirmation' if ack_reason or engine.stop_fault or pause_ack_only else 'measured_rest'),
         servo_rejection={key:getattr(servo,key,None) for key in
                          ('rejected_session','rejected_sequence','reason')},
         boot_id=boot, baseline_sample=baseline,
@@ -398,7 +402,7 @@ def stop_diagnostic(health, engine, now):
         remaining_steady_s=engine.stop_steady_deadline-steady,
         max_position_error_rad=position_error, max_speed_rad_s=max_speed,
         max_speed_joint=max(speeds, key=speeds.get) if speeds else None,
-        measured_rest_required=not powered_hold, stop_code=stop_code,
+        measured_rest_required=require_rest, stop_code=stop_code,
         position_error_basis='observed_hold_position',
         arrival_required=bool(arrival_names), arrival_required_joints=list(arrival_names),
         required_reference_arrived=bool(len(arrival_errors)==len(arrival_names) and
@@ -410,7 +414,7 @@ def stop_diagnostic(health, engine, now):
         position_tolerance_rad=position_tolerance,
         arrival_position_tolerances_rad=arrival_tolerances,
         velocity_tolerance_rad_s=velocity_tolerance,
-        rest_window_required_s=0. if powered_hold else getattr(io, 'stop_confirmation_window', 0.),
+        rest_window_required_s=0. if not require_rest else getattr(io, 'stop_confirmation_window', 0.),
         rest_window_elapsed_s=max(0., steady-window[0]) if window else None,
         stop_failures=list(io.stop_failures))
 

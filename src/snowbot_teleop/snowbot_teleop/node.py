@@ -282,7 +282,7 @@ class PicoNode(RuntimeNode):
                 cfg=self.cfg['grippers'][side];value=q[cfg['joint']]
                 modes.append(next((m for m in ('closed','open','virtual') if abs(value-cfg[m])<.003),'unknown'))
             stopped=((self.handoff_complete or not s.lease_active) and s.state not in ('RUNNING','STOPPING') and not s.reference.name and
-                     joints_at_rest(s.joints,self.names,self.profile.feedback_tolerances.get('joint_velocity',.01)) and (not self.position_ops or self.position_ops.stopped(gripper_readings)))
+                     (not self.position_ops or self.position_ops.stopped(gripper_readings)))
             if self.base and self.base.writable and self.base.cfg['require_feedback']:
                 clock = time.monotonic()
                 if not self.base.core.healthy(self.now(), clock):
@@ -295,7 +295,9 @@ class PicoNode(RuntimeNode):
                 if self.stop_request['failed'] or time.monotonic()>=self.stop_request['deadline']:
                     raise RuntimeError('PICO_STOP_UNCONFIRMED')
                 stopped=False
-            return PicoFeedback(seconds(s.feedback_stamp),stopped,tuple(modes))
+            pause_confirmed = stopped and s.state=='CANCELED' and s.code=='PAUSE_CONFIRMED'
+            measured_rest = stopped and joints_at_rest(s.joints,self.names,self.profile.feedback_tolerances.get('joint_velocity',.01))
+            return PicoFeedback(seconds(s.feedback_stamp),measured_rest,tuple(modes),pause_confirmed=pause_confirmed)
         except RuntimeError as exc:
             return PicoFeedback(0.,False,healthy=False,fault=str(exc))
 
@@ -526,7 +528,7 @@ class PicoNode(RuntimeNode):
             if (stop_feedback_matches(s,instance_id=request['instance_id'],epoch=request['epoch'],
                     lease_active=request['lease_active'],profile_hash=self.profile.digest,
                     simulated=self.simulation,requested=request['requested'],now=self.now(),
-                    max_age=self.tool_cfg['feedback_max_age'],
+                    max_age=self.tool_cfg['feedback_max_age'],position_pause=True,
                     at_rest=lambda joints:joints_at_rest(joints,self.names,self.profile.feedback_tolerances.get('joint_velocity',.01))) and
                     (not self.position_ops or self.position_ops.stopped())):
                 if clear:
@@ -945,9 +947,12 @@ class PicoNode(RuntimeNode):
                         steady_now=time.monotonic())
                     arrival=None if reference is None else dict(zip(self.names,reference[0]))
                     nominal_sample_seen=nominal_sample_seen or reference is not None
+                measured_at_goal = all(abs(measured[n]-v)<arrival_tolerance
+                                       for n,v in zip(self.names,end) if n in arrival_names)
                 if (now>=started+duration and (replay is None or (replay_tick-1)*.02>=duration) and
                         seconds(state.feedback_stamp)>=started+duration and
                         arrival is not None and all(abs(arrival[n]-v)<arrival_tolerance for n,v in zip(self.names,end) if n in arrival_names) and
+                        (intent.operation!='prepare' or measured_at_goal) and
                         (recovery is None or all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1]
                                                  for n in self.names)) and
                         (not limit_exit or all(
@@ -956,7 +961,8 @@ class PicoNode(RuntimeNode):
                             for n in recovery_progress)) and
                         joints_at_rest(state.joints,self.names,parameters_for(self,'execution')['motion_arrival_velocity_tolerance_rad_s'])):
                     self.event('PICO_ACTUATOR_ARRIVED',json.dumps(dict(operation=intent.operation,
-                        arrival_basis='sampled_nominal' if nominal_arrival else 'measured',
+                        arrival_basis=('measured_and_sampled_nominal' if nominal_arrival and intent.operation=='prepare'
+                                       else 'sampled_nominal' if nominal_arrival else 'measured'),
                         measured_at_goal=all(abs(measured[n]-v)<arrival_tolerance for n,v in zip(self.names,end)),
                         position_tolerance_rad=arrival_tolerance,
                         error_rad={n:float(v-measured[n]) for n,v in zip(self.names,end)},
@@ -1334,7 +1340,7 @@ class PicoNode(RuntimeNode):
                     ready=measured
                     if getattr(self,'execution_mode','position')=='impedance':
                         ready=(await self.prepare_hold_reference(intent))['positions']
-                    error=max(abs(ready[n]-q) for n,q in target.items())
+                    error=max(max(abs(ready[n]-q), abs(measured[n]-q)) for n,q in target.items())
                     if (self.position_contract and error<self.prepare_position_tolerance and not self.prepare_recovery and
                             (not getattr(self,'prepare_limit_reference',None) or
                              all(self.profile.limits[n][0]<=measured[n]<=self.profile.limits[n][1] for n in target))):
@@ -1540,7 +1546,7 @@ class PicoNode(RuntimeNode):
                     'hand_line' if self.simulation_demo or self.tool_cfg.get('vr_tool_mapping')=='hand_line_midpoint' else 'left_wrist',
                 model_joints=dict(zip(self.state.joints.name,self.state.joints.position)) if feedback.healthy else None,
                 input_max_age_s=self.control.max_age,
-                stop_confirmed=(self.control.rest(self.now()) and self.control.pending is None and
+                stop_confirmed=((feedback.pause_confirmed or self.control.rest(self.now())) and self.control.pending is None and
                                 self.running is None and self.handoff_complete),
                 grasp_applied=None if self.control.teleop_mode=='independent_arms' else
                     'right_axial' if self.control.continuous_axial or self.control.virtual else 'rigid')

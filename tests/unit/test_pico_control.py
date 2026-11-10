@@ -903,6 +903,8 @@ class ScenarioRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 node.validate_prepare=AsyncMock(return_value={'joint':.2});node.reading=lambda:(None,{'joint':.2-error})
                 node.prepare_recovery=None;node.cfg={'prepare_duration':12.};node.simulation_demo=False
                 node.move=AsyncMock();node.now=lambda:0.;node.event=Mock();node.simulation=False
+                node.execution_mode='impedance'
+                node.prepare_hold_reference=AsyncMock(return_value={'positions':{'joint':.2}})
                 await node.perform(S(operation='prepare',token=1))
                 self.assertEqual(node.move.await_count,0 if error<.035 else 1)
                 self.assertTrue(node.control.complete.call_args.args[1])
@@ -1258,7 +1260,7 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         module.PicoNode=S(move=module.move)
         return module
 
-    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=1.,position_contract=True,primitive=False,cancel_at=None,execution_mode='position'):
+    async def arrival(self,operation='prepare',error=.0284,velocity=0.,fresh=True,stop_error=None,parameters=None,tick_period=.02,position_contract=True,primitive=False,cancel_at=None,execution_mode='position'):
         from types import SimpleNamespace as S
         from unittest.mock import Mock,AsyncMock,patch
         module=self.move_module()
@@ -1317,13 +1319,14 @@ class PrepareReturnPathTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError,'PREPARE_RELEASED'):
             await self.arrival(error=.001,primitive=True,tick_period=.005,cancel_at=.2)
 
-    async def test_impedance_a_accepts_nominal_arrival_with_measured_rest(self):
-        node=await self.arrival(error=.04,primitive=True,tick_period=.005,execution_mode='impedance')
+    async def test_impedance_a_requires_measured_arrival_and_rest(self):
+        with self.assertRaisesRegex(RuntimeError,'PICO_ACTUATOR_FEEDBACK_TIMEOUT'):
+            await self.arrival(error=.04,primitive=True,tick_period=.005,execution_mode='impedance')
+        node=await self.arrival(error=.02,primitive=True,tick_period=.005,execution_mode='impedance')
         arrivals=[json.loads(c.args[1]) for c in node.event.call_args_list if c.args[0]=='PICO_ACTUATOR_ARRIVED']
-        self.assertEqual(arrivals[0]['arrival_basis'],'sampled_nominal')
-        self.assertFalse(arrivals[0]['measured_at_goal'])
+        self.assertEqual(arrivals[0]['arrival_basis'],'measured_and_sampled_nominal')
+        self.assertTrue(arrivals[0]['measured_at_goal'])
         self.assertTrue(arrivals[0]['measured_at_rest'])
-        node.prepare_hold_reference.assert_awaited_once()
 
     async def test_configured_prepare_period_and_ttl_reach_real_motion_messages(self):
         from snowbot_hardware.parameters import load_parameters

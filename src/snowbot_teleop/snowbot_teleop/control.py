@@ -44,6 +44,7 @@ class PicoFeedback:
     modes: tuple = ('unknown', 'unknown')
     healthy: bool = True
     fault: str = ''
+    pause_confirmed: bool = False
 
 
 class PicoControl:
