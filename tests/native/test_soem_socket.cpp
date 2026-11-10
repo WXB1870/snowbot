@@ -41,10 +41,62 @@ struct SocketPort {
   std::array<unsigned char,ETH_HEADERSIZE+34> bytes{};
   auto* eth=reinterpret_cast<ec_etherheadert*>(bytes.data());eth->etype=htons(ETH_P_ECAT);eth->sa1=htons(0x0101);
   auto* body=reinterpret_cast<ec_comt*>(bytes.data()+ETH_HEADERSIZE);body->elength=htoes(32);body->index=uint8_t(idx);
+  body->command=EC_CMD_LRW;bytes[ETH_HEADERSIZE+EC_HEADERSIZE]=uint8_t(idx);
   bytes[ETH_HEADERSIZE+32]=uint8_t(wkc);bytes[ETH_HEADERSIZE+33]=uint8_t(wkc>>8);
   assert(send(secondary?redfd[1]:mainfd[1],bytes.data(),bytes.size(),0)==int(bytes.size()));
  }
 };
+#ifdef TEST_SINGLE_READER_PDO
+static void test_single_reader_pdo(SocketPort& socket) {
+ ec_groupt group{};
+ ec_idxstackT frames{};
+ ecx_contextt context{};
+ context.port=&socket.port;
+ context.grouplist=&group;
+ context.idxstack=&frames;
+ std::array<uint8_t,EC_MAXBUF> inputs{};
+ auto queue=[&](uint8_t index){
+  const int pos=frames.pushed++;
+  frames.idx[pos]=index;
+  frames.data[pos]=&inputs[pos];
+  frames.length[pos]=1;
+  inputs[pos]=0xff;
+  socket.port.rxbufstat[index]=EC_BUF_TX;
+ };
+
+ queue(1);queue(2);
+ socket.send_frame(2,40);socket.send_frame(1,27);
+ assert(ecx_receive_processdata_single_reader(&context,50000)==67);
+ assert(inputs[0]==1 && inputs[1]==2);
+
+ queue(3);socket.send_frame(3,0);
+ assert(ecx_receive_processdata_single_reader(&context,50000)==0 && inputs[0]==3);
+ queue(4);socket.send_frame(4,17);
+ assert(ecx_receive_processdata_single_reader(&context,0)==17);
+
+ queue(5);queue(6);socket.send_frame(6,40);
+ assert(ecx_receive_processdata_single_reader(&context,5000)==40);
+ assert(inputs[0]==0xff && inputs[1]==6);
+
+ queue(7);
+ const auto used=cpu();
+ assert(ecx_receive_processdata_single_reader(&context,20000)==EC_NOFRAME);
+ assert(cpu()-used<10000000); // Empty socket must sleep during the 20 ms wait.
+
+ // Hold the decoder past its deadline even though a matching frame is queued.
+ queue(8);socket.send_frame(8,67);
+ pthread_mutex_lock(&socket.port.rx_mutex);
+ std::promise<void> started;
+ auto result=std::async(std::launch::async,[&]{
+  started.set_value();
+  return ecx_receive_processdata_single_reader(&context,5000);
+ });
+ started.get_future().wait();
+ std::this_thread::sleep_for(std::chrono::milliseconds(40));
+ pthread_mutex_unlock(&socket.port.rx_mutex);
+ assert(result.get()==EC_NOFRAME && inputs[0]==0xff);
+}
+#endif
 int main(int argc,char** argv){
  if(argc>1 && std::string(argv[1])=="--timeout-probe"){
   const int timeout_us=std::stoi(argv[2]),count=std::stoi(argv[3]),pause_ms=std::stoi(argv[4]);
@@ -115,6 +167,9 @@ int main(int argc,char** argv){
   s.port.rxbufstat[5]=EC_BUF_TX;
   std::thread delayed([&]{std::this_thread::sleep_for(std::chrono::microseconds(100));s.send_frame(5,67);});
   assert(ecx_waitinframe(&s.port,5,10000)==67);delayed.join();
+#ifdef TEST_SINGLE_READER_PDO
+  test_single_reader_pdo(s);
+#endif
  }
  std::vector<double> wall,cost;int64_t worst_begin=0,worst_end=0;double worst=0;
  for(unsigned i=0;i<(runnable?1u:40u);++i){

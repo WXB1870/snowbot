@@ -303,15 +303,21 @@ def build_soem_socket(source, output):
     soem=Path(source)/'servo_control/thirdparty/soem'
     includes=[soem/p for p in ('soem','osal','osal/linux','oshw/linux')]
     flags=['-O2','-D_GNU_SOURCE','-DEC_VER2','-pthread',*['-I'+str(p) for p in includes]]
+    sources=[soem/'oshw/linux/nicdrv.c',soem/'osal/linux/osal.c']
+    link_flags=[]
+    if 'ecx_receive_processdata_single_reader(' in (soem/'soem/ethercatmain.h').read_text():
+        flags.extend(['-DTEST_SINGLE_READER_PDO','-ffunction-sections','-fdata-sections'])
+        sources.append(soem/'soem/ethercatmain.c')
+        link_flags.append('-Wl,--gc-sections')
     objects=[]
-    for path in (soem/'oshw/linux/nicdrv.c',soem/'osal/linux/osal.c'):
+    for path in sources:
         obj=output/(path.stem+'.o')
         result=subprocess.run([shutil.which('cc'),*flags,'-c',str(path),'-o',str(obj)],capture_output=True,text=True)
         if result.returncode:raise RuntimeError(result.stdout+result.stderr)
         objects.append(obj)
     fixture=Path(__file__).resolve().parents[1]/'native/test_soem_socket.cpp'
     binary=output/'soem-socket'
-    result=subprocess.run([shutil.which('c++'),'-std=c++17',*flags,str(fixture),*map(str,objects),'-o',str(binary)],capture_output=True,text=True)
+    result=subprocess.run([shutil.which('c++'),'-std=c++17',*flags,str(fixture),*map(str,objects),*link_flags,'-o',str(binary)],capture_output=True,text=True)
     if result.returncode:raise RuntimeError(result.stdout+result.stderr)
     return binary
 

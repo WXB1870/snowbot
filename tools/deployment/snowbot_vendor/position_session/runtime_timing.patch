@@ -327,7 +327,8 @@
 +    const auto send_start=std::chrono::steady_clock::now();
      ec_send_processdata();
 +    const auto send_end=std::chrono::steady_clock::now();
-     wkc_ = ec_receive_processdata(EC_CYCLETIME_US);
+-    wkc_ = ec_receive_processdata(EC_CYCLETIME_US);
++    wkc_ = ecx_receive_processdata_single_reader(&ecx_context, EC_CYCLETIME_US);
      const auto io_end = std::chrono::steady_clock::now();
 +    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&io_cpu_end);
 +    position_session::PdoCycleTiming trace;
@@ -396,7 +397,16 @@
      // 无 page fault）。
 --- a/servo_control/thirdparty/soem/oshw/linux/nicdrv.c
 +++ b/servo_control/thirdparty/soem/oshw/linux/nicdrv.c
-@@ -348,7 +348,9 @@
+@@ -30,6 +30,8 @@
+  * This layer if fully transparent for the higher layers.
+  */
+
++#include <errno.h>
++#include <poll.h>
+ #include <sys/types.h>
+ #include <sys/ioctl.h>
+ #include <net/if.h>
+@@ -348,7 +350,9 @@
        stack = &(port->redport->stack);
     }
     lp = sizeof(port->tempinbuf);
@@ -407,3 +417,100 @@
     port->tempinbufs = bytesrx;
 
     return (bytesrx > 0);
+@@ -558,6 +562,37 @@
+    return wkc;
+ }
+
++/* The cyclic PDO thread is the sole reader after the driver's bus handoff. */
++int ecx_waitinframe_single_reader(ecx_portt *port, int idx, int timeout)
++{
++   if (port->redstate != ECT_RED_NONE || timeout <= 0)
++      return ecx_waitinframe(port, idx, timeout);
++
++   osal_timert timer;
++   osal_timer_start(&timer, timeout);
++   struct pollfd socket = {port->sockhandle, POLLIN, 0};
++   do
++   {
++      /* This also checks SOEM's index cache before sleeping on the socket. */
++      int wkc = ecx_inframe(port, idx, 0);
++      ec_timet now = osal_current_time();
++      int64 left_us = ((int64)timer.stop_time.sec - now.sec) * 1000000
++                      + timer.stop_time.usec - now.usec;
++      if (left_us <= 0)
++         return EC_NOFRAME;
++      if (wkc > EC_NOFRAME)
++         return wkc;
++
++      struct timespec remaining = {left_us / 1000000, (left_us % 1000000) * 1000};
++      int ready = ppoll(&socket, 1, &remaining, NULL);
++      if (ready < 0 && errno == EINTR)
++         continue;
++      if (ready <= 0 || !(socket.revents & POLLIN))
++         return EC_NOFRAME;
++   } while (!osal_timer_is_expired(&timer));
++   return EC_NOFRAME;
++}
++
+ /** Blocking send and receive frame function. Used for non processdata frames.
+  * A datagram is build into a frame and transmitted via this function. It waits
+  * for an answer and returns the workcounter. The function retries if time is
+--- a/servo_control/thirdparty/soem/oshw/linux/nicdrv.h
++++ b/servo_control/thirdparty/soem/oshw/linux/nicdrv.h
+@@ -111,6 +111,7 @@
+ int ecx_outframe(ecx_portt *port, int idx, int sock);
+ int ecx_outframe_red(ecx_portt *port, int idx);
+ int ecx_waitinframe(ecx_portt *port, int idx, int timeout);
++int ecx_waitinframe_single_reader(ecx_portt *port, int idx, int timeout);
+ int ecx_srconfirm(ecx_portt *port, int idx,int timeout);
+
+ #ifdef __cplusplus
+--- a/servo_control/thirdparty/soem/soem/ethercatmain.c
++++ b/servo_control/thirdparty/soem/soem/ethercatmain.c
+@@ -1907,7 +1907,8 @@
+  * @param[in]  timeout        = Timeout in us.
+  * @return Work counter.
+  */
+-int ecx_receive_processdata_group(ecx_contextt *context, uint8 group, int timeout)
++static int receive_processdata_group(ecx_contextt *context, uint8 group, int timeout,
++                                     int (*wait_frame)(ecx_portt *, int, int))
+ {
+    int pos, idx;
+    int wkc = 0, wkc2;
+@@ -1926,7 +1927,7 @@
+    while (pos >= 0)
+    {
+       idx = context->idxstack->idx[pos];
+-      wkc2 = ecx_waitinframe(context->port, context->idxstack->idx[pos], timeout);
++      wkc2 = wait_frame(context->port, idx, timeout);
+       /* check if there is input data in frame */
+       if (wkc2 > EC_NOFRAME)
+       {
+@@ -1985,6 +1986,17 @@
+ }
+
+
++int ecx_receive_processdata_group(ecx_contextt *context, uint8 group, int timeout)
++{
++   return receive_processdata_group(context, group, timeout, ecx_waitinframe);
++}
++
++/* Group zero on Snowbot's exclusively owned cyclic port. */
++int ecx_receive_processdata_single_reader(ecx_contextt *context, int timeout)
++{
++   return receive_processdata_group(context, 0, timeout, ecx_waitinframe_single_reader);
++}
++
+ int ecx_send_processdata(ecx_contextt *context)
+ {
+    return ecx_send_processdata_group(context, 0);
+--- a/servo_control/thirdparty/soem/soem/ethercatmain.h
++++ b/servo_control/thirdparty/soem/soem/ethercatmain.h
+@@ -522,6 +522,7 @@
+ int ecx_send_processdata(ecx_contextt *context);
+ int ecx_send_overlap_processdata(ecx_contextt *context);
+ int ecx_receive_processdata(ecx_contextt *context, int timeout);
++int ecx_receive_processdata_single_reader(ecx_contextt *context, int timeout);
+ int ecx_send_processdata_group(ecx_contextt *context, uint8 group);
+
+ #ifdef __cplusplus
