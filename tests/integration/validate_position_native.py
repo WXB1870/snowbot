@@ -442,6 +442,8 @@ def main():
             if args.sanitize:command[1:1]=['-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer']
             if name=='test_position_session':
                 command.insert(1,'-DPOSITION_PDO_OUTPUT_TEST')
+                if 'hold_receive' in manifest['components']:
+                    command.insert(1,'-DPOSITION_HOLD_RECEIVE_TEST')
                 command.append(str(write_pdo_check(args.source,work)))
             elif name in ('test_position_shutdown','test_position_target','test_production_target','test_production_position_cycle'):
                 command.extend(map(str,native_sources))

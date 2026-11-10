@@ -1,0 +1,94 @@
+--- a/servo_control/include/servo_control/position_watchdog.h
++++ b/servo_control/include/servo_control/position_watchdog.h
+@@ -4,2 +4,3 @@
+ struct Output {
++ double hold_position_tolerance=0.,hold_velocity_tolerance=0.;
+  bool shutdown=false,shutdown_disable=false;int64_t shutdown_deadline=0;
+@@ -28,2 +29,5 @@
+  uint8_t latched_failure=OK;bool nominal_pause=false;
++ // PDO-thread state. A miss can bridge only an already acknowledged fixed hold.
++ uint64_t confirmed_attempt=0;
++ bool hold_gap=false,recovery_invalid=false;
+  Output nominal_source{};
+@@ -43,2 +47,24 @@
+  }
++ bool within_hold_gap(const Observation& obs,int64_t now)const{
++  constexpr unsigned trip_after=3;
++  return confirmed_attempt && obs.wkc==-1 && obs.expected_wkc>0 &&
++   obs.attempt>confirmed_attempt && obs.attempt-confirmed_attempt<trip_after &&
++   now>=obs.sampled_ns && now-obs.sampled_ns<=20000000 && now<output.rt_deadline;
++ }
++ bool finish_hold_receive(const Observation& obs){
++  bool confirmed=obs.hold_valid && obs.reference_valid && nominal_matches(output) &&
++   !output.shutdown && !output.shutdown_disable && (!output.impedance || sensor_measured(obs,obs.attempted_ns));
++  if(confirmed){
++   for(unsigned i=0;i<joint_count;++i){
++    const auto slot=position_slot(i);
++    if(std::abs(obs.position[slot]-hold[i])>output.hold_position_tolerance ||
++       std::abs(obs.speed[slot])>output.hold_velocity_tolerance){confirmed=false;break;}
++   }
++  }
++  const bool complete=obs.expected_wkc>0 && obs.wkc==obs.expected_wkc;
++  recovery_invalid=hold_gap && complete && !confirmed;
++  hold_gap=within_hold_gap(obs,obs.attempted_ns) && !latched_failure && !disabled && nominal_matches(output);
++  if(!hold_gap)confirmed_attempt=confirmed?obs.attempt:0;
++  return hold_gap;
++ }
+  void report_hold(Observation& obs,uint32_t written)const{
+@@ -57,2 +83,6 @@
+   const bool healthy=measured(obs,now) && !(fault_mask(obs)&controlled_mask) && (!input.impedance || sensor_measured(obs,now));
++  // Keep the last applied q/v/gains/torque and its original RT deadline.
++  if(hold_gap && within_hold_gap(obs,now) && !latched_failure && input.selected &&
++     !input.shutdown && !input.shutdown_disable && input.policy==output.policy && !input.failure_reason &&
++     input.impedance==output.impedance && input.reference_mode==output.reference_mode && input.rt_deadline>now && nominal_matches(input))return;
+   const bool takeover=input.selected && input.operation==1 && input.admission_generation>seen_admission &&
+@@ -85,2 +115,3 @@
+   else if(input.impedance && sensor_failures>=3)failure=IMPEDANCE_INVALID;
++  else if(recovery_invalid)failure=FEEDBACK_INVALID;
+   else if(input.trajectory && (input.rt_deadline<=0 || now>=input.rt_deadline) &&
+--- a/servo_control/include/servo_control/position_observation.h
++++ b/servo_control/include/servo_control/position_observation.h
+@@ -32,2 +32,3 @@
+ struct Observation {
++ bool awaiting_hold_rx=false; // Retained complete measurement; no new receive acknowledgement.
+  bool shutdown_disabled=false;
+@@ -58,3 +59,3 @@
+  std::atomic<unsigned> middle_{1};
+- unsigned back_=2,front_=0;
++ unsigned back_=2,front_=0,last_published_=0;
+  PriorityMutex readers_;
+@@ -62,4 +63,6 @@
+  static_assert(std::atomic<unsigned>::is_always_lock_free,"lock-free mailbox required");
+- void publish(const Observation& value) {
+-  slots_[back_]=value;
++ void publish(const Observation& value,bool hold_gap=false) {
++  slots_[back_]=hold_gap?slots_[last_published_]:value;
++  slots_[back_].awaiting_hold_rx=hold_gap;
++  last_published_=back_;
+   back_=middle_.exchange(back_|4u,std::memory_order_acq_rel)&3u;
+--- a/servo_control/src/servo_control/ethercat_driver.cpp
++++ b/servo_control/src/servo_control/ethercat_driver.cpp
+@@ -1042,3 +1042,3 @@
+     obs.reference_valid=obs.output_valid&&applied.trajectory&&applied.failure_reason==0&&session_watchdog_.reason<=position_session::PAUSED;
+-    observation_cache_.publish(obs);
++    observation_cache_.publish(obs,session_watchdog_.finish_hold_receive(obs));
+     ++completed_pdo_cycles_;
+--- a/servo_control/src/ros_controller/rosLoop.cpp
++++ b/servo_control/src/ros_controller/rosLoop.cpp
+@@ -106,2 +106,3 @@
+         const auto s=EtherCAT_positionObservation();const auto now=position_session::steady_ns();
++        if(s.awaiting_hold_rx)return; // No new measurement to publish on this tick.
+         snowbot_ctl_msgs::msg::PositionObservation m;
+@@ -2383,2 +2384,3 @@
+  if(!position_admission_)return;
++ if(position_local_hold_ && EtherCAT_positionObservation().awaiting_hold_rx)return;
+  auto* result=position_admission_->poll();if(!result){position_target_dispatch();return;}
+@@ -2420,2 +2422,3 @@
+   position_gate_.generation()==position_output_.admission_generation;
++ if(local_hold && EtherCAT_positionObservation().awaiting_hold_rx)return;
+  // Admission identity survives clock conversion; revocation changes generation.
+@@ -2461,2 +2464,4 @@
+     position_output_.failure_reason==0 && position_gate_.live(now))position_local_hold_=true;
++ position_output_.hold_position_tolerance=position_trajectory_.tuning().held_takeover_position_tolerance_rad;
++ position_output_.hold_velocity_tolerance=position_trajectory_.tuning().takeover_velocity_tolerance_rad_s;
+  position_output_.nominal_hold=position_local_hold_ && position_gate_.generation()==position_output_.admission_generation && position_output_.failure_reason==0;

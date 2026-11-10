@@ -145,7 +145,72 @@ void check_ros_feedback_budget(){
 }
 } // namespace
 
+#ifdef POSITION_HOLD_RECEIVE_TEST
+void check_hold_receive_window(){
+ constexpr int64_t ms=1000000;
+ for(const std::string scenario:{"recover_one","recover_two","third","partial","drive_fault","lost_enable",
+                                 "sensor","drift","speed","shutdown","new_motion","following","unconfirmed","rt_expired"}){
+  Watchdog w;ObservationCache cache;Observation o;Output p;
+  int64_t now=1000000000;
+  p.selected=p.trajectory=p.impedance=p.impedance_mode=true;
+  p.policy=2;p.operation=2;p.trajectory_phase=4;p.admission_generation=3;p.session=9;p.sequence=2;
+  p.nominal_hold=scenario!="following";p.deadline=now+200*ms;p.rt_deadline=now+20*ms;
+  if(scenario=="following"){p.operation=0;p.trajectory_phase=2;}
+  p.hold_position_tolerance=.25;p.hold_velocity_tolerance=.01;
+  p.q.fill(.17f);p.kp.fill(1);p.kd.fill(.2f);p.torque.fill(2);
+  auto receive=[&](int wkc){
+   ++o.attempt;o.attempted_ns=now;o.wkc=wkc;o.expected_wkc=67;
+   o.valid_mask=0;o.sensor_valid_mask=0;
+   if(wkc==67){++o.sample;o.sampled_ns=now;o.valid_mask=0xfffff;
+    o.sensor_valid_mask=3;o.sensor_sampled_ns.fill(now);}
+   w.report_hold(o,controlled_mask);o.reference_valid=o.hold_valid;
+   cache.publish(o,w.finish_hold_receive(o));
+  };
+  o.status.fill(0x27);receive(67);w.evaluate(p,o,now);receive(67);
+  const auto last=cache.read();const auto before=w.output;
+  if(scenario=="unconfirmed"){o.hold_valid=false;w.finish_hold_receive(o);}
+  ++p.sample_time_ns;p.q.fill(.3f);p.torque.fill(7);p.kp.fill(4);p.kd.fill(.5f);p.v.fill(.02f);
+  now+=ms;receive(scenario=="partial"?40:-1);
+  if(scenario=="shutdown"){p.shutdown=true;p.shutdown_deadline=now+100*ms;}
+  if(scenario=="new_motion"){p.operation=1;++p.admission_generation;++p.sequence;p.nominal_hold=false;}
+  if(scenario=="rt_expired")now=p.rt_deadline;
+  w.evaluate(p,o,now);
+  if(scenario=="partial" || scenario=="shutdown" || scenario=="new_motion" ||
+     scenario=="following" || scenario=="unconfirmed" || scenario=="rt_expired"){
+   assert(w.disabled);continue;
+  }
+  auto frozen=[&]{
+   auto retained=cache.read();
+   assert(retained.awaiting_hold_rx && retained.sample==last.sample && retained.sampled_ns==last.sampled_ns);
+   assert(o.wkc==-1 && o.valid_mask==0 && !o.hold_valid);
+   assert(!w.disabled && w.reason==PAUSED && w.output.q==before.q && w.output.v==before.v &&
+          w.output.kp==before.kp && w.output.kd==before.kd && w.output.torque==before.torque &&
+          w.output.sample_time_ns==before.sample_time_ns && w.output.rt_deadline==before.rt_deadline);
+  };
+  frozen();
+  if(scenario!="recover_one"){now+=ms;receive(-1);w.evaluate(p,o,now);frozen();}
+  now+=ms;
+  if(scenario=="drive_fault")o.status[0]|=8;
+  if(scenario=="lost_enable")o.status[0]=0x23;
+  if(scenario=="drift")o.position[0]=.26f;
+  if(scenario=="speed")o.speed[0]=.02f;
+  if(scenario=="sensor")o.wrench[0]=std::numeric_limits<float>::quiet_NaN();
+  receive(scenario=="third"?-1:67);w.evaluate(p,o,now);
+  assert(!cache.read().awaiting_hold_rx);
+  if(scenario=="recover_one" || scenario=="recover_two"){
+   assert(!w.disabled && w.reason==PAUSED && o.sample==last.sample+1);
+   now+=ms;receive(-1);w.evaluate(p,o,now);assert(!w.disabled); // new burst
+  }else{
+   assert(w.disabled);if(scenario=="drive_fault")assert(w.reason==DRIVE_FAULT);now+=ms;receive(67);w.evaluate(p,o,now);assert(w.disabled);
+  }
+ }
+ std::cout<<"PASS confirmed hold: one/two missing frames freeze output, third latches, independent faults remain active\n";
+}
+#endif
 int main(){
+#ifdef POSITION_HOLD_RECEIVE_TEST
+ check_hold_receive_window();
+#endif
  check_ros_feedback_budget();
 #ifdef POSITION_PDO_OUTPUT_TEST
  check_position_pdo_output();
