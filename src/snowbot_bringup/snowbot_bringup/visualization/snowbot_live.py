@@ -148,20 +148,26 @@ def observe(args, publish=None, stop=None):
             node.create_subscription(cls,ns+'/'+topic,lambda msg,key=stream:
                 diagnostics.record(key,msg,ros=True),qos)
     start = time.monotonic()
-    last_trace = 0.
-    next_snapshot=0.
+    next_trace = 0.
+    snapshot_period = .1 if real_vendor and publish is not None else 1/30.
+    next_snapshot = next_pdo_check = 0.
+    pdo_state = None
     print('LIVE_OBSERVER_READY '+('memory' if publish else str(args.state_file)), flush=True)
     try:
         while rclpy.ok() and not (stop and stop.is_set()) and (not args.duration or time.monotonic()-start < args.duration):
             rclpy.spin_once(node, timeout_sec=.005)
-            if time.monotonic()<next_snapshot:continue
-            next_snapshot=time.monotonic()+1/30.
+            steady = time.monotonic()
+            if pdo_observer and steady >= next_pdo_check:
+                pdo_state = pdo_observer.sample(time.time(), steady)
+                next_pdo_check = steady + 1/30.
+            if steady < next_snapshot:continue
+            next_snapshot = steady + snapshot_period
             msg = latest['state']
             now = time.time()
             data = dict(meta, written_at=now, valid=False, q={}, feedback_stamp=0.,
                         execution='WAITING', pico={})
             if pdo_observer:
-                data['pdo'] = pdo_observer.sample(now, time.monotonic())
+                data['pdo'] = pdo_state
             if msg is not None:
                 data.update(runtime_mode=msg.runtime_mode, device_backend=msg.device_backend,
                     feedback_stamp=msg.feedback_stamp.sec+msg.feedback_stamp.nanosec*1e-9,
@@ -192,9 +198,9 @@ def observe(args, publish=None, stop=None):
                 temporary = args.state_file.with_suffix('.tmp')
                 temporary.write_text(json.dumps(data, allow_nan=False))
                 temporary.replace(args.state_file)
-            if args.trace_file and time.monotonic()-last_trace >= .1:
+            if args.trace_file and steady >= next_trace:
                 diagnostics.record('diagnostics',data)
-                last_trace = time.monotonic()
+                next_trace = steady + .1
     except (KeyboardInterrupt,rclpy.executors.ExternalShutdownException):
         pass
     finally:
