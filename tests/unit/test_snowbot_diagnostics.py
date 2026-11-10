@@ -324,6 +324,33 @@ class SamplingTests(unittest.TestCase):
         self.assertTrue(all(sampler.keep('runtime-events',value,1.003) for _ in range(100)))
         self.assertTrue(all(sampler.keep('accepted-commands',{},1.003) for _ in range(100)))
 
+    def test_submit_sampling_preserves_fault_neighbors_and_full_timing_statistics(self):
+        for enabled in ('0','1'):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory, patch.dict(
+                    diagnostics.os.environ, {'BINDU_TIMING_TRACE':enabled}):
+                root=Path(directory)
+                writer=diagnostics.DiagnosticWriter(root/'diagnostics.jsonl')
+                with patch.object(diagnostics.time,'monotonic',return_value=1.):
+                    for seq in range(9):
+                        if seq==5:
+                            writer.record('runtime-events',dict(state='TARGET_REJECTED',task_id='t',code='expired'))
+                        writer.record('runtime-events',dict(state='BIMANUAL_SUBMIT_TIMING',task_id='t',
+                            command_id=str(seq),code=json.dumps(dict(input_seq=seq,submit_round_trip_s=.01*seq))))
+                writer.close()
+                events=[json.loads(line)['data'] for line in (root/'runtime-events.jsonl').read_text().splitlines()]
+                ids=[int(e['command_id']) for e in events if e['state']=='BIMANUAL_SUBMIT_TIMING']
+                self.assertEqual(ids,list(range(9)) if enabled=='1' else [0,5,6,7])
+                self.assertEqual(sum(e['state']=='TARGET_REJECTED' for e in events),1)
+                context=root/'submit-context.jsonl'
+                if enabled=='0':
+                    before=json.loads(context.read_text())['data']['before']
+                    self.assertEqual([int(row['command_id']) for row in before],[2,3,4])
+                else:
+                    self.assertFalse(context.exists())
+                counts=[json.loads(line)['data']['metrics']['submit_round_trip_s']['count']
+                        for line in (root/'timing-summary.jsonl').read_text().splitlines()]
+                self.assertEqual(sum(counts),9)
+
     def test_writer_exposes_intentional_sampling_separately_from_queue_loss(self):
         with tempfile.TemporaryDirectory() as directory:
             writer=diagnostics.DiagnosticWriter(Path(directory)/'diagnostics.jsonl')

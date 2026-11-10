@@ -1,7 +1,8 @@
 """Bounded asynchronous diagnostic writer, outside the control processes."""
 import json
 import math
-from collections import OrderedDict
+import os
+from collections import OrderedDict, deque
 from pathlib import Path
 import queue
 import re
@@ -194,10 +195,13 @@ def sampling_policy(stream, value, settings=None, input_settings=None):
     elif stream == 'runtime-events':
         event = _field(value, 'state')
         # Keep command/session mapping and all other discrete events in full.
+        if event == 'BIMANUAL_SUBMIT_TIMING':
+            return period, (stream, event), _field(value, 'task_id')
         if event not in ('TELEOP_IK_RESULT', 'BIMANUAL_QP_RESULT'):return 0., key, None
+        key = (stream, event)
         try:
             code = json.loads(_field(value, 'code', ''))
-            state = (event, code.get('code'))
+            state = (_field(value, 'task_id'), code.get('code'))
         except (ValueError, TypeError, AttributeError):return 0., key, None
     else:
         return 0., key, None
@@ -383,6 +387,14 @@ class WrenchObserver:
                     calibration_verified=False, units_verified=False, publisher_identity_verified=False)
 
 
+# Discrete admission, execution and feedback evidence surrounding a software submit.
+_SUBMIT_FAULT_EVENTS = frozenset((
+    'BIMANUAL_RESULT_STALE', 'BIMANUAL_RESULT_DISCARDED', 'BIMANUAL_WORK_REJECTED',
+    'BIMANUAL_WORKER_FAILED', 'BIMANUAL_REFERENCE_WAIT', 'TRAJECTORY_REFERENCE_EMPTY',
+    'DEVICE_COMMAND_DETAIL', 'DEVICE_FEEDBACK_DETAIL', 'TARGET_REJECTED', 'REJECTED', 'FAILED',
+))
+
+
 class DiagnosticWriter:
     def __init__(self, path, *, capacity=None, chunk_bytes=None, sampling=True,
                  health_filename='diagnostics-health.json', echo=False, full_streams=(), settings=None, input_settings=None,
@@ -396,6 +408,9 @@ class DiagnosticWriter:
         self.stop=threading.Event();self.error='';self.dropped=0;self.written=0
         self.sampler=DiagnosticSampler(settings, input_settings) if sampling else None
         self.timings=TimingStatistics(runtime_parameters)
+        self.trace_timing = os.environ.get('BINDU_TIMING_TRACE') == '1'
+        self.recent_submits = deque(maxlen=3)
+        self.submits_after_fault = 0
         self.full_streams=frozenset(full_streams)
         self.received_by_stream={};self.dropped_by_stream={};self.written_by_stream={}
         self.repeats=RepeatedLogs(self._emit_log)
@@ -408,7 +423,32 @@ class DiagnosticWriter:
         if self.error or self.stop.is_set():
             self._drop(stream);return
         if self.timings.observe(stream, value, time.time()):return
-        if stream not in self.full_streams and self.sampler and not self.sampler.keep(stream,value,time.monotonic()):return
+        if stream not in self.full_streams and self.sampler:
+            if stream == 'runtime-events':
+                event = _field(value, 'state')
+                if event == 'BIMANUAL_STARTED':
+                    self.recent_submits.clear()
+                    self.submits_after_fault = 0
+                elif event == 'BIMANUAL_SUBMIT_TIMING':
+                    if self.trace_timing:
+                        self._enqueue(stream, value, ros)
+                        return
+                    self.recent_submits.append(dict(task_id=_field(value,'task_id'),
+                        command_id=_field(value,'command_id'), timing=_field(value,'code')))
+                    if self.submits_after_fault:
+                        self.submits_after_fault -= 1
+                        self._enqueue(stream, value, ros)
+                        return
+                elif event in _SUBMIT_FAULT_EVENTS and not self.trace_timing:
+                    if self.recent_submits:
+                        self._enqueue('submit-context', dict(trigger=event, task_id=_field(value,'task_id'),
+                            command_id=_field(value,'command_id'), before=list(self.recent_submits)), False)
+                        self.recent_submits.clear()
+                    self.submits_after_fault = 3
+                elif self.trace_timing and event in ('BIMANUAL_QP_RESULT', 'TELEOP_IK_RESULT'):
+                    self._enqueue(stream, value, ros)
+                    return
+            if not self.sampler.keep(stream,value,time.monotonic()):return
         self._enqueue(stream, value, ros)
 
     def _drop(self, stream):

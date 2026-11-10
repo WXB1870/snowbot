@@ -26,6 +26,8 @@ def pinned(path):
 
 
 def adapter_trace_env():
+    if os.environ.get('BINDU_TIMING_TRACE') != '1':
+        return {}
     from ament_index_python.packages import get_package_prefix
     prefix = Path(get_package_prefix('snowbot_hardware'))
     user_probe = prefix / 'lib/snowbot_hardware/pdo-userspace/reader.so'

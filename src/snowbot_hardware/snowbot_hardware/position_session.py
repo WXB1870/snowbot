@@ -67,6 +67,8 @@ class PositionSessionIO(SnowbotIO):
                 self.reference_diagnostic(reason, None if sample is None else sample[0], now)
             self.reference_export_empty = True
             return (now, {}, {}, {})
+        if self.reference_export_empty and self.reference_diagnostic is not None:
+            self.reference_diagnostic('recovered', sample[0], now)
         self.reference_export_empty = False
         return sample
 
@@ -333,7 +335,8 @@ class PositionSessionDevices:
             observation_stamp=None if obs is None else obs.header.stamp.sec+obs.header.stamp.nanosec*1e-9,
             session=None if obs is None else int(obs.session),sequence=None if obs is None else int(obs.command_sequence),
             segment_id=None if obs is None else int(obs.segment_id),pdo_sample=None if obs is None else int(obs.pdo_sample))
-        self.node.event('TRAJECTORY_REFERENCE_EMPTY',json.dumps(detail,separators=(',', ':')))
+        event = 'TRAJECTORY_REFERENCE_RECOVERED' if reason == 'recovered' else 'TRAJECTORY_REFERENCE_EMPTY'
+        self.node.event(event,json.dumps(detail,separators=(',', ':')))
 
     def log_stale_observation(self, detail):
         if self.pdo_delivery is not None:
@@ -541,8 +544,12 @@ class PositionSessionDevices:
         if state == 'waiting':
             if not self.health.target_feedback_ready():
                 return  # Capture the startup hold point from a fresh measurement.
-            self.startup_timing = dict(points=[])
+            trace = getattr(self.node, 'trace_timing', False)
+            if trace:
+                self.startup_timing = dict(points=[])
             def mark(phase):
+                if not trace:
+                    return
                 self.startup_timing['points'].append(dict(phase=phase,
                     steady=self.health.steady(), cpu=time.thread_time(),
                     ros=self.node.now(), pdo_sample=self.health.sample,
@@ -674,7 +681,7 @@ class PositionSessionDevices:
             raise
 
     def _send_packet(self, groups, target):
-        capture = not self.sent or self.io.sending_hold
+        capture = getattr(self.node, 'trace_timing', False) and (not self.sent or self.io.sending_hold)
         if capture:
             if not self.sent:self.send_timing = {}
             trace = dict(points=[])

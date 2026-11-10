@@ -54,6 +54,10 @@ VR 长按 A 的动态准备回位默认时长为15秒，由 `teleop.json` 的 `m
 
 正式位置会话固定为`session_v3`，日常菜单和配方无需选择协议。旧现场JSON的`arguments.position_protocol`、节点的`position_protocol`及servo YAML的`position_reference_mode`均须删除；加载时会明确拒绝。内部`reference_mode=2`、普通目标配方version 2、刚性预测version 3和准备回放version 4/5保持原语义。位置／阻抗仍为执行方式，旧Follower的`position_max_velocity/position_max_acceleration`须显式迁移到`trajectory_max_velocity/trajectory_max_acceleration`，`bindu_guard`须删除，旧键均会拒绝加载。`main` 同时支持 `position` 与 `impedance`；编入阻抗后端仍由已有 `--with-impedance` 选择，现场版本不自动升级。
 
+日常诊断保留首个坏周期、反馈与命令序号、拒绝原因和停止结果。正常双臂提交明细按 10 Hz 采样，全部收到的提交仍计入五秒时延统计。出现候选过期、参考缺失或执行拒绝时，`submit-context.jsonl` 可关联之前最多三条提交，后续最多三条提交保存在 `runtime-events.jsonl`。
+
+需要定位 Orin 调度或 DDS 延迟时，在启动前给 `base` 和 `vr`／`replay` 两个终端分别设置 `export BINDU_TIMING_TRACE=1`，会启用逐周期计时、完整提交明细，并在匹配的 Humble 环境加载已安装的 DDS 探针。下次日常启动前执行 `unset BINDU_TIMING_TRACE`。独立的调度跟踪和 EtherCAT 抓包仍按需手动运行。
+
 ## 维护分支
 
 Bindu 与 Snowbot 均维护以下两条分支。两仓 main 保持现有架构，精简分支承载配套重构；Snowbot 通过 `dependencies.repos` 分别固定对应 Bindu 分支的提交，应用与框架配套选版。

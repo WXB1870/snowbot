@@ -34,7 +34,7 @@ class SnowbotAdapter(ExecutionNode):
                                self.robot_io.command_enabled)
         self.get_logger().info('Snowbot publication mode env: '+os.environ.get('RMW_FASTRTPS_PUBLICATION_MODE', 'UNSET')+
                                '; qos_from_xml='+os.environ.get('RMW_FASTRTPS_USE_QOS_FROM_XML', 'UNSET'))
-        self.reader_trace = os.environ.get('SNOWBOT_PDO_TRACE') == '1'
+        self.reader_trace = self.trace_timing and os.environ.get('SNOWBOT_PDO_TRACE') == '1'
         if self.reader_trace:
             from .pdo_reader_trace import notify
             notify('armed', self.get_logger())
@@ -85,23 +85,24 @@ class SnowbotAdapter(ExecutionNode):
         return super().lease(request, reply)
 
     def tick(self):
-        wall, cpu = time.monotonic(), time.thread_time()
-        self._tick_timing = dict(started_monotonic=wall, points=[])
+        if self.trace_timing:
+            self._tick_timing = dict(started_monotonic=time.monotonic(), started_cpu=time.thread_time(), points=[])
         self.snowbot_devices.advance_session()
-        self._tick_timing['points'].append(('session', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
+        self.record_adapter_phase('session')
         if not self.closing:
             self.snowbot_devices.advance_startup_hold(self.engine)
-            self._tick_timing['points'].append(('startup_hold', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
+            self.record_adapter_phase('startup_hold')
             self.snowbot_devices.brake_before_source_expiry(self.engine)
-            self._tick_timing['points'].append(('source_expiry', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
+            self.record_adapter_phase('source_expiry')
         super().tick()
-        self._tick_timing['points'].append(('engine', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
+        self.record_adapter_phase('engine')
         self.record_stop_check()
-        self._tick_timing['points'].append(('stop_log', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
+        self.record_adapter_phase('stop_log')
         if getattr(self, 'grippers', None) and self.grippers.core:
             self.grippers.tick()
-        self._tick_timing['points'].append(('gripper', (time.monotonic()-wall)*1000, (time.thread_time()-cpu)*1000))
-        self._previous_tick_timing = self._tick_timing
+        self.record_adapter_phase('gripper')
+        if self.trace_timing:
+            self._previous_tick_timing = self._tick_timing
         delivery = getattr(self.snowbot_devices, 'pdo_delivery', None)
         if delivery is not None:
             window = delivery.finish(time.monotonic())
@@ -112,6 +113,12 @@ class SnowbotAdapter(ExecutionNode):
                 if self.reader_trace:
                     from .pdo_reader_trace import notify
                     notify(payload, self.get_logger())
+
+    def record_adapter_phase(self, phase):
+        if self.trace_timing:
+            timing = self._tick_timing
+            timing['points'].append((phase, (time.monotonic()-timing['started_monotonic'])*1000,
+                                     (time.thread_time()-timing['started_cpu'])*1000))
 
     def record_stop_check(self):
         # Emit from the explicit non-RT loop, never from a health predicate.
@@ -129,8 +136,8 @@ class SnowbotAdapter(ExecutionNode):
         signature = (data['boot_id'], data['session'], data['sequence'], terminal)
         steady = engine.steady()
         first = signature != getattr(self, '_stop_check_signature', None)
-        if (first or
-                engine.stopping and steady-getattr(self, '_stop_check_at', 0.) >= .5):
+        reason_changed = data['reason'] != getattr(self, '_stop_check_reason', None)
+        if first or (engine.stopping and reason_changed and steady-self._stop_check_at >= .5):
             if first:
                 data['feedback_callbacks'] = health.observation_diagnostic()
                 data['startup_timing'] = getattr(devices, 'startup_timing', None)
@@ -147,7 +154,7 @@ class SnowbotAdapter(ExecutionNode):
                 self.get_logger().warn('STOP_CHECK_LOG_ERROR:'+str(exc), throttle_duration_sec=1.)
                 return  # Diagnostic encoding must not terminate the control loop.
             self._stop_check_signature, self._stop_check_at = signature, steady
-            reason = data['reason']
+            self._stop_check_reason = reason = data['reason']
             if reason == 'PAUSE_SEQUENCE_MISMATCH':
                 summary = '等待暂停回执：期望序号%s，当前序号%s' % (
                     data['sequence'], data['observed']['command_sequence'])
@@ -188,7 +195,7 @@ def main():
     os.environ.setdefault('RMW_FASTRTPS_PUBLICATION_MODE', 'ASYNCHRONOUS')
     if os.environ.get('ROS_DISTRO') == 'humble':
         from .pdo_executor import HumbleObservationExecutor
-        if os.environ.get('SNOWBOT_PDO_USERSPACE') == '1':
+        if os.environ.get('BINDU_TIMING_TRACE') == '1' and os.environ.get('SNOWBOT_PDO_USERSPACE') == '1':
             from .pdo_runtime_trace import ReaderTraceExecutor
             run_execution(SnowbotAdapter, executor_factory=ReaderTraceExecutor)
         else:

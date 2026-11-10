@@ -22,7 +22,10 @@ class ReferenceDeliveryBudgetTests(unittest.TestCase):
         io = PositionSessionIO.__new__(PositionSessionIO)
         io.now = lambda: 10.
         io.targets, io.stop_targets = {'arm_l_joint_1': .1}, {}
-        io.reference_diagnostic, io.reference_unavailable_reason = None, 'no_sample'
+        events = []
+        io.reference_export_empty = False
+        io.reference_diagnostic = lambda reason, stamp, now: events.append(reason)
+        io.reference_unavailable_reason = 'no_sample'
         for age in (.021408, .039, .053, .098):
             io.servo_reference = (10.-age, {'arm_l_joint_1': .1}, {}, {})
             self.assertEqual(io.sampled_reference()[1], io.targets)
@@ -31,6 +34,11 @@ class ReferenceDeliveryBudgetTests(unittest.TestCase):
             self.assertEqual(io.sampled_reference()[1], {})
         io.servo_reference = None
         self.assertEqual(io.sampled_reference()[1], {})
+        self.assertEqual(events,['sample_expired'])
+        io.servo_reference = (9.99, io.targets, {}, {})
+        io.sampled_reference()
+        io.sampled_reference()
+        self.assertEqual(events,['sample_expired','recovered'])
 
     def test_adapter_entry_sets_async_before_runner_and_preserves_override(self):
         source = Path(__file__).resolve().parents[2]/'src/snowbot_hardware/snowbot_hardware/adapter.py'

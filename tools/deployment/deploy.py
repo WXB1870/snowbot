@@ -601,13 +601,13 @@ def copy_service_output(name, child, writer):
 
 def base_commands(workspace, execution_mode='impedance'):
     vendor_env = {k:v for k,v in os.environ.items() if k in
-        ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML')}
+        ('HOME', 'USER', 'LANG', 'TERM', 'ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML', 'BINDU_TIMING_TRACE')}
     vendor_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     shell = ['bash', '--noprofile', '--norc', '-ec',
              'source "$1/tools/deployment/snowbot_vendor/env_118.sh" "$2/vendor"; shift 2; exec stdbuf -oL -eL "$@"',
              'snowbot-vendor', str(ROOT), str(workspace)]
     sudo = ['sudo', '-n', 'env', *[k+'='+vendor_env[k] for k in
-            ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML') if k in vendor_env]]
+            ('ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'FASTDDS_BUILTIN_TRANSPORTS', 'IMPEDANCE_PARAMS_YAML', 'BINDU_TIMING_TRACE') if k in vendor_env]]
     return (
         ('servo', [*sudo, *shell, 'ros2', 'run', 'snowbot_servo_control', 'servo_node',
                    '--ros-args', '--params-file', str(workspace/'vendor-position.yaml'),
@@ -652,7 +652,7 @@ def services(bindu, workspace, execution_mode='impedance'):
             print(f'LOGS {logdir}', flush=True)
             from snowbot_hardware.pdo_reader_trace import PRIVATE_DDS
             private_dds = workspace/'upper/install/snowbot_hardware'/PRIVATE_DDS
-            if private_dds.is_file():
+            if os.environ.get('BINDU_TIMING_TRACE') == '1' and private_dds.is_file():
                 # Use the base terminal's existing sudo ticket. This separate process
                 # only observes the adapter and exits when this base process exits.
                 collector = ROOT/'src/snowbot_hardware/snowbot_hardware/pdo_reader_trace.py'
