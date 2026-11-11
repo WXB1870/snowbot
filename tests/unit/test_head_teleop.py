@@ -87,7 +87,7 @@ class HeadTests(unittest.TestCase):
         s=S(lease_active=False,state='IDLE',reference=S(name=[]),
             joints=S(name=[],velocity=[]),feedback_stamp=stamp)
         n.reading=lambda:(s,{})
-        n.position_ops=S(modes=lambda **kw:('closed','closed'),stopped=lambda:True)
+        n.position_ops=S(modes=lambda **kw:('closed','closed'),stopped=lambda readings=None:True)
         n.control=S(phase='standby');n.profile=self.profile;n.names=[]
         n.handoff_complete=False;n.stop_request=None;n.base=None;n.now=lambda:10.
         n.head=S(writable=True,stopped=Mock(return_value=False))

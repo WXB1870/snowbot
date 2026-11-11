@@ -860,7 +860,7 @@ class PicoNode(RuntimeNode):
                     raise RuntimeError('PREPARE_STATE_CHANGED')
             elif getattr(self,'primitive_library',None) and intent.operation=='prepare':
                 travel=max(abs(end[i]-start[n]) for i,n in enumerate(self.names) if n.startswith('body_joint_'))
-                duration=max(duration,1.875*travel/.025,(5.774*travel/.12)**.5)
+                duration=max(duration,1.875*travel/.05,(5.774*travel/.12)**.5)
             before=State.rest(tuple(start[n] for n in self.names));after=State.rest(tuple(end))
             curve=None if replay is not None else Curve.between(0.,duration,before,after)
             if replay is None and not curve.valid(self.profile,self.names):raise RuntimeError('PICO_MOTION_LIMITS')
