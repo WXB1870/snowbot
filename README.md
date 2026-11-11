@@ -11,7 +11,7 @@ Snowbot 是基于 [Bindu](https://github.com/WXB1870/bindu) 的扫雪机器人�
 ```bash
 git clone https://github.com/WXB1870/snowbot.git
 cd snowbot
-python3 -m tools.deployment.deploy prepare
+python3 -m tools.deployment.deploy prepare --with-impedance
 ```
 
 `prepare` 按依赖锁获取 Bindu、生成底层源码并构建两仓软件；后续增量更新使用：
@@ -20,7 +20,7 @@ python3 -m tools.deployment.deploy prepare
 python3 -m tools.deployment.deploy build
 ```
 
-需要阻抗后端时，首次准备加 `--with-impedance`；Orin 使用 `prepare --with-impedance --machine orin`。机器选择会被保存，后续构建复用。x86 与 Orin 的环境及验证结果分别核对。
+上面的准备命令编入阻抗后端，与下文 `base` 的默认启动模式配套；仅位置控制可省略 `--with-impedance`，并以 `base --no-impedance` 启动。Orin 使用 `prepare --with-impedance --machine orin`。机器选择会被保存，后续构建复用。x86 与 Orin 的环境及验证结果分别核对。
 
 默认部署产物在 `artifacts/robot/`，现场上层配置为 `upper/site.json`，底层参数为 `vendor-position.yaml`，配对版本与配置见 `deployment-manifest.json`。准备、构建与设备启动分开。
 
@@ -64,7 +64,7 @@ python3 -m tools.deployment.deploy build
 
 | 位置 | 职责 |
 |---|---|
-| [snowbot_bringup](src/snowbot_bringup/) | launch、配置及运行入口；`runtime` 管启动，`visualization` 管显示与诊断，`simulation` 管仿真，`share/web` 放浏览器页面 |
+| [snowbot_bringup](src/snowbot_bringup/) | launch、配置及运行入口；`runtime` 管启动，`visualization` 管显示与诊断，`simulation` 管仿真，`web/` 放浏览器页面 |
 | [snowbot_teleop](src/snowbot_teleop/) | PICO 操作流程、协调节点与 `replay` 预设规划／回放 |
 | [snowbot_hardware](src/snowbot_hardware/) | 设备协议、位置会话和反馈适配 |
 | [snowbot_description](src/snowbot_description/) | URDF、CAD、显示／控制模型和雪铲握点；资源来源见 [SNOWBOT_ASSETS_NOTICE](src/snowbot_description/SNOWBOT_ASSETS_NOTICE) |
